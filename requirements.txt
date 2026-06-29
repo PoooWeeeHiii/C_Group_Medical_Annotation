@@ -10,6 +10,8 @@ pydicom
 SimpleITK
 opencv-python
 pillow
+highdicom
+pynrrd
 
 # AI baseline
 torch

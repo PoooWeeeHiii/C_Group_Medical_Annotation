@@ -4,10 +4,46 @@
     {
       "case_id": "Case0001",
       "image_id": "Image0001",
-      "image_path": "dataset/images/Case0001/Case0001_Image0001.nii.gz",
-      "label_path": "dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_lung_nodule.nii.gz",
+      "mask_id": "Mask0001",
+      "patient_id": "LUNG1-001",
+      "image_path": "dataset/images/Case0001/Case0001_Image0001_lung_nodule.png",
+      "label_path": "dataset/labels/Case0001/v2_ai/Case0001_Image0001_Mask0001_v2_ai_lung_nodule.png",
+      "version": "v2_ai",
+      "label": "lung_nodule",
+      "slice_index": 59
+    },
+    {
+      "case_id": "Case0002",
+      "image_id": "Image0002",
+      "mask_id": "Mask0001",
+      "patient_id": "LUNG1-002",
+      "image_path": "dataset/images/Case0002/Case0002_Image0002_lung_nodule.png",
+      "label_path": "dataset/labels/Case0002/v2_ai/Case0002_Image0002_Mask0001_v2_ai_lung_nodule.png",
+      "version": "v2_ai",
+      "label": "lung_nodule",
+      "slice_index": 86
+    },
+    {
+      "case_id": "Case0003",
+      "image_id": "Image0003",
+      "mask_id": "Mask0001",
+      "patient_id": "LUNG1-003",
+      "image_path": "dataset/images/Case0003/Case0003_Image0003_lung_nodule.png",
+      "label_path": "dataset/labels/Case0003/v2_ai/Case0003_Image0003_Mask0001_v2_ai_lung_nodule.png",
+      "version": "v2_ai",
+      "label": "lung_nodule",
+      "slice_index": 34
+    },
+    {
+      "case_id": "Case0004",
+      "image_id": "Image0001",
+      "mask_id": "Mask0001",
+      "patient_id": "patient1",
+      "image_path": "dataset/images/Case0004/Case0004_Image0001_lung_nodule.png",
+      "label_path": "dataset/labels/Case0004/v1_manual/Case0004_Image0001_Mask0001_v1_manual_lung_nodule.png",
       "version": "v1_manual",
-      "label": "lung_nodule"
+      "label": "lung_nodule",
+      "slice_index": 327
     }
   ]
 }

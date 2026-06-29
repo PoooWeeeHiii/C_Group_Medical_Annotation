@@ -32,6 +32,9 @@ EPOCHS = 50
 BATCH_SIZE = 8
 LEARNING_RATE = 1e-4
 IMAGE_SIZE = (256, 256)
+CT_HU_MIN = -1000
+CT_HU_MAX = 400
+DEFAULT_LABEL = "lung_nodule"
 
 # Paths (read ONLY from dataset/)
 RAW_DIR = DATASET_ROOT / "raw"

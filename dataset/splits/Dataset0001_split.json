@@ -7,7 +7,8 @@
   "mapping": {
     "Case0001": "LUNG1-001",
     "Case0002": "LUNG1-002",
-    "Case0003": "LUNG1-003"
+    "Case0003": "LUNG1-003",
+    "Case0004": "patient1"
   },
   "label": "lung_nodule",
   "default_export_version": "final"

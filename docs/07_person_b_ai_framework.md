@@ -11,7 +11,9 @@
 ```text
 ai/
   config.py          # 命名、路径、超参、版本 tag
-  preprocess.py      # load/normalize/resize/crop/save 骨架
+  preprocess.py      # Day2: load/normalize/resize/crop/save 已实现
+  augment.py         # Day2: 训练时 flip/rotate/brightness
+  pipeline.py        # Day2: Lung 样例转换 + raw 上传后处理
   train.py           # 训练入口骨架
   predict.py         # 推理响应 schema（对接 /api/ai/predict）
   loss.py            # Dice + BCE 接口
@@ -68,11 +70,12 @@ python ai/predict.py
 python -c "from ai.metrics import dice_score; import numpy as np; print(dice_score(np.ones((4,4)), np.ones((4,4))))"
 ```
 
-## Day2 计划（Person B）
+## Day2 已完成（详见 [08_person_b_day2.md](08_person_b_day2.md)）
 
-1. 实现 `preprocess.py`：DICOM SEG → `dataset/labels/.../v2_ai/...`
-2. 从 `example_data/` 导出第一对 PNG/NIfTI 到 `dataset/images`、`dataset/labels`
-3. 实现 `lung_dataset.py` 读取 `Dataset0001_split.json`
+1. `preprocess.py` / `augment.py` / `pipeline.py` 已实现
+2. `scripts/convert_lung_examples.py` 将 Lung 样例导出到 `dataset/images` + `dataset/labels`
+3. `Dataset0001_manifest.json` 已更新 4 个 case 路径
+4. Day3：`lung_dataset.py` 读取 manifest + split
 
 ## 17:00 与 Person A 确认项
 
