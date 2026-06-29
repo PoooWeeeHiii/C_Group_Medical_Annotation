@@ -62,7 +62,7 @@ knowledge/
 
 # Logs and generated files
 *.log
+database/dev_*.json
 outputs/
 tmp/
 temp/
-
