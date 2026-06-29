@@ -83,7 +83,32 @@ feature-a   # Person A 开发平台、后端、前端、数据库、接口
 feature-b   # Person B 开发 AI、训练、推理、评价指标
 ```
 
-## 5. 每日开发流程
+## 5. 首次上传到 GitHub
+
+先在 GitHub 网页创建一个空仓库，推荐仓库名：
+
+```text
+C_Group_Medical_Annotation
+```
+
+不要勾选自动生成 README、`.gitignore` 或 License，因为本地仓库已经有这些文件。
+
+创建后，把 GitHub 给出的 SSH 或 HTTPS 地址添加为远程仓库：
+
+```bash
+git remote add origin git@github.com:<your_name>/C_Group_Medical_Annotation.git
+```
+
+首次推送四个分支：
+
+```bash
+git push -u origin main
+git push -u origin dev
+git push -u origin feature-a
+git push -u origin feature-b
+```
+
+## 6. 每日开发流程
 
 Person A：
 
@@ -121,11 +146,10 @@ dev 测试通过 -> main
 
 建议通过 Pull Request 合并，不要直接把未测试代码推到 `main`。
 
-## 6. 合并原则
+## 7. 合并原则
 
 - `main` 保持稳定，不直接开发。
 - `dev` 是当天集成分支。
 - `feature-a` 和 `feature-b` 每天从 `dev` 同步。
 - API、Dataset、Mask 命名一旦改动，必须同时更新文档。
 - 大文件不要强行提交；如误提交，应立即从 Git 历史中清理。
-
