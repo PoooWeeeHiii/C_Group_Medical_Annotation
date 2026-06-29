@@ -1,0 +1,68 @@
+# System files
+.DS_Store
+Thumbs.db
+
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# IDE and local settings
+.idea/
+.vscode/
+*.swp
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+
+# Large or sensitive medical image data
+example_data/
+*.dcm
+*.nii
+*.nii.gz
+*.nrrd
+*.mha
+*.mhd
+*.raw
+*.zip
+
+# Dataset contents: keep only directory placeholders and small manifests
+dataset/raw/**
+dataset/images/**
+dataset/labels/**
+dataset/splits/**
+!dataset/raw/.gitkeep
+!dataset/images/.gitkeep
+!dataset/labels/.gitkeep
+!dataset/splits/.gitkeep
+
+# Model weights and training outputs
+models/**
+!models/README.md
+!models/.gitkeep
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.h5
+runs/
+checkpoints/
+wandb/
+
+# Large reference materials
+knowledge/
+*.pdf
+
+# Logs and generated files
+*.log
+outputs/
+tmp/
+temp/
+

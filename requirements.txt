@@ -1,0 +1,23 @@
+# Backend
+fastapi
+uvicorn[standard]
+pydantic
+sqlalchemy
+
+# Medical image processing
+numpy
+pydicom
+SimpleITK
+opencv-python
+pillow
+
+# AI baseline
+torch
+torchvision
+monai
+scikit-learn
+
+# Utilities
+python-multipart
+pytest
+
