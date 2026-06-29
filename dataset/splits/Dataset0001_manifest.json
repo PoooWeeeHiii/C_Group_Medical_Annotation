@@ -1,0 +1,13 @@
+{
+  "dataset_id": "Dataset0001",
+  "entries": [
+    {
+      "case_id": "Case0001",
+      "image_id": "Image0001",
+      "image_path": "dataset/images/Case0001/Case0001_Image0001.nii.gz",
+      "label_path": "dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_lung_nodule.nii.gz",
+      "version": "v1_manual",
+      "label": "lung_nodule"
+    }
+  ]
+}

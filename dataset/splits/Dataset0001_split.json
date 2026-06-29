@@ -1,0 +1,14 @@
+{
+  "dataset_id": "Dataset0001",
+  "description": "Lung nodule segmentation — example split by case (not slice)",
+  "train": ["Case0001"],
+  "val": ["Case0002"],
+  "test": ["Case0003"],
+  "mapping": {
+    "Case0001": "LUNG1-001",
+    "Case0002": "LUNG1-002",
+    "Case0003": "LUNG1-003"
+  },
+  "label": "lung_nodule",
+  "default_export_version": "final"
+}

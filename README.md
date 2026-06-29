@@ -4,7 +4,7 @@ C 组医学影像标注与数据管理平台。
 
 ## 当前 Day1 标准
 
-第一份开发契约见：
+Person A 文档：
 
 - [docs/01_data_flow_file_naming_standard.md](docs/01_data_flow_file_naming_standard.md)
 - [docs/02_example_data_analysis.md](docs/02_example_data_analysis.md)
@@ -12,6 +12,10 @@ C 组医学影像标注与数据管理平台。
 - [docs/04_api_design.md](docs/04_api_design.md)
 - [docs/05_platform_prototype.md](docs/05_platform_prototype.md)
 - [docs/06_github_workflow.md](docs/06_github_workflow.md)
+
+Person B 文档：
+
+- [docs/07_person_b_ai_framework.md](docs/07_person_b_ai_framework.md)
 
 这些文档已经明确：
 

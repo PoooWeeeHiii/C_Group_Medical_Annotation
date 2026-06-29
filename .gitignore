@@ -42,6 +42,7 @@ dataset/splits/**
 !dataset/images/.gitkeep
 !dataset/labels/.gitkeep
 !dataset/splits/.gitkeep
+!dataset/splits/*.json
 
 # Model weights and training outputs
 models/**
@@ -52,8 +53,9 @@ models/**
 *.ckpt
 *.onnx
 *.h5
-runs/
 checkpoints/
+ai/checkpoints/
+ai/runs/
 wandb/
 
 # Large reference materials
