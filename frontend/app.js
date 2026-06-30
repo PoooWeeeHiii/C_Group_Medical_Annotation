@@ -552,7 +552,7 @@ async function startVolumeViewer(image) {
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/volume_viewer.js?v=medical-presets-20260630`);
+    const module = await import(`/frontend/volume_viewer.js?v=protocol-engine-20260630`);
     await module.renderVolume3D({
       container,
       imageId: image.image_id,

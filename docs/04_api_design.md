@@ -246,6 +246,7 @@ image/png
 - `hu_range` 表示 `uint8` 值映射回 CT HU 的低高范围，前端体渲染按 HU 做医学 Transfer Function。
 - 这个接口用于真正体渲染，不是单张切片预览。
 - 后端按轴独立下采样，避免 Z 方向层数被过度压缩；前端 WebGL2 使用 3D texture ray casting、HU 分段 transfer function、gradient opacity、Phong 光照、阈值过滤和线性插值改善软组织层次和边界清晰度。
+- 前端体渲染采用 Rendering Protocol Engine：软组织、骨窗、肺窗分别使用独立的 transfer function、gradient opacity、采样步数、Early Ray Termination 和光照参数。骨窗保留 150~400 HU 松质骨并延迟终止；肺窗低透明显示肺实质，用梯度增强肺血管、支气管和胸膜边界。
 
 说明：
 
