@@ -495,6 +495,23 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   background: #02070d;
   border-radius: 6px;
 }
+.mip-placeholder {
+  margin-top: 14px;
+  min-height: 86px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: rgba(2, 12, 24, 0.52);
+  padding: 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.mip-placeholder .ghost-button {
+  flex: 0 0 auto;
+}
 .tool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
 .tool-button {
   min-height: 46px;
@@ -568,6 +585,7 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   .viewer-toolbar { flex-direction: column; }
   .tool-grid { grid-template-columns: 1fr; }
   .orthogonal-grid { grid-template-columns: 1fr; }
+  .mip-placeholder { align-items: stretch; flex-direction: column; }
   .volume-stage { width: 300px; height: 300px; }
   .volume-cube { width: 230px; height: 230px; }
 }

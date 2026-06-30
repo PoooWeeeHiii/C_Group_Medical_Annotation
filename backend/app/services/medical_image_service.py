@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import io
+import threading
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,9 @@ WINDOWS = {
 }
 
 AXES = {"axial", "coronal", "sagittal"}
+_VOLUME_CACHE: dict[tuple[str, int, int], VolumeData] = {}
+_VOLUME_CACHE_LOCK = threading.RLock()
+_MAX_CACHED_VOLUMES = 4
 
 
 def _image_record(image_id: str) -> dict:
@@ -198,11 +202,9 @@ def _load_with_simpleitk(path: Path) -> VolumeData:
     return VolumeData(array=array, spacing=spacing, origin=origin, source="SimpleITK")
 
 
-def load_volume(image_id: str) -> tuple[dict, VolumeData]:
-    image = _image_record(image_id)
-    path = _resolve_path(str(image["path"]))
+def _load_volume_from_path(path: Path) -> VolumeData:
     try:
-        return image, _load_with_simpleitk(path)
+        return _load_with_simpleitk(path)
     except ModuleNotFoundError:
         pass
     except Exception:
@@ -212,9 +214,9 @@ def load_volume(image_id: str) -> tuple[dict, VolumeData]:
 
     try:
         if path.suffix.lower() == ".nrrd":
-            return image, _load_nrrd_path(path)
+            return _load_nrrd_path(path)
         if path.suffix.lower() == ".zip":
-            return image, _load_zip_nrrd(path)
+            return _load_zip_nrrd(path)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Cannot read medical volume: {exc}") from exc
 
@@ -222,6 +224,27 @@ def load_volume(image_id: str) -> tuple[dict, VolumeData]:
         status_code=422,
         detail="Cannot read this image without SimpleITK. Please install requirements.txt.",
     )
+
+
+def _cached_volume(path: Path) -> VolumeData:
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    with _VOLUME_CACHE_LOCK:
+        cached = _VOLUME_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+        volume = _load_volume_from_path(path)
+        _VOLUME_CACHE[key] = volume
+        while len(_VOLUME_CACHE) > _MAX_CACHED_VOLUMES:
+            _VOLUME_CACHE.pop(next(iter(_VOLUME_CACHE)))
+        return volume
+
+
+def load_volume(image_id: str) -> tuple[dict, VolumeData]:
+    image = _image_record(image_id)
+    path = _resolve_path(str(image["path"]))
+    return image, _cached_volume(path)
 
 
 def get_volume_metadata(image_id: str) -> dict:

@@ -11,6 +11,7 @@ const state = {
   volumeViewMode: "2d",
   volumeRotationX: -18,
   volumeRotationY: 34,
+  showMip: false,
 };
 
 const titles = {
@@ -307,6 +308,20 @@ function render3DViewer(item, image, volume) {
   const coronal = Math.floor(height / 2);
   const sagittal = Math.floor(width / 2);
   const canRender = Boolean(image && volume);
+  const mipGrid = state.showMip
+    ? `
+      <div class="orthogonal-grid">
+        <div><span>轴位 MIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/axial.png?window=${state.activeWindow}" alt="轴位 MIP" />` : ""}</div>
+        <div><span>冠状位 MIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/coronal.png?window=${state.activeWindow}" alt="冠状位 MIP" />` : ""}</div>
+        <div><span>矢状位 MIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/sagittal.png?window=${state.activeWindow}" alt="矢状位 MIP" />` : ""}</div>
+      </div>
+    `
+    : `
+      <div class="mip-placeholder">
+        <span>MIP 投影计算会扫描完整 3D 体数据，已改为按需加载以避免卡顿。</span>
+        <button class="ghost-button" data-load-mip>加载 MIP 投影</button>
+      </div>
+    `;
   return `
     <section class="viewer">
       <div class="viewer-toolbar"><span>${item ? item.case_id : "暂无病例"} | 3D体视图</span><span>${canRender ? `${width} × ${height} × ${depth}` : "等待体数据"}</span></div>
@@ -326,11 +341,7 @@ function render3DViewer(item, image, volume) {
       </div>
       <div class="slider-row"><span>俯仰</span><input id="rotateXSlider" type="range" min="-70" max="30" value="${state.volumeRotationX}" /><strong id="rotateXValue">${state.volumeRotationX}°</strong></div>
       <div class="slider-row"><span>旋转</span><input id="rotateYSlider" type="range" min="-80" max="80" value="${state.volumeRotationY}" /><strong id="rotateYValue">${state.volumeRotationY}°</strong></div>
-      <div class="orthogonal-grid">
-        <div><span>轴位 MIP</span>${canRender ? `<img src="/api/image/${image.image_id}/projection/axial.png?window=${state.activeWindow}" alt="轴位 MIP" />` : ""}</div>
-        <div><span>冠状位 MIP</span>${canRender ? `<img src="/api/image/${image.image_id}/projection/coronal.png?window=${state.activeWindow}" alt="冠状位 MIP" />` : ""}</div>
-        <div><span>矢状位 MIP</span>${canRender ? `<img src="/api/image/${image.image_id}/projection/sagittal.png?window=${state.activeWindow}" alt="矢状位 MIP" />` : ""}</div>
-      </div>
+      ${mipGrid}
       <div class="image-source-line">3D来源：${canRender ? `/api/image/${image.image_id}/slice/{axis}/{index}.png + /projection/{axis}.png` : "等待加载"}</div>
     </section>
   `;
@@ -383,7 +394,15 @@ async function hydrateAnnotation() {
     const image = activeImage();
     if (!image) return;
     const meta = await loadVolumeMeta(image.image_id);
-    updateSliceViewer(image, meta);
+    if (state.volumeViewMode === "2d") {
+      updateSliceViewer(image, meta);
+      return;
+    }
+    if (!$("#volumeCube")) {
+      render();
+      return;
+    }
+    updateVolumeRotation();
   } catch (error) {
     const image = activeImage();
     const message = error.message || "图像读取失败";
@@ -495,9 +514,17 @@ function render() {
   document.querySelectorAll("[data-view-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       state.volumeViewMode = button.dataset.viewMode;
+      if (state.volumeViewMode === "3d") state.showMip = false;
       render();
     });
   });
+  const loadMipButton = $("[data-load-mip]");
+  if (loadMipButton) {
+    loadMipButton.addEventListener("click", () => {
+      state.showMip = true;
+      render();
+    });
+  }
   document.querySelectorAll("[data-open-case]").forEach((button) => {
     button.addEventListener("click", () => {
       state.activeCaseId = button.dataset.openCase;
