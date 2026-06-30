@@ -308,6 +308,7 @@ function renderAnnotation() {
         <div class="slider-row"><span>切片</span><input id="sliceSlider" type="range" min="0" max="${maxSlice}" value="${activeSlice}" /><strong id="sliceValue">${activeSlice + 1}</strong></div>
         <div class="slider-row"><span>透明度</span><input type="range" min="0" max="100" value="54" /><strong>54%</strong></div>
         <div class="slider-row"><span>窗位</span><select id="windowSelect"><option value="auto">自动</option><option value="lung">肺窗</option><option value="soft">软组织</option><option value="bone">骨窗</option></select><strong id="windowValue">自动</strong></div>
+        <div class="image-source-line" id="sliceSource">切片接口：等待加载</div>
       </section>
       <aside class="tool-panel">
         <h2>标注工具</h2>
@@ -352,7 +353,7 @@ function updateSliceViewer(image, meta) {
   }
 
   const sliceNumber = state.activeSlice + 1;
-  imageElement.src = `/api/image/${image.image_id}/slice/${state.activeSlice}.png?window=${state.activeWindow}&t=${Date.now()}`;
+  const sliceUrl = `/api/image/${image.image_id}/slice/${state.activeSlice}.png?window=${state.activeWindow}&t=${Date.now()}`;
   imageElement.onload = () => {
     imageElement.classList.remove("hidden");
     $("#sliceError").classList.add("hidden");
@@ -360,8 +361,10 @@ function updateSliceViewer(image, meta) {
   imageElement.onerror = () => {
     displaySliceError("切片图像加载失败，请确认当前病例是真实 DICOM / NRRD / NIfTI 体数据。");
   };
+  imageElement.src = sliceUrl;
   $("#sliceValue").textContent = String(sliceNumber);
   $("#sliceCoordinate").textContent = `z: ${sliceNumber} / ${meta.slice_count}`;
+  $("#sliceSource").textContent = `切片接口：/api/image/${image.image_id}/slice/${state.activeSlice}.png`;
   $("#viewerInfo").textContent = `${image.image_id} | ${meta.width} × ${meta.height} × ${meta.slice_count}`;
   $("#volumeSize").textContent = `${meta.width} × ${meta.height} × ${meta.slice_count}`;
   $("#volumeSource").textContent = meta.source;
@@ -443,12 +446,14 @@ function render() {
   });
   const sliceSlider = $("#sliceSlider");
   if (sliceSlider) {
-    sliceSlider.addEventListener("input", () => {
+    const refreshSlice = () => {
       state.activeSlice = Number(sliceSlider.value);
       const image = activeImage();
       const meta = image ? state.volumeMeta[image.image_id] : null;
       if (image && meta) updateSliceViewer(image, meta);
-    });
+    };
+    sliceSlider.addEventListener("input", refreshSlice);
+    sliceSlider.addEventListener("change", refreshSlice);
   }
   const windowSelect = $("#windowSelect");
   if (windowSelect) {

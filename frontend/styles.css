@@ -372,6 +372,13 @@ td { color: #dbeaf4; font-size: 14px; }
 .slider-row { display: grid; grid-template-columns: 82px 1fr 58px; gap: 10px; align-items: center; margin-top: 14px; color: var(--muted); font-size: 13px; }
 input[type="range"] { width: 100%; accent-color: var(--blue); }
 .slider-row select { min-height: 36px; color: var(--text); background: rgba(5, 14, 26, 0.72); border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; }
+.image-source-line {
+  margin-top: 10px;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
 .tool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
 .tool-button {
   min-height: 46px;
