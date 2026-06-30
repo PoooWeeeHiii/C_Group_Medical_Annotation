@@ -546,18 +546,18 @@ function render() {
 async function startVtkVolumeViewer(image) {
   const container = $("#vtkVolumeContainer");
   if (!container || !image) return;
-  const loadingKey = `${image.image_id}:${state.activeWindow}`;
+  const loadingKey = `${image.image_id}:volume-hu-v2`;
   if (state.vtkLoadingKey === loadingKey && container.dataset.ready === "true") return;
   state.vtkLoadingKey = loadingKey;
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/vtk_viewer.js?v=webgl-volume-sharp-20260630`);
+    const module = await import(`/frontend/vtk_viewer.js?v=webgl-hu-volume-20260630`);
     await module.renderVtkVolume({
       container,
       imageId: image.image_id,
-      windowName: state.activeWindow === "auto" ? "lung" : state.activeWindow,
-      maxDim: 144,
+      windowName: "volume",
+      maxDim: 176,
     });
     container.dataset.ready = "true";
   } catch (error) {

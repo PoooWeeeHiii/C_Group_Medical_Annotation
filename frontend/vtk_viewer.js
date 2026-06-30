@@ -75,7 +75,7 @@ function configureVolumeProperty(actor, vtkColorTransferFunction, vtkPiecewiseFu
   property.setSpecularPower(18);
 }
 
-export async function renderVtkVolume({ container, imageId, windowName = "lung", maxDim = 144 }) {
+export async function renderVtkVolume({ container, imageId, windowName = "volume", maxDim = 176 }) {
   if (!container || !imageId) return;
   clearContainer(container);
 
@@ -230,6 +230,8 @@ function renderWithWebGL({ container, volumeData, values }) {
     uniform float uOpacityScale;
     uniform float uBrightness;
     uniform float uThreshold;
+    uniform float uHuLow;
+    uniform float uHuHigh;
     uniform vec3 uVoxelStep;
     uniform int uRenderMode;
 
@@ -264,40 +266,89 @@ function renderWithWebGL({ container, volumeData, values }) {
       return vec3(gx, gy, gz);
     }
 
-    vec3 transferColor(float value, float edge) {
+    float huFromValue(float value) {
+      return mix(uHuLow, uHuHigh, value);
+    }
+
+    float band(float hu, float low, float high, float feather) {
+      return smoothstep(low, low + feather, hu) * (1.0 - smoothstep(high - feather, high, hu));
+    }
+
+    vec3 transferColor(float hu, float edge) {
       if (uRenderMode == 1) {
-        vec3 marrow = vec3(0.72, 0.66, 0.58);
-        vec3 cortical = vec3(1.0, 0.92, 0.76);
-        return mix(marrow, cortical, smoothstep(0.58, 0.98, value));
+        vec3 cancellous = vec3(0.72, 0.63, 0.50);
+        vec3 cortical = vec3(1.0, 0.94, 0.78);
+        vec3 bone = mix(cancellous, cortical, smoothstep(220.0, 1200.0, hu));
+        return mix(bone, vec3(1.0), edge * 0.18);
       }
       if (uRenderMode == 2) {
-        vec3 tissue = vec3(0.52, 0.66, 0.78);
-        vec3 dense = vec3(0.96, 0.88, 0.74);
-        return mix(tissue, dense, smoothstep(0.35, 0.90, value));
+        vec3 lung = vec3(0.26, 0.45, 0.58);
+        vec3 vessel = vec3(0.83, 0.90, 0.90);
+        vec3 dense = vec3(1.0, 0.91, 0.74);
+        vec3 c = mix(lung, vessel, smoothstep(-420.0, 180.0, hu));
+        c = mix(c, dense, smoothstep(260.0, 900.0, hu));
+        return mix(c, vec3(1.0), edge * 0.14);
       }
-      vec3 air = vec3(0.015, 0.035, 0.055);
-      vec3 lung = vec3(0.30, 0.48, 0.58);
-      vec3 vessel = vec3(0.78, 0.86, 0.88);
-      vec3 dense = vec3(1.0, 0.92, 0.78);
-      vec3 c = mix(air, lung, smoothstep(0.12, 0.34, value));
-      c = mix(c, vessel, smoothstep(0.34, 0.68, value));
-      c = mix(c, dense, smoothstep(0.68, 1.0, value));
+      vec3 fat = vec3(0.72, 0.58, 0.38);
+      vec3 muscle = vec3(0.73, 0.55, 0.52);
+      vec3 vessel = vec3(0.93, 0.86, 0.76);
+      vec3 bone = vec3(1.0, 0.94, 0.78);
+      vec3 c = mix(fat, muscle, smoothstep(-70.0, 85.0, hu));
+      c = mix(c, vessel, smoothstep(90.0, 260.0, hu));
+      c = mix(c, bone, smoothstep(320.0, 950.0, hu));
       return mix(c, vec3(1.0), edge * 0.16);
     }
 
-    float transferOpacity(float value, float edge) {
-      if (value < uThreshold) {
-        return 0.0;
-      }
+    float transferOpacity(float hu, float edge) {
       if (uRenderMode == 1) {
-        return (smoothstep(0.58, 0.94, value) * 0.075 + edge * 0.024) * uOpacityScale;
+        float floorHu = mix(140.0, 620.0, uThreshold);
+        if (hu < floorHu) {
+          return 0.0;
+        }
+        float cortical = smoothstep(220.0, 1050.0, hu) * 0.070;
+        float denseEdge = edge * smoothstep(160.0, 700.0, hu) * 0.030;
+        return (cortical + denseEdge) * uOpacityScale;
       }
       if (uRenderMode == 2) {
-        return (smoothstep(0.34, 0.84, value) * 0.042 + edge * 0.018) * uOpacityScale;
+        if (hu < -980.0) {
+          return 0.0;
+        }
+        float lung = band(hu, -900.0, -450.0, 100.0) * 0.004;
+        float airwayEdge = edge * band(hu, -950.0, -280.0, 140.0) * 0.018;
+        float vessel = smoothstep(-120.0, 220.0, hu) * (1.0 - smoothstep(420.0, 900.0, hu)) * 0.026;
+        float bone = smoothstep(260.0, 1050.0, hu) * 0.030;
+        return (lung + airwayEdge + vessel + bone) * uOpacityScale;
       }
-      float vessel = smoothstep(0.46, 0.86, value) * 0.038;
-      float parenchyma = smoothstep(0.24, 0.42, value) * (1.0 - smoothstep(0.52, 0.72, value)) * 0.006;
-      return (vessel + parenchyma + edge * 0.018) * uOpacityScale;
+
+      float floorHu = mix(-260.0, 90.0, uThreshold);
+      if (hu < floorHu) {
+        return 0.0;
+      }
+      float fat = band(hu, -180.0, -25.0, 45.0) * 0.010;
+      float muscle = band(hu, -20.0, 115.0, 42.0) * 0.030;
+      float vessel = band(hu, 90.0, 330.0, 70.0) * 0.050;
+      float bone = smoothstep(300.0, 1100.0, hu) * 0.032;
+      float gradientBoost = mix(0.45, 1.85, edge);
+      return (fat + muscle + vessel + bone + edge * 0.010) * gradientBoost * uOpacityScale;
+    }
+
+    vec3 applyLighting(vec3 color, vec3 gradient, vec3 rayDir, float edge) {
+      float gradientLength = length(gradient);
+      if (gradientLength < 0.0001) {
+        return color * 0.82;
+      }
+
+      vec3 normal = normalize(gradient);
+      if (dot(normal, -rayDir) < 0.0) {
+        normal = -normal;
+      }
+      vec3 lightDir = normalize(vec3(-0.45, 0.60, -0.66));
+      vec3 viewDir = normalize(-rayDir);
+      float diffuse = max(dot(normal, lightDir), 0.0);
+      float rim = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.2);
+      float specular = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 28.0) * edge;
+      vec3 lit = color * (0.30 + 0.64 * diffuse + 0.18 * rim);
+      return lit + vec3(1.0, 0.94, 0.82) * specular * 0.22;
     }
 
     void main() {
@@ -321,15 +372,17 @@ function renderWithWebGL({ container, volumeData, values }) {
       vec3 color = vec3(0.0);
       float alpha = 0.0;
 
-      for (int i = 0; i < 192; i++) {
+      for (int i = 0; i < 256; i++) {
         if (float(i) >= uSteps || alpha > 0.96) {
           break;
         }
         vec3 p = rayOrigin + rayDir * (nearHit + (float(i) + 0.5) * dt);
         float value = texture(uVolume, p).r;
-        float edge = length(gradientAt(p)) * 2.6;
-        float opacity = clamp(transferOpacity(value, edge), 0.0, 0.16);
-        vec3 sampleColor = transferColor(value, edge);
+        float hu = huFromValue(value);
+        vec3 gradient = gradientAt(p);
+        float edge = smoothstep(0.018, 0.145, length(gradient) * 2.8);
+        float opacity = clamp(transferOpacity(hu, edge), 0.0, 0.18);
+        vec3 sampleColor = applyLighting(transferColor(hu, edge), gradient, rayDir, edge);
         color += (1.0 - alpha) * opacity * sampleColor;
         alpha += (1.0 - alpha) * opacity;
       }
@@ -351,6 +404,8 @@ function renderWithWebGL({ container, volumeData, values }) {
     opacityScale: gl.getUniformLocation(program, "uOpacityScale"),
     brightness: gl.getUniformLocation(program, "uBrightness"),
     threshold: gl.getUniformLocation(program, "uThreshold"),
+    huLow: gl.getUniformLocation(program, "uHuLow"),
+    huHigh: gl.getUniformLocation(program, "uHuHigh"),
     voxelStep: gl.getUniformLocation(program, "uVoxelStep"),
     renderMode: gl.getUniformLocation(program, "uRenderMode"),
   };
@@ -387,10 +442,10 @@ function renderWithWebGL({ container, volumeData, values }) {
   const viewerState = {
     yaw: 0.65,
     pitch: -0.28,
-    opacityScale: 0.92,
-    brightness: 1.10,
-    threshold: 0.32,
-    steps: 192,
+    opacityScale: 1.08,
+    brightness: 1.06,
+    threshold: 0.15,
+    steps: 224,
     renderMode: 0,
     dragging: false,
     lastX: 0,
@@ -402,22 +457,22 @@ function renderWithWebGL({ container, volumeData, values }) {
   controls.innerHTML = `
     <label>渲染模式
       <select data-volume-mode>
-        <option value="0">肺部增强</option>
+        <option value="0">软组织综合</option>
         <option value="1">骨窗高密度</option>
-        <option value="2">软组织</option>
+        <option value="2">肺窗边界</option>
       </select>
     </label>
     <label>透明度
-      <input data-volume-opacity type="range" min="20" max="180" value="92" />
+      <input data-volume-opacity type="range" min="20" max="180" value="108" />
     </label>
     <label>亮度
-      <input data-volume-brightness type="range" min="70" max="170" value="110" />
+      <input data-volume-brightness type="range" min="70" max="170" value="106" />
     </label>
-    <label>阈值
-      <input data-volume-threshold type="range" min="5" max="75" value="32" />
+    <label>组织阈值
+      <input data-volume-threshold type="range" min="0" max="100" value="15" />
     </label>
     <label>质量
-      <input data-volume-steps type="range" min="96" max="224" value="192" />
+      <input data-volume-steps type="range" min="128" max="256" value="224" />
     </label>
   `;
   container.appendChild(controls);
@@ -434,6 +489,7 @@ function renderWithWebGL({ container, volumeData, values }) {
 
   function draw() {
     resize();
+    const huRange = Array.isArray(volumeData.hu_range) ? volumeData.hu_range : [-1000, 1800];
     gl.useProgram(program);
     gl.clearColor(0.01, 0.025, 0.045, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -447,6 +503,8 @@ function renderWithWebGL({ container, volumeData, values }) {
     gl.uniform1f(uniforms.opacityScale, viewerState.opacityScale);
     gl.uniform1f(uniforms.brightness, viewerState.brightness);
     gl.uniform1f(uniforms.threshold, viewerState.threshold);
+    gl.uniform1f(uniforms.huLow, Number(huRange[0]));
+    gl.uniform1f(uniforms.huHigh, Number(huRange[1]));
     gl.uniform3f(
       uniforms.voxelStep,
       1 / Math.max(volumeData.dimensions[0], 1),

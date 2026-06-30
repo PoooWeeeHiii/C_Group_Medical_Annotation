@@ -215,8 +215,8 @@ image/png
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `max_dim` | int | 否 | 下采样后最大维度，默认 `144`，后端限制在 `64~192`。 |
-| `window` | string | 否 | `lung`、`soft`、`bone`、`auto`。 |
+| `max_dim` | int | 否 | 下采样后最大维度，默认 `144`，后端限制在 `64~192`。前端 3D 视图默认请求 `176`。 |
+| `window` | string | 否 | `volume`、`lung`、`soft`、`bone`、`auto`。`volume` 使用 `[-1000, 1800] HU`，更适合综合体渲染。 |
 
 响应：
 
@@ -229,8 +229,10 @@ image/png
   "spacing": [4.0, 4.0, 4.0],
   "origin": [0.0, 0.0, 0.0],
   "scalar_type": "uint8",
-  "window": "lung",
-  "downsample_stride": 4,
+  "window": "volume",
+  "hu_range": [-1000.0, 1800.0],
+  "downsample_stride": [1, 3, 3],
+  "value_range": [0, 255],
   "values_base64": "..."
 }
 ```
@@ -239,8 +241,9 @@ image/png
 
 - `dimensions` 顺序为 `[x, y, z]`，直接对应 vtk.js `vtkImageData.setDimensions()`。
 - `values_base64` 是按 `z, y, x` 内存顺序展开的 `uint8` 体素。
+- `hu_range` 表示 `uint8` 值映射回 CT HU 的低高范围，前端体渲染按 HU 做医学 Transfer Function。
 - 这个接口用于真正体渲染，不是单张切片预览。
-- 后端按轴独立下采样，避免 Z 方向层数被过度压缩；前端 WebGL2 使用 3D texture ray casting、gradient opacity、阈值过滤和动态 transfer function 改善边界清晰度。
+- 后端按轴独立下采样，避免 Z 方向层数被过度压缩；前端 WebGL2 使用 3D texture ray casting、HU 分段 transfer function、gradient opacity、Phong 光照、阈值过滤和线性插值改善软组织层次和边界清晰度。
 
 说明：
 

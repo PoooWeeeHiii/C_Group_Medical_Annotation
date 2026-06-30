@@ -53,6 +53,12 @@ WINDOWS = {
     "soft": (40, 400),
     "bone": (500, 2000),
 }
+VOLUME_HU_RANGES = {
+    "volume": (-1000.0, 1800.0),
+    "lung": (-1000.0, 600.0),
+    "soft": (-180.0, 320.0),
+    "bone": (-300.0, 1800.0),
+}
 
 AXES = {"axial", "coronal", "sagittal"}
 _VOLUME_CACHE: dict[tuple[str, int, int], VolumeData] = {}
@@ -284,22 +290,26 @@ def _window_slice(slice_data: np.ndarray, window: str) -> np.ndarray:
     return data.astype(np.uint8)
 
 
-def _window_volume(volume_data: np.ndarray, window: str) -> np.ndarray:
+def _volume_hu_range(volume_data: np.ndarray, window: str) -> tuple[float, float]:
+    if window in VOLUME_HU_RANGES:
+        return VOLUME_HU_RANGES[window]
+
     data = volume_data.astype(np.float32)
-    if window in WINDOWS:
-        level, width = WINDOWS[window]
-        low = level - width / 2
-        high = level + width / 2
-    else:
-        low, high = np.percentile(data, [1, 99])
-        if high <= low:
-            low, high = float(data.min()), float(data.max())
-        if high <= low:
-            high = low + 1
+    low, high = np.percentile(data, [0.5, 99.7])
+    if high <= low:
+        low, high = float(data.min()), float(data.max())
+    if high <= low:
+        high = low + 1.0
+    return float(low), float(high)
+
+
+def _window_volume(volume_data: np.ndarray, window: str) -> tuple[np.ndarray, tuple[float, float]]:
+    data = volume_data.astype(np.float32)
+    low, high = _volume_hu_range(data, window)
 
     data = np.clip(data, low, high)
     data = (data - low) / (high - low) * 255.0
-    return np.ascontiguousarray(data.astype(np.uint8))
+    return np.ascontiguousarray(data.astype(np.uint8)), (float(low), float(high))
 
 
 def _downsample_volume(array: np.ndarray, max_dim: int) -> tuple[np.ndarray, tuple[int, int, int]]:
@@ -372,7 +382,7 @@ def render_projection_png(image_id: str, axis: str = "axial", method: str = "mip
 def get_vtk_volume_data(image_id: str, max_dim: int = 144, window: str = "lung") -> dict:
     image, volume = load_volume(image_id)
     downsampled, strides = _downsample_volume(volume.array, max_dim)
-    values = _window_volume(downsampled, window)
+    values, hu_range = _window_volume(downsampled, window)
     depth, height, width = values.shape[:3]
     sx, sy, sz = volume.spacing
     stride_z, stride_y, stride_x = strides
@@ -387,6 +397,7 @@ def get_vtk_volume_data(image_id: str, max_dim: int = 144, window: str = "lung")
         "origin": volume.origin,
         "scalar_type": "uint8",
         "window": window,
+        "hu_range": [hu_range[0], hu_range[1]],
         "max_dim": max_dim,
         "downsample_stride": [stride_z, stride_y, stride_x],
         "value_range": [int(values.min()), int(values.max())],
