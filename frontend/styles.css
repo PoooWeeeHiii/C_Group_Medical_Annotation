@@ -401,7 +401,7 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   font-size: 12px;
   word-break: break-all;
 }
-.vtk-volume-container {
+.volume-container {
   min-height: 520px;
   height: min(64vh, 680px);
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -412,14 +412,14 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   overflow: hidden;
   position: relative;
 }
-.vtk-volume-container canvas {
+.volume-container canvas {
   display: block;
   width: 100% !important;
   height: 100% !important;
   cursor: grab;
   touch-action: none;
 }
-.vtk-volume-container canvas:active {
+.volume-container canvas:active {
   cursor: grabbing;
 }
 .volume-engine-badge {
@@ -470,7 +470,7 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 .volume-control-panel input {
   accent-color: var(--green);
 }
-.vtk-status {
+.volume-status {
   position: absolute;
   inset: 0;
   display: grid;
@@ -482,7 +482,7 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   background: rgba(2, 7, 13, 0.82);
   z-index: 2;
 }
-.vtk-status.error {
+.volume-status.error {
   color: #ffd7d7;
   border: 1px dashed rgba(255, 77, 79, 0.48);
 }

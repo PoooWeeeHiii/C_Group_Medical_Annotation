@@ -379,7 +379,7 @@ def render_projection_png(image_id: str, axis: str = "axial", method: str = "mip
     return _png_response(pixels)
 
 
-def get_vtk_volume_data(image_id: str, max_dim: int = 144, window: str = "lung") -> dict:
+def get_volume_render_data(image_id: str, max_dim: int = 144, window: str = "lung") -> dict:
     image, volume = load_volume(image_id)
     downsampled, strides = _downsample_volume(volume.array, max_dim)
     values, hu_range = _window_volume(downsampled, window)

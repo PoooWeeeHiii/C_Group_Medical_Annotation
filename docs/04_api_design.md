@@ -27,7 +27,7 @@
 | 查询病例详情 | GET | `/api/case/{case_id}` | Vue、F 组 |
 | 查询图像信息 | GET | `/api/image/{image_id}` | Vue |
 | 查询 3D 体数据元信息 | GET | `/api/image/{image_id}/volume` | Vue、AI |
-| 获取 vtk.js 体渲染数据 | GET | `/api/image/{image_id}/vtk-volume` | Vue |
+| 获取 WebGL2 体渲染数据 | GET | `/api/image/{image_id}/volume-data` | Vue |
 | 获取切片图像 | GET | `/api/image/{image_id}/slice/{slice_index}.png` | Vue |
 | 获取三轴切片图像 | GET | `/api/image/{image_id}/slice/{axis}/{slice_index}.png` | Vue |
 | 获取三轴 MIP 投影 | GET | `/api/image/{image_id}/projection/{axis}.png` | Vue、AI |
@@ -207,9 +207,9 @@ multipart/form-data
 image/png
 ```
 
-### GET `/api/image/{image_id}/vtk-volume`
+### GET `/api/image/{image_id}/volume-data`
 
-用途：给 vtk.js 前端体渲染使用，返回下采样后的真实 3D 体素数据。
+用途：给前端 WebGL2 体渲染使用，返回下采样后的真实 3D 体素数据。
 
 查询参数：
 
@@ -239,7 +239,7 @@ image/png
 
 说明：
 
-- `dimensions` 顺序为 `[x, y, z]`，直接对应 vtk.js `vtkImageData.setDimensions()`。
+- `dimensions` 顺序为 `[x, y, z]`，直接对应前端 WebGL2 3D texture 的宽、高、深。
 - `values_base64` 是按 `z, y, x` 内存顺序展开的 `uint8` 体素。
 - `hu_range` 表示 `uint8` 值映射回 CT HU 的低高范围，前端体渲染按 HU 做医学 Transfer Function。
 - 这个接口用于真正体渲染，不是单张切片预览。

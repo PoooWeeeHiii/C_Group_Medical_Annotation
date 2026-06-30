@@ -10,7 +10,7 @@ const state = {
   activeWindow: "auto",
   volumeViewMode: "2d",
   showMip: false,
-  vtkLoadingKey: null,
+  volumeLoadingKey: null,
 };
 
 const titles = {
@@ -322,12 +322,12 @@ function render3DViewer(item, image, volume) {
     <section class="viewer">
       <div class="viewer-toolbar"><span>${item ? item.case_id : "暂无病例"} | 3D体视图</span><span>${canRender ? `${width} × ${height} × ${depth}` : "等待体数据"}</span></div>
       ${renderViewerModeButtons()}
-      <div id="vtkVolumeContainer" class="vtk-volume-container" data-image-id="${image?.image_id || ""}">
-        <div class="vtk-status">${canRender ? "正在初始化 vtk.js 真实体渲染..." : "正在读取体数据..."}</div>
+      <div id="volumeContainer" class="volume-container" data-image-id="${image?.image_id || ""}">
+        <div class="volume-status">${canRender ? "正在初始化 WebGL2 真实体渲染..." : "正在读取体数据..."}</div>
       </div>
       ${mipGrid}
       <div class="image-source-line">MIP 是最大强度投影，用于快速查看高密度结构；上方主视图是 WebGL2 体渲染，可拖拽旋转并调节渲染模式。</div>
-      <div class="image-source-line">3D来源：${canRender ? `vtk.js VolumeMapper + /api/image/${image.image_id}/vtk-volume` : "等待加载"}</div>
+      <div class="image-source-line">3D来源：${canRender ? `WebGL2 3D Texture Ray Casting + /api/image/${image.image_id}/volume-data` : "等待加载"}</div>
     </section>
   `;
 }
@@ -383,11 +383,11 @@ async function hydrateAnnotation() {
       updateSliceViewer(image, meta);
       return;
     }
-    if (!$("#vtkVolumeContainer")) {
+    if (!$("#volumeContainer")) {
       render();
       return;
     }
-    startVtkVolumeViewer(image);
+    startVolumeViewer(image);
   } catch (error) {
     const image = activeImage();
     const message = error.message || "图像读取失败";
@@ -543,17 +543,17 @@ function render() {
   if (state.view === "annotation") hydrateAnnotation();
 }
 
-async function startVtkVolumeViewer(image) {
-  const container = $("#vtkVolumeContainer");
+async function startVolumeViewer(image) {
+  const container = $("#volumeContainer");
   if (!container || !image) return;
   const loadingKey = `${image.image_id}:volume-hu-v2`;
-  if (state.vtkLoadingKey === loadingKey && container.dataset.ready === "true") return;
-  state.vtkLoadingKey = loadingKey;
+  if (state.volumeLoadingKey === loadingKey && container.dataset.ready === "true") return;
+  state.volumeLoadingKey = loadingKey;
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/vtk_viewer.js?v=webgl-hu-volume-20260630`);
-    await module.renderVtkVolume({
+    const module = await import(`/frontend/volume_viewer.js?v=webgl-only-volume-20260630`);
+    await module.renderVolume3D({
       container,
       imageId: image.image_id,
       windowName: "volume",
@@ -562,7 +562,7 @@ async function startVtkVolumeViewer(image) {
     container.dataset.ready = "true";
   } catch (error) {
     container.dataset.ready = "false";
-    container.innerHTML = `<div class="vtk-status error">3D 体渲染加载失败：${error.message}</div>`;
+    container.innerHTML = `<div class="volume-status error">3D 体渲染加载失败：${error.message}</div>`;
   }
 }
 

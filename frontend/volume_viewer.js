@@ -1,34 +1,4 @@
-const VTK_VERSION = "36.2.1";
-const VTK_BUNDLE_URL = `https://esm.sh/@kitware/vtk.js@${VTK_VERSION}?bundle`;
 const activeViewers = new WeakMap();
-
-let vtkModulesPromise = null;
-
-async function loadVtkModules() {
-  if (!vtkModulesPromise) {
-    vtkModulesPromise = import(VTK_BUNDLE_URL).then((module) => {
-      const vtk = module.default || module;
-      const modules = {
-        vtkGenericRenderWindow: vtk.Rendering?.Misc?.vtkGenericRenderWindow,
-        vtkImageData: vtk.Common?.DataModel?.vtkImageData,
-        vtkDataArray: vtk.Common?.Core?.vtkDataArray,
-        vtkVolume: vtk.Rendering?.Core?.vtkVolume,
-        vtkVolumeMapper: vtk.Rendering?.Core?.vtkVolumeMapper,
-        vtkColorTransferFunction: vtk.Rendering?.Core?.vtkColorTransferFunction,
-        vtkPiecewiseFunction: vtk.Common?.DataModel?.vtkPiecewiseFunction,
-      };
-
-      const missing = Object.entries(modules)
-        .filter(([, value]) => !value?.newInstance)
-        .map(([name]) => name);
-      if (missing.length) {
-        throw new Error(`vtk.js bundle 缺少模块：${missing.join(", ")}`);
-      }
-      return modules;
-    });
-  }
-  return vtkModulesPromise;
-}
 
 function decodeBase64ToUint8Array(value) {
   const binary = window.atob(value);
@@ -48,43 +18,16 @@ function clearContainer(container) {
   container.replaceChildren();
 }
 
-function configureVolumeProperty(actor, vtkColorTransferFunction, vtkPiecewiseFunction) {
-  const ctfun = vtkColorTransferFunction.newInstance();
-  ctfun.addRGBPoint(0, 0.0, 0.0, 0.0);
-  ctfun.addRGBPoint(55, 0.18, 0.22, 0.28);
-  ctfun.addRGBPoint(105, 0.78, 0.82, 0.86);
-  ctfun.addRGBPoint(180, 0.95, 0.92, 0.82);
-  ctfun.addRGBPoint(255, 1.0, 1.0, 1.0);
-
-  const ofun = vtkPiecewiseFunction.newInstance();
-  ofun.addPoint(0, 0.0);
-  ofun.addPoint(45, 0.0);
-  ofun.addPoint(90, 0.04);
-  ofun.addPoint(150, 0.12);
-  ofun.addPoint(255, 0.42);
-
-  const property = actor.getProperty();
-  property.setRGBTransferFunction(0, ctfun);
-  property.setScalarOpacity(0, ofun);
-  property.setScalarOpacityUnitDistance(0, 3.0);
-  property.setInterpolationTypeToLinear();
-  property.setShade(true);
-  property.setAmbient(0.22);
-  property.setDiffuse(0.72);
-  property.setSpecular(0.28);
-  property.setSpecularPower(18);
-}
-
-export async function renderVtkVolume({ container, imageId, windowName = "volume", maxDim = 176 }) {
+export async function renderVolume3D({ container, imageId, windowName = "volume", maxDim = 176 }) {
   if (!container || !imageId) return;
   clearContainer(container);
 
   const status = document.createElement("div");
-  status.className = "vtk-status";
+  status.className = "volume-status";
   status.textContent = "正在读取真实 3D CT 体数据...";
   container.appendChild(status);
 
-  const response = await fetch(`/api/image/${imageId}/vtk-volume?max_dim=${maxDim}&window=${windowName}`);
+  const response = await fetch(`/api/image/${imageId}/volume-data?max_dim=${maxDim}&window=${windowName}`);
   if (!response.ok) {
     const message = await response.text();
     throw new Error(`体数据接口失败：${message}`);
@@ -93,67 +36,8 @@ export async function renderVtkVolume({ container, imageId, windowName = "volume
   const volumeData = await response.json();
   const values = decodeBase64ToUint8Array(volumeData.values_base64);
 
-  status.textContent = "正在初始化 vtk.js 体渲染引擎...";
-  try {
-    const modules = await loadVtkModules();
-    renderWithVtk({ container, modules, volumeData, values });
-  } catch (error) {
-    console.warn("vtk.js failed, falling back to local WebGL2 volume renderer", error);
-    renderWithWebGL({ container, volumeData, values });
-  }
-}
-
-function renderWithVtk({ container, modules, volumeData, values }) {
-  clearContainer(container);
-  const genericRenderWindow = modules.vtkGenericRenderWindow.newInstance({
-    background: [0.02, 0.04, 0.07],
-  });
-  genericRenderWindow.setContainer(container);
-  genericRenderWindow.resize();
-
-  const renderer = genericRenderWindow.getRenderer();
-  const renderWindow = genericRenderWindow.getRenderWindow();
-
-  const imageData = modules.vtkImageData.newInstance();
-  imageData.setDimensions(...volumeData.dimensions);
-  imageData.setSpacing(...volumeData.spacing);
-  imageData.setOrigin(...volumeData.origin);
-  imageData.getPointData().setScalars(
-    modules.vtkDataArray.newInstance({
-      name: "CTVolume",
-      values,
-      numberOfComponents: 1,
-    })
-  );
-
-  const mapper = modules.vtkVolumeMapper.newInstance();
-  mapper.setInputData(imageData);
-  mapper.setSampleDistance(Math.max(...volumeData.spacing) * 0.75);
-
-  const actor = modules.vtkVolume.newInstance();
-  actor.setMapper(mapper);
-  configureVolumeProperty(actor, modules.vtkColorTransferFunction, modules.vtkPiecewiseFunction);
-
-  renderer.addVolume(actor);
-  renderer.resetCamera();
-  const camera = renderer.getActiveCamera();
-  camera.azimuth(35);
-  camera.elevation(22);
-  renderer.resetCameraClippingRange();
-  renderWindow.render();
-
-  activeViewers.set(container, genericRenderWindow);
-
-  const resizeObserver = new ResizeObserver(() => {
-    genericRenderWindow.resize();
-    renderWindow.render();
-  });
-  resizeObserver.observe(container);
-  const originalDelete = genericRenderWindow.delete.bind(genericRenderWindow);
-  genericRenderWindow.delete = () => {
-    resizeObserver.disconnect();
-    originalDelete();
-  };
+  status.textContent = "正在初始化 WebGL2 体渲染引擎...";
+  renderWithWebGL({ container, volumeData, values });
 }
 
 function createShader(gl, type, source) {
