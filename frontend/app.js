@@ -3,6 +3,7 @@ const state = {
   cases: [],
   caseDetails: {},
   volumeMeta: {},
+  volumeErrors: {},
   activeCaseId: null,
   activeImageId: null,
   activeSlice: 0,
@@ -298,7 +299,8 @@ function renderAnnotation() {
       <section class="viewer">
         <div class="viewer-toolbar"><span id="viewerTitle">${item ? item.case_id : "暂无病例"} | 轴位 Axial</span><span id="viewerInfo">${image ? image.image_id : "等待图像"} | 缩放 100%</span></div>
         <div class="ct-frame real-image-frame">
-          ${image ? `<img id="sliceImage" class="ct-slice-image" alt="医学影像切片" />` : `<div class="slice-empty">暂无可显示图像</div>`}
+          ${image ? `<img id="sliceImage" class="ct-slice-image" alt="医学影像切片" />` : ""}
+          <div id="sliceError" class="slice-empty ${image ? "hidden" : ""}">${image ? "正在读取体数据..." : "暂无可显示图像"}</div>
           <div class="mask-overlay"></div>
           <div class="roi-box"></div>
           <div class="coordinate" id="sliceCoordinate">z: ${activeSlice + 1} / ${sliceCount}</div>
@@ -326,7 +328,11 @@ async function hydrateAnnotation() {
     const meta = await loadVolumeMeta(image.image_id);
     updateSliceViewer(image, meta);
   } catch (error) {
-    showToast(error.message || "图像读取失败");
+    const image = activeImage();
+    const message = error.message || "图像读取失败";
+    if (image) state.volumeErrors[image.image_id] = message;
+    displaySliceError(message);
+    showToast(message);
   }
 }
 
@@ -347,6 +353,13 @@ function updateSliceViewer(image, meta) {
 
   const sliceNumber = state.activeSlice + 1;
   imageElement.src = `/api/image/${image.image_id}/slice/${state.activeSlice}.png?window=${state.activeWindow}&t=${Date.now()}`;
+  imageElement.onload = () => {
+    imageElement.classList.remove("hidden");
+    $("#sliceError").classList.add("hidden");
+  };
+  imageElement.onerror = () => {
+    displaySliceError("切片图像加载失败，请确认当前病例是真实 DICOM / NRRD / NIfTI 体数据。");
+  };
   $("#sliceValue").textContent = String(sliceNumber);
   $("#sliceCoordinate").textContent = `z: ${sliceNumber} / ${meta.slice_count}`;
   $("#viewerInfo").textContent = `${image.image_id} | ${meta.width} × ${meta.height} × ${meta.slice_count}`;
@@ -357,6 +370,18 @@ function updateSliceViewer(image, meta) {
     select.value = state.activeWindow;
     $("#windowValue").textContent = select.options[select.selectedIndex].textContent;
   }
+}
+
+function displaySliceError(message) {
+  const errorBox = $("#sliceError");
+  const imageElement = $("#sliceImage");
+  if (imageElement) imageElement.classList.add("hidden");
+  if (errorBox) {
+    errorBox.textContent = message;
+    errorBox.classList.remove("hidden");
+  }
+  const source = $("#volumeSource");
+  if (source) source.textContent = "读取失败";
 }
 
 function renderTrain() {
