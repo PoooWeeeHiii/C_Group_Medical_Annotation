@@ -28,6 +28,8 @@
 | 查询图像信息 | GET | `/api/image/{image_id}` | Vue |
 | 查询 3D 体数据元信息 | GET | `/api/image/{image_id}/volume` | Vue、AI |
 | 获取切片图像 | GET | `/api/image/{image_id}/slice/{slice_index}.png` | Vue |
+| 获取三轴切片图像 | GET | `/api/image/{image_id}/slice/{axis}/{slice_index}.png` | Vue |
+| 获取三轴 MIP 投影 | GET | `/api/image/{image_id}/projection/{axis}.png` | Vue、AI |
 | 导出 3D 原始图像 | GET | `/api/image/{image_id}/export-3d` | Vue、AI |
 | 创建标注记录 | POST | `/api/annotation` | Vue、AI |
 | 保存 Mask | POST | `/api/save_mask` | Vue、AI |
@@ -190,7 +192,7 @@ multipart/form-data
 
 ### GET `/api/image/{image_id}/slice/{slice_index}.png`
 
-用途：前端 CT 浏览器请求某一层切片。
+用途：前端 CT 浏览器请求轴位某一层切片，等价于 `axis=axial`。
 
 查询参数：
 
@@ -208,6 +210,46 @@ image/png
 
 - 后端可以把 DICOM/NIfTI/NRRD 切片转为 PNG 返回。
 - 前端只负责显示，不直接解析医学影像格式。
+
+### GET `/api/image/{image_id}/slice/{axis}/{slice_index}.png`
+
+用途：前端 3D/MPR 浏览器请求三轴切片。
+
+路径参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `axis` | string | 是 | `axial`、`coronal`、`sagittal`。 |
+| `slice_index` | int | 是 | 对应方向的切片序号，从 0 开始。 |
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `window` | string | 否 | `auto`、`lung`、`soft`、`bone`。 |
+
+响应方式：
+
+```text
+image/png
+```
+
+### GET `/api/image/{image_id}/projection/{axis}.png`
+
+用途：生成 3D 体数据在某一方向上的投影图，用于 3D 体视图预览或 AI 快速质检。
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `method` | string | 否 | `mip`、`mean`、`min`，默认 `mip`。 |
+| `window` | string | 否 | `auto`、`lung`、`soft`、`bone`。 |
+
+响应方式：
+
+```text
+image/png
+```
 
 ### GET `/api/image/{image_id}/export-3d`
 

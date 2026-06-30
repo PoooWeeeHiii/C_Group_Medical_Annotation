@@ -52,6 +52,8 @@ WINDOWS = {
     "bone": (500, 2000),
 }
 
+AXES = {"axial", "coronal", "sagittal"}
+
 
 def _image_record(image_id: str) -> dict:
     images = load_json_list(IMAGES_DB_PATH)
@@ -258,18 +260,62 @@ def _window_slice(slice_data: np.ndarray, window: str) -> np.ndarray:
     return data.astype(np.uint8)
 
 
-def render_slice_png(image_id: str, slice_index: int, window: str = "auto") -> Response:
-    _, volume = load_volume(image_id)
-    depth = volume.array.shape[0]
-    if depth <= 0:
-        raise HTTPException(status_code=422, detail="Volume has no slices")
-    index = max(0, min(slice_index, depth - 1))
-    pixels = _window_slice(volume.array[index], window)
+def _slice_by_axis(array: np.ndarray, axis: str, slice_index: int) -> np.ndarray:
+    depth, height, width = array.shape[:3]
+    if axis == "axial":
+        index = max(0, min(slice_index, depth - 1))
+        return array[index, :, :]
+    if axis == "coronal":
+        index = max(0, min(slice_index, height - 1))
+        return np.flipud(array[:, index, :])
+    if axis == "sagittal":
+        index = max(0, min(slice_index, width - 1))
+        return np.flipud(array[:, :, index])
+    raise HTTPException(status_code=400, detail=f"Unsupported axis: {axis}")
 
+
+def _projection_by_axis(array: np.ndarray, axis: str, method: str) -> np.ndarray:
+    if method == "mean":
+        reducer = np.mean
+    elif method == "min":
+        reducer = np.min
+    else:
+        reducer = np.max
+
+    if axis == "axial":
+        return reducer(array, axis=0)
+    if axis == "coronal":
+        return np.flipud(reducer(array, axis=1))
+    if axis == "sagittal":
+        return np.flipud(reducer(array, axis=2))
+    raise HTTPException(status_code=400, detail=f"Unsupported axis: {axis}")
+
+
+def _png_response(pixels: np.ndarray) -> Response:
     image = Image.fromarray(pixels, mode="L")
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return Response(content=buffer.getvalue(), media_type="image/png")
+
+
+def render_slice_png(image_id: str, slice_index: int, window: str = "auto", axis: str = "axial") -> Response:
+    _, volume = load_volume(image_id)
+    if volume.array.size <= 0:
+        raise HTTPException(status_code=422, detail="Volume has no slices")
+    if axis not in AXES:
+        raise HTTPException(status_code=400, detail=f"Unsupported axis: {axis}")
+    pixels = _window_slice(_slice_by_axis(volume.array, axis, slice_index), window)
+    return _png_response(pixels)
+
+
+def render_projection_png(image_id: str, axis: str = "axial", method: str = "mip", window: str = "auto") -> Response:
+    _, volume = load_volume(image_id)
+    if volume.array.size <= 0:
+        raise HTTPException(status_code=422, detail="Volume has no voxels")
+    if axis not in AXES:
+        raise HTTPException(status_code=400, detail=f"Unsupported axis: {axis}")
+    pixels = _window_slice(_projection_by_axis(volume.array, axis, method), window)
+    return _png_response(pixels)
 
 
 def export_volume_file(image_id: str) -> FileResponse:

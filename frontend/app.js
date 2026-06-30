@@ -8,6 +8,9 @@ const state = {
   activeImageId: null,
   activeSlice: 0,
   activeWindow: "auto",
+  volumeViewMode: "2d",
+  volumeRotationX: -18,
+  volumeRotationY: 34,
 };
 
 const titles = {
@@ -267,6 +270,72 @@ function labelList() {
   return labels.map(([color, text]) => `<div class="label-row"><span class="swatch" style="background:${color}"></span>${text}</div>`).join("");
 }
 
+function renderViewerModeButtons() {
+  return `
+    <div class="viewer-mode-switch">
+      <button class="mode-button ${state.volumeViewMode === "2d" ? "active" : ""}" data-view-mode="2d">2D切片</button>
+      <button class="mode-button ${state.volumeViewMode === "3d" ? "active" : ""}" data-view-mode="3d">3D体视图</button>
+    </div>
+  `;
+}
+
+function render2DViewer(item, image, volume, activeSlice, sliceCount, maxSlice) {
+  return `
+    <section class="viewer">
+      <div class="viewer-toolbar"><span id="viewerTitle">${item ? item.case_id : "暂无病例"} | 轴位 Axial</span><span id="viewerInfo">${image ? image.image_id : "等待图像"} | 缩放 100%</span></div>
+      ${renderViewerModeButtons()}
+      <div class="ct-frame real-image-frame">
+        ${image ? `<img id="sliceImage" class="ct-slice-image" alt="医学影像切片" />` : ""}
+        <div id="sliceError" class="slice-empty ${image ? "hidden" : ""}">${image ? "正在读取体数据..." : "暂无可显示图像"}</div>
+        <div class="mask-overlay"></div>
+        <div class="roi-box"></div>
+        <div class="coordinate" id="sliceCoordinate">z: ${activeSlice + 1} / ${sliceCount}</div>
+      </div>
+      <div class="slider-row"><span>切片</span><input id="sliceSlider" type="range" min="0" max="${maxSlice}" value="${activeSlice}" /><strong id="sliceValue">${activeSlice + 1}</strong></div>
+      <div class="slider-row"><span>透明度</span><input type="range" min="0" max="100" value="54" /><strong>54%</strong></div>
+      <div class="slider-row"><span>窗位</span><select id="windowSelect"><option value="auto">自动</option><option value="lung">肺窗</option><option value="soft">软组织</option><option value="bone">骨窗</option></select><strong id="windowValue">自动</strong></div>
+      <div class="image-source-line" id="sliceSource">切片接口：等待加载</div>
+    </section>
+  `;
+}
+
+function render3DViewer(item, image, volume) {
+  const width = volume?.width || 1;
+  const height = volume?.height || 1;
+  const depth = volume?.slice_count || 1;
+  const axial = Math.min(state.activeSlice, Math.max(depth - 1, 0));
+  const coronal = Math.floor(height / 2);
+  const sagittal = Math.floor(width / 2);
+  const canRender = Boolean(image && volume);
+  return `
+    <section class="viewer">
+      <div class="viewer-toolbar"><span>${item ? item.case_id : "暂无病例"} | 3D体视图</span><span>${canRender ? `${width} × ${height} × ${depth}` : "等待体数据"}</span></div>
+      ${renderViewerModeButtons()}
+      <div class="volume-viewport">
+        ${
+          canRender
+            ? `<div class="volume-stage">
+                <div id="volumeCube" class="volume-cube" style="--rot-x:${state.volumeRotationX}deg; --rot-y:${state.volumeRotationY}deg;">
+                  <img class="volume-plane plane-axial" src="/api/image/${image.image_id}/slice/axial/${axial}.png?window=${state.activeWindow}" alt="轴位切片" />
+                  <img class="volume-plane plane-coronal" src="/api/image/${image.image_id}/slice/coronal/${coronal}.png?window=${state.activeWindow}" alt="冠状位切片" />
+                  <img class="volume-plane plane-sagittal" src="/api/image/${image.image_id}/slice/sagittal/${sagittal}.png?window=${state.activeWindow}" alt="矢状位切片" />
+                </div>
+              </div>`
+            : `<div class="slice-empty">正在读取体数据...</div>`
+        }
+      </div>
+      <div class="slider-row"><span>俯仰</span><input id="rotateXSlider" type="range" min="-70" max="30" value="${state.volumeRotationX}" /><strong id="rotateXValue">${state.volumeRotationX}°</strong></div>
+      <div class="slider-row"><span>旋转</span><input id="rotateYSlider" type="range" min="-80" max="80" value="${state.volumeRotationY}" /><strong id="rotateYValue">${state.volumeRotationY}°</strong></div>
+      <div class="orthogonal-grid">
+        <div><span>轴位 MIP</span>${canRender ? `<img src="/api/image/${image.image_id}/projection/axial.png?window=${state.activeWindow}" alt="轴位 MIP" />` : ""}</div>
+        <div><span>冠状位 MIP</span>${canRender ? `<img src="/api/image/${image.image_id}/projection/coronal.png?window=${state.activeWindow}" alt="冠状位 MIP" />` : ""}</div>
+        <div><span>矢状位 MIP</span>${canRender ? `<img src="/api/image/${image.image_id}/projection/sagittal.png?window=${state.activeWindow}" alt="矢状位 MIP" />` : ""}</div>
+      </div>
+      <div class="image-source-line">3D来源：${canRender ? `/api/image/${image.image_id}/slice/{axis}/{index}.png + /projection/{axis}.png` : "等待加载"}</div>
+    </section>
+  `;
+}
+
 function renderAnnotation() {
   const item = activeCase();
   const image = activeImage();
@@ -296,20 +365,7 @@ function renderAnnotation() {
         <h3 style="margin-top:24px">标签</h3>
         <div class="label-list">${labelList()}</div>
       </aside>
-      <section class="viewer">
-        <div class="viewer-toolbar"><span id="viewerTitle">${item ? item.case_id : "暂无病例"} | 轴位 Axial</span><span id="viewerInfo">${image ? image.image_id : "等待图像"} | 缩放 100%</span></div>
-        <div class="ct-frame real-image-frame">
-          ${image ? `<img id="sliceImage" class="ct-slice-image" alt="医学影像切片" />` : ""}
-          <div id="sliceError" class="slice-empty ${image ? "hidden" : ""}">${image ? "正在读取体数据..." : "暂无可显示图像"}</div>
-          <div class="mask-overlay"></div>
-          <div class="roi-box"></div>
-          <div class="coordinate" id="sliceCoordinate">z: ${activeSlice + 1} / ${sliceCount}</div>
-        </div>
-        <div class="slider-row"><span>切片</span><input id="sliceSlider" type="range" min="0" max="${maxSlice}" value="${activeSlice}" /><strong id="sliceValue">${activeSlice + 1}</strong></div>
-        <div class="slider-row"><span>透明度</span><input type="range" min="0" max="100" value="54" /><strong>54%</strong></div>
-        <div class="slider-row"><span>窗位</span><select id="windowSelect"><option value="auto">自动</option><option value="lung">肺窗</option><option value="soft">软组织</option><option value="bone">骨窗</option></select><strong id="windowValue">自动</strong></div>
-        <div class="image-source-line" id="sliceSource">切片接口：等待加载</div>
-      </section>
+      ${state.volumeViewMode === "3d" ? render3DViewer(item, image, volume) : render2DViewer(item, image, volume, activeSlice, sliceCount, maxSlice)}
       <aside class="tool-panel">
         <h2>标注工具</h2>
         <div class="tool-grid">${["画笔", "橡皮擦", "多边形", "矩形ROI", "点标注", "智能选择", "撤销", "重做", "清空", "AI预测"].map((tool) => `<button class="tool-button">${tool}</button>`).join("")}</div>
@@ -436,6 +492,12 @@ function render() {
   $("#viewRoot").innerHTML = (views[state.view] || renderDashboard)();
   const uploadForm = $("#uploadForm");
   if (uploadForm) uploadForm.addEventListener("submit", uploadCase);
+  document.querySelectorAll("[data-view-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.volumeViewMode = button.dataset.viewMode;
+      render();
+    });
+  });
   document.querySelectorAll("[data-open-case]").forEach((button) => {
     button.addEventListener("click", () => {
       state.activeCaseId = button.dataset.openCase;
@@ -466,7 +528,30 @@ function render() {
       if (image && meta) updateSliceViewer(image, meta);
     });
   }
+  const rotateXSlider = $("#rotateXSlider");
+  if (rotateXSlider) {
+    rotateXSlider.addEventListener("input", () => {
+      state.volumeRotationX = Number(rotateXSlider.value);
+      $("#rotateXValue").textContent = `${state.volumeRotationX}°`;
+      updateVolumeRotation();
+    });
+  }
+  const rotateYSlider = $("#rotateYSlider");
+  if (rotateYSlider) {
+    rotateYSlider.addEventListener("input", () => {
+      state.volumeRotationY = Number(rotateYSlider.value);
+      $("#rotateYValue").textContent = `${state.volumeRotationY}°`;
+      updateVolumeRotation();
+    });
+  }
   if (state.view === "annotation") hydrateAnnotation();
+}
+
+function updateVolumeRotation() {
+  const cube = $("#volumeCube");
+  if (!cube) return;
+  cube.style.setProperty("--rot-x", `${state.volumeRotationX}deg`);
+  cube.style.setProperty("--rot-y", `${state.volumeRotationY}deg`);
 }
 
 function bindNavigation() {
