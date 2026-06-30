@@ -240,6 +240,7 @@ image/png
 - `dimensions` 顺序为 `[x, y, z]`，直接对应 vtk.js `vtkImageData.setDimensions()`。
 - `values_base64` 是按 `z, y, x` 内存顺序展开的 `uint8` 体素。
 - 这个接口用于真正体渲染，不是单张切片预览。
+- 后端按轴独立下采样，避免 Z 方向层数被过度压缩；前端 WebGL2 使用 3D texture ray casting、gradient opacity、阈值过滤和动态 transfer function 改善边界清晰度。
 
 说明：
 

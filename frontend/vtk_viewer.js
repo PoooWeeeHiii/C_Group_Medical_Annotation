@@ -229,6 +229,8 @@ function renderWithWebGL({ container, volumeData, values }) {
     uniform float uSteps;
     uniform float uOpacityScale;
     uniform float uBrightness;
+    uniform float uThreshold;
+    uniform vec3 uVoxelStep;
     uniform int uRenderMode;
 
     mat3 rotateX(float a) {
@@ -255,7 +257,7 @@ function renderWithWebGL({ container, volumeData, values }) {
     }
 
     vec3 gradientAt(vec3 p) {
-      vec3 delta = vec3(1.0 / 96.0);
+      vec3 delta = uVoxelStep;
       float gx = texture(uVolume, p + vec3(delta.x, 0.0, 0.0)).r - texture(uVolume, p - vec3(delta.x, 0.0, 0.0)).r;
       float gy = texture(uVolume, p + vec3(0.0, delta.y, 0.0)).r - texture(uVolume, p - vec3(0.0, delta.y, 0.0)).r;
       float gz = texture(uVolume, p + vec3(0.0, 0.0, delta.z)).r - texture(uVolume, p - vec3(0.0, 0.0, delta.z)).r;
@@ -284,15 +286,18 @@ function renderWithWebGL({ container, volumeData, values }) {
     }
 
     float transferOpacity(float value, float edge) {
+      if (value < uThreshold) {
+        return 0.0;
+      }
       if (uRenderMode == 1) {
-        return (smoothstep(0.52, 0.90, value) * 0.080 + edge * 0.018) * uOpacityScale;
+        return (smoothstep(0.58, 0.94, value) * 0.075 + edge * 0.024) * uOpacityScale;
       }
       if (uRenderMode == 2) {
-        return (smoothstep(0.28, 0.84, value) * 0.050 + edge * 0.012) * uOpacityScale;
+        return (smoothstep(0.34, 0.84, value) * 0.042 + edge * 0.018) * uOpacityScale;
       }
-      float vessel = smoothstep(0.38, 0.82, value) * 0.045;
-      float parenchyma = smoothstep(0.16, 0.36, value) * (1.0 - smoothstep(0.48, 0.68, value)) * 0.012;
-      return (vessel + parenchyma + edge * 0.010) * uOpacityScale;
+      float vessel = smoothstep(0.46, 0.86, value) * 0.038;
+      float parenchyma = smoothstep(0.24, 0.42, value) * (1.0 - smoothstep(0.52, 0.72, value)) * 0.006;
+      return (vessel + parenchyma + edge * 0.018) * uOpacityScale;
     }
 
     void main() {
@@ -345,6 +350,8 @@ function renderWithWebGL({ container, volumeData, values }) {
     steps: gl.getUniformLocation(program, "uSteps"),
     opacityScale: gl.getUniformLocation(program, "uOpacityScale"),
     brightness: gl.getUniformLocation(program, "uBrightness"),
+    threshold: gl.getUniformLocation(program, "uThreshold"),
+    voxelStep: gl.getUniformLocation(program, "uVoxelStep"),
     renderMode: gl.getUniformLocation(program, "uRenderMode"),
   };
 
@@ -380,9 +387,10 @@ function renderWithWebGL({ container, volumeData, values }) {
   const viewerState = {
     yaw: 0.65,
     pitch: -0.28,
-    opacityScale: 1.25,
-    brightness: 1.18,
-    steps: 176,
+    opacityScale: 0.92,
+    brightness: 1.10,
+    threshold: 0.32,
+    steps: 192,
     renderMode: 0,
     dragging: false,
     lastX: 0,
@@ -400,13 +408,16 @@ function renderWithWebGL({ container, volumeData, values }) {
       </select>
     </label>
     <label>透明度
-      <input data-volume-opacity type="range" min="40" max="220" value="125" />
+      <input data-volume-opacity type="range" min="20" max="180" value="92" />
     </label>
     <label>亮度
-      <input data-volume-brightness type="range" min="70" max="180" value="118" />
+      <input data-volume-brightness type="range" min="70" max="170" value="110" />
+    </label>
+    <label>阈值
+      <input data-volume-threshold type="range" min="5" max="75" value="32" />
     </label>
     <label>质量
-      <input data-volume-steps type="range" min="80" max="192" value="176" />
+      <input data-volume-steps type="range" min="96" max="224" value="192" />
     </label>
   `;
   container.appendChild(controls);
@@ -435,6 +446,13 @@ function renderWithWebGL({ container, volumeData, values }) {
     gl.uniform1f(uniforms.steps, viewerState.steps);
     gl.uniform1f(uniforms.opacityScale, viewerState.opacityScale);
     gl.uniform1f(uniforms.brightness, viewerState.brightness);
+    gl.uniform1f(uniforms.threshold, viewerState.threshold);
+    gl.uniform3f(
+      uniforms.voxelStep,
+      1 / Math.max(volumeData.dimensions[0], 1),
+      1 / Math.max(volumeData.dimensions[1], 1),
+      1 / Math.max(volumeData.dimensions[2], 1)
+    );
     gl.uniform1i(uniforms.renderMode, viewerState.renderMode);
     gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
     gl.enableVertexAttribArray(positionLocation);
@@ -472,6 +490,10 @@ function renderWithWebGL({ container, volumeData, values }) {
   });
   controls.querySelector("[data-volume-brightness]").addEventListener("input", (event) => {
     viewerState.brightness = Number(event.target.value) / 100;
+    draw();
+  });
+  controls.querySelector("[data-volume-threshold]").addEventListener("input", (event) => {
+    viewerState.threshold = Number(event.target.value) / 100;
     draw();
   });
   controls.querySelector("[data-volume-steps]").addEventListener("input", (event) => {

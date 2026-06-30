@@ -552,7 +552,7 @@ async function startVtkVolumeViewer(image) {
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/vtk_viewer.js?v=webgl-volume-quality-20260630`);
+    const module = await import(`/frontend/vtk_viewer.js?v=webgl-volume-sharp-20260630`);
     await module.renderVtkVolume({
       container,
       imageId: image.image_id,

@@ -443,7 +443,7 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   bottom: 12px;
   z-index: 3;
   display: grid;
-  grid-template-columns: repeat(4, minmax(92px, 1fr));
+  grid-template-columns: repeat(5, minmax(88px, 1fr));
   gap: 10px;
   width: min(720px, calc(100% - 24px));
   padding: 10px;
