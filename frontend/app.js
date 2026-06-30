@@ -9,9 +9,8 @@ const state = {
   activeSlice: 0,
   activeWindow: "auto",
   volumeViewMode: "2d",
-  volumeRotationX: -18,
-  volumeRotationY: 34,
   showMip: false,
+  vtkLoadingKey: null,
 };
 
 const titles = {
@@ -304,9 +303,6 @@ function render3DViewer(item, image, volume) {
   const width = volume?.width || 1;
   const height = volume?.height || 1;
   const depth = volume?.slice_count || 1;
-  const axial = Math.min(state.activeSlice, Math.max(depth - 1, 0));
-  const coronal = Math.floor(height / 2);
-  const sagittal = Math.floor(width / 2);
   const canRender = Boolean(image && volume);
   const mipGrid = state.showMip
     ? `
@@ -326,23 +322,12 @@ function render3DViewer(item, image, volume) {
     <section class="viewer">
       <div class="viewer-toolbar"><span>${item ? item.case_id : "暂无病例"} | 3D体视图</span><span>${canRender ? `${width} × ${height} × ${depth}` : "等待体数据"}</span></div>
       ${renderViewerModeButtons()}
-      <div class="volume-viewport">
-        ${
-          canRender
-            ? `<div class="volume-stage">
-                <div id="volumeCube" class="volume-cube" style="--rot-x:${state.volumeRotationX}deg; --rot-y:${state.volumeRotationY}deg;">
-                  <img class="volume-plane plane-axial" src="/api/image/${image.image_id}/slice/axial/${axial}.png?window=${state.activeWindow}" alt="轴位切片" />
-                  <img class="volume-plane plane-coronal" src="/api/image/${image.image_id}/slice/coronal/${coronal}.png?window=${state.activeWindow}" alt="冠状位切片" />
-                  <img class="volume-plane plane-sagittal" src="/api/image/${image.image_id}/slice/sagittal/${sagittal}.png?window=${state.activeWindow}" alt="矢状位切片" />
-                </div>
-              </div>`
-            : `<div class="slice-empty">正在读取体数据...</div>`
-        }
+      <div id="vtkVolumeContainer" class="vtk-volume-container" data-image-id="${image?.image_id || ""}">
+        <div class="vtk-status">${canRender ? "正在初始化 vtk.js 真实体渲染..." : "正在读取体数据..."}</div>
       </div>
-      <div class="slider-row"><span>俯仰</span><input id="rotateXSlider" type="range" min="-70" max="30" value="${state.volumeRotationX}" /><strong id="rotateXValue">${state.volumeRotationX}°</strong></div>
-      <div class="slider-row"><span>旋转</span><input id="rotateYSlider" type="range" min="-80" max="80" value="${state.volumeRotationY}" /><strong id="rotateYValue">${state.volumeRotationY}°</strong></div>
       ${mipGrid}
-      <div class="image-source-line">3D来源：${canRender ? `/api/image/${image.image_id}/slice/{axis}/{index}.png + /projection/{axis}.png` : "等待加载"}</div>
+      <div class="image-source-line">MIP 是最大强度投影，用于快速查看高密度结构；上方主视图是 WebGL2 体渲染，可拖拽旋转并调节渲染模式。</div>
+      <div class="image-source-line">3D来源：${canRender ? `vtk.js VolumeMapper + /api/image/${image.image_id}/vtk-volume` : "等待加载"}</div>
     </section>
   `;
 }
@@ -398,11 +383,11 @@ async function hydrateAnnotation() {
       updateSliceViewer(image, meta);
       return;
     }
-    if (!$("#volumeCube")) {
+    if (!$("#vtkVolumeContainer")) {
       render();
       return;
     }
-    updateVolumeRotation();
+    startVtkVolumeViewer(image);
   } catch (error) {
     const image = activeImage();
     const message = error.message || "图像读取失败";
@@ -555,30 +540,30 @@ function render() {
       if (image && meta) updateSliceViewer(image, meta);
     });
   }
-  const rotateXSlider = $("#rotateXSlider");
-  if (rotateXSlider) {
-    rotateXSlider.addEventListener("input", () => {
-      state.volumeRotationX = Number(rotateXSlider.value);
-      $("#rotateXValue").textContent = `${state.volumeRotationX}°`;
-      updateVolumeRotation();
-    });
-  }
-  const rotateYSlider = $("#rotateYSlider");
-  if (rotateYSlider) {
-    rotateYSlider.addEventListener("input", () => {
-      state.volumeRotationY = Number(rotateYSlider.value);
-      $("#rotateYValue").textContent = `${state.volumeRotationY}°`;
-      updateVolumeRotation();
-    });
-  }
   if (state.view === "annotation") hydrateAnnotation();
 }
 
-function updateVolumeRotation() {
-  const cube = $("#volumeCube");
-  if (!cube) return;
-  cube.style.setProperty("--rot-x", `${state.volumeRotationX}deg`);
-  cube.style.setProperty("--rot-y", `${state.volumeRotationY}deg`);
+async function startVtkVolumeViewer(image) {
+  const container = $("#vtkVolumeContainer");
+  if (!container || !image) return;
+  const loadingKey = `${image.image_id}:${state.activeWindow}`;
+  if (state.vtkLoadingKey === loadingKey && container.dataset.ready === "true") return;
+  state.vtkLoadingKey = loadingKey;
+  container.dataset.ready = "loading";
+
+  try {
+    const module = await import(`/frontend/vtk_viewer.js?v=webgl-volume-quality-20260630`);
+    await module.renderVtkVolume({
+      container,
+      imageId: image.image_id,
+      windowName: state.activeWindow === "auto" ? "lung" : state.activeWindow,
+      maxDim: 144,
+    });
+    container.dataset.ready = "true";
+  } catch (error) {
+    container.dataset.ready = "false";
+    container.innerHTML = `<div class="vtk-status error">3D 体渲染加载失败：${error.message}</div>`;
+  }
 }
 
 function bindNavigation() {

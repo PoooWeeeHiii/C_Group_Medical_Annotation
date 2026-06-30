@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import gzip
 import io
 import threading
@@ -283,6 +284,31 @@ def _window_slice(slice_data: np.ndarray, window: str) -> np.ndarray:
     return data.astype(np.uint8)
 
 
+def _window_volume(volume_data: np.ndarray, window: str) -> np.ndarray:
+    data = volume_data.astype(np.float32)
+    if window in WINDOWS:
+        level, width = WINDOWS[window]
+        low = level - width / 2
+        high = level + width / 2
+    else:
+        low, high = np.percentile(data, [1, 99])
+        if high <= low:
+            low, high = float(data.min()), float(data.max())
+        if high <= low:
+            high = low + 1
+
+    data = np.clip(data, low, high)
+    data = (data - low) / (high - low) * 255.0
+    return np.ascontiguousarray(data.astype(np.uint8))
+
+
+def _downsample_volume(array: np.ndarray, max_dim: int) -> tuple[np.ndarray, int]:
+    max_dim = max(64, min(max_dim, 192))
+    depth, height, width = array.shape[:3]
+    stride = max(1, int(np.ceil(max(depth, height, width) / max_dim)))
+    return array[::stride, ::stride, ::stride], stride
+
+
 def _slice_by_axis(array: np.ndarray, axis: str, slice_index: int) -> np.ndarray:
     depth, height, width = array.shape[:3]
     if axis == "axial":
@@ -339,6 +365,29 @@ def render_projection_png(image_id: str, axis: str = "axial", method: str = "mip
         raise HTTPException(status_code=400, detail=f"Unsupported axis: {axis}")
     pixels = _window_slice(_projection_by_axis(volume.array, axis, method), window)
     return _png_response(pixels)
+
+
+def get_vtk_volume_data(image_id: str, max_dim: int = 144, window: str = "lung") -> dict:
+    image, volume = load_volume(image_id)
+    downsampled, stride = _downsample_volume(volume.array, max_dim)
+    values = _window_volume(downsampled, window)
+    depth, height, width = values.shape[:3]
+    sx, sy, sz = volume.spacing
+    payload = base64.b64encode(values.tobytes(order="C")).decode("ascii")
+
+    return {
+        "success": True,
+        "image_id": image["image_id"],
+        "case_id": image["case_id"],
+        "dimensions": [width, height, depth],
+        "spacing": [sx * stride, sy * stride, sz * stride],
+        "origin": volume.origin,
+        "scalar_type": "uint8",
+        "window": window,
+        "max_dim": max_dim,
+        "downsample_stride": stride,
+        "values_base64": payload,
+    }
 
 
 def export_volume_file(image_id: str) -> FileResponse:

@@ -27,6 +27,7 @@
 | 查询病例详情 | GET | `/api/case/{case_id}` | Vue、F 组 |
 | 查询图像信息 | GET | `/api/image/{image_id}` | Vue |
 | 查询 3D 体数据元信息 | GET | `/api/image/{image_id}/volume` | Vue、AI |
+| 获取 vtk.js 体渲染数据 | GET | `/api/image/{image_id}/vtk-volume` | Vue |
 | 获取切片图像 | GET | `/api/image/{image_id}/slice/{slice_index}.png` | Vue |
 | 获取三轴切片图像 | GET | `/api/image/{image_id}/slice/{axis}/{slice_index}.png` | Vue |
 | 获取三轴 MIP 投影 | GET | `/api/image/{image_id}/projection/{axis}.png` | Vue、AI |
@@ -205,6 +206,40 @@ multipart/form-data
 ```text
 image/png
 ```
+
+### GET `/api/image/{image_id}/vtk-volume`
+
+用途：给 vtk.js 前端体渲染使用，返回下采样后的真实 3D 体素数据。
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `max_dim` | int | 否 | 下采样后最大维度，默认 `144`，后端限制在 `64~192`。 |
+| `window` | string | 否 | `lung`、`soft`、`bone`、`auto`。 |
+
+响应：
+
+```json
+{
+  "success": true,
+  "image_id": "Image0002",
+  "case_id": "Case0002",
+  "dimensions": [128, 128, 34],
+  "spacing": [4.0, 4.0, 4.0],
+  "origin": [0.0, 0.0, 0.0],
+  "scalar_type": "uint8",
+  "window": "lung",
+  "downsample_stride": 4,
+  "values_base64": "..."
+}
+```
+
+说明：
+
+- `dimensions` 顺序为 `[x, y, z]`，直接对应 vtk.js `vtkImageData.setDimensions()`。
+- `values_base64` 是按 `z, y, x` 内存顺序展开的 `uint8` 体素。
+- 这个接口用于真正体渲染，不是单张切片预览。
 
 说明：
 

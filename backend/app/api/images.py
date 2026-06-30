@@ -5,6 +5,7 @@ from backend.app.services.case_service import get_image
 from backend.app.services.medical_image_service import (
     export_volume_file,
     get_volume_metadata,
+    get_vtk_volume_data,
     render_projection_png,
     render_slice_png,
 )
@@ -21,6 +22,11 @@ def read_image(image_id: str) -> ImageDetailResponse:
 @router.get("/image/{image_id}/volume")
 def read_image_volume(image_id: str) -> dict:
     return get_volume_metadata(image_id)
+
+
+@router.get("/image/{image_id}/vtk-volume")
+def read_vtk_volume(image_id: str, max_dim: int = 144, window: str = "lung") -> dict:
+    return get_vtk_volume_data(image_id=image_id, max_dim=max_dim, window=window)
 
 
 @router.get("/image/{image_id}/slice/{slice_index}.png")
