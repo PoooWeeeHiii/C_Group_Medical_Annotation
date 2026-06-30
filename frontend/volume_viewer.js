@@ -1,5 +1,65 @@
 const activeViewers = new WeakMap();
 
+const RENDERING_PRESETS = [
+  {
+    id: "soft",
+    label: "软组织综合",
+    mode: 0,
+    wl: 40,
+    ww: 400,
+    opacity: 1.1,
+    brightness: 1.02,
+    threshold: 0.12,
+    steps: 224,
+    ambient: 0.28,
+    diffuse: 0.54,
+    specular: 0.14,
+    rim: 0.16,
+    edgeStrength: 1.55,
+    summary: "压低骨骼遮挡，突出脂肪、肌肉、血管和实质器官边界。",
+  },
+  {
+    id: "bone",
+    label: "骨窗高密度",
+    mode: 1,
+    wl: 300,
+    ww: 1500,
+    opacity: 1.45,
+    brightness: 1.18,
+    threshold: 0.54,
+    steps: 208,
+    ambient: 0.18,
+    diffuse: 0.72,
+    specular: 0.62,
+    rim: 0.24,
+    edgeStrength: 2.25,
+    summary: "软组织接近透明，高密度骨皮质高亮，边缘和镜面反射更强。",
+  },
+  {
+    id: "lung",
+    label: "肺窗边界",
+    mode: 2,
+    wl: -600,
+    ww: 1600,
+    opacity: 0.82,
+    brightness: 0.96,
+    threshold: 0.04,
+    steps: 240,
+    ambient: 0.34,
+    diffuse: 0.42,
+    specular: 0.08,
+    rim: 0.10,
+    edgeStrength: 2.75,
+    summary: "肺实质低透明，空气-组织交界和血管纹理通过梯度增强显示。",
+  },
+];
+
+const PRESET_BY_ID = new Map(RENDERING_PRESETS.map((preset) => [preset.id, preset]));
+
+function defaultPreset() {
+  return RENDERING_PRESETS[0];
+}
+
 function decodeBase64ToUint8Array(value) {
   const binary = window.atob(value);
   const output = new Uint8Array(binary.length);
@@ -27,17 +87,28 @@ export async function renderVolume3D({ container, imageId, windowName = "volume"
   status.textContent = "正在读取真实 3D CT 体数据...";
   container.appendChild(status);
 
-  const response = await fetch(`/api/image/${imageId}/volume-data?max_dim=${maxDim}&window=${windowName}`);
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(`体数据接口失败：${message}`);
-  }
+  const response = await fetchVolumeData({ imageId, maxDim, windowName });
 
   const volumeData = await response.json();
   const values = decodeBase64ToUint8Array(volumeData.values_base64);
 
   status.textContent = "正在初始化 WebGL2 体渲染引擎...";
   renderWithWebGL({ container, volumeData, values });
+}
+
+async function fetchVolumeData({ imageId, maxDim, windowName }) {
+  const query = `max_dim=${maxDim}&window=${windowName}`;
+  const primary = await fetch(`/api/image/${imageId}/volume-data?${query}`);
+  if (primary.ok) return primary;
+  if (primary.status !== 404) {
+    const message = await primary.text();
+    throw new Error(`体数据接口失败：${message}`);
+  }
+
+  const legacy = await fetch(`/api/image/${imageId}/vtk-volume?${query}`);
+  if (legacy.ok) return legacy;
+  const message = await legacy.text();
+  throw new Error(`体数据接口失败：${message}`);
 }
 
 function createShader(gl, type, source) {
@@ -78,7 +149,7 @@ function renderWithWebGL({ container, volumeData, values }) {
 
   const badge = document.createElement("div");
   badge.className = "volume-engine-badge";
-  badge.textContent = "WebGL2 真实体渲染";
+  badge.textContent = "WebGL2 医学渲染协议";
   container.appendChild(badge);
 
   const gl = canvas.getContext("webgl2", {
@@ -116,6 +187,11 @@ function renderWithWebGL({ container, volumeData, values }) {
     uniform float uThreshold;
     uniform float uHuLow;
     uniform float uHuHigh;
+    uniform float uAmbient;
+    uniform float uDiffuse;
+    uniform float uSpecular;
+    uniform float uRim;
+    uniform float uEdgeStrength;
     uniform vec3 uVoxelStep;
     uniform int uRenderMode;
 
@@ -163,20 +239,22 @@ function renderWithWebGL({ container, volumeData, values }) {
         vec3 cancellous = vec3(0.72, 0.63, 0.50);
         vec3 cortical = vec3(1.0, 0.94, 0.78);
         vec3 bone = mix(cancellous, cortical, smoothstep(220.0, 1200.0, hu));
-        return mix(bone, vec3(1.0), edge * 0.18);
+        return mix(bone, vec3(1.0), edge * 0.26);
       }
       if (uRenderMode == 2) {
-        vec3 lung = vec3(0.26, 0.45, 0.58);
-        vec3 vessel = vec3(0.83, 0.90, 0.90);
+        vec3 air = vec3(0.05, 0.09, 0.13);
+        vec3 lung = vec3(0.18, 0.38, 0.50);
+        vec3 vessel = vec3(0.72, 0.86, 0.90);
         vec3 dense = vec3(1.0, 0.91, 0.74);
-        vec3 c = mix(lung, vessel, smoothstep(-420.0, 180.0, hu));
+        vec3 c = mix(air, lung, smoothstep(-950.0, -520.0, hu));
+        c = mix(c, vessel, smoothstep(-420.0, 180.0, hu));
         c = mix(c, dense, smoothstep(260.0, 900.0, hu));
-        return mix(c, vec3(1.0), edge * 0.14);
+        return mix(c, vec3(0.82, 0.96, 1.0), edge * 0.20);
       }
-      vec3 fat = vec3(0.72, 0.58, 0.38);
-      vec3 muscle = vec3(0.73, 0.55, 0.52);
-      vec3 vessel = vec3(0.93, 0.86, 0.76);
-      vec3 bone = vec3(1.0, 0.94, 0.78);
+      vec3 fat = vec3(0.70, 0.52, 0.34);
+      vec3 muscle = vec3(0.72, 0.48, 0.46);
+      vec3 vessel = vec3(0.98, 0.80, 0.62);
+      vec3 bone = vec3(0.84, 0.78, 0.68);
       vec3 c = mix(fat, muscle, smoothstep(-70.0, 85.0, hu));
       c = mix(c, vessel, smoothstep(90.0, 260.0, hu));
       c = mix(c, bone, smoothstep(320.0, 950.0, hu));
@@ -190,7 +268,7 @@ function renderWithWebGL({ container, volumeData, values }) {
           return 0.0;
         }
         float cortical = smoothstep(220.0, 1050.0, hu) * 0.070;
-        float denseEdge = edge * smoothstep(160.0, 700.0, hu) * 0.030;
+        float denseEdge = edge * smoothstep(160.0, 700.0, hu) * 0.050;
         return (cortical + denseEdge) * uOpacityScale;
       }
       if (uRenderMode == 2) {
@@ -198,9 +276,9 @@ function renderWithWebGL({ container, volumeData, values }) {
           return 0.0;
         }
         float lung = band(hu, -900.0, -450.0, 100.0) * 0.004;
-        float airwayEdge = edge * band(hu, -950.0, -280.0, 140.0) * 0.018;
-        float vessel = smoothstep(-120.0, 220.0, hu) * (1.0 - smoothstep(420.0, 900.0, hu)) * 0.026;
-        float bone = smoothstep(260.0, 1050.0, hu) * 0.030;
+        float airwayEdge = edge * band(hu, -950.0, -280.0, 140.0) * 0.034;
+        float vessel = smoothstep(-120.0, 220.0, hu) * (1.0 - smoothstep(420.0, 900.0, hu)) * 0.018;
+        float bone = smoothstep(260.0, 1050.0, hu) * 0.008;
         return (lung + airwayEdge + vessel + bone) * uOpacityScale;
       }
 
@@ -210,9 +288,9 @@ function renderWithWebGL({ container, volumeData, values }) {
       }
       float fat = band(hu, -180.0, -25.0, 45.0) * 0.010;
       float muscle = band(hu, -20.0, 115.0, 42.0) * 0.030;
-      float vessel = band(hu, 90.0, 330.0, 70.0) * 0.050;
-      float bone = smoothstep(300.0, 1100.0, hu) * 0.032;
-      float gradientBoost = mix(0.45, 1.85, edge);
+      float vessel = band(hu, 90.0, 330.0, 70.0) * 0.056;
+      float bone = smoothstep(300.0, 1100.0, hu) * 0.012;
+      float gradientBoost = mix(0.52, 1.95, edge);
       return (fat + muscle + vessel + bone + edge * 0.010) * gradientBoost * uOpacityScale;
     }
 
@@ -231,8 +309,8 @@ function renderWithWebGL({ container, volumeData, values }) {
       float diffuse = max(dot(normal, lightDir), 0.0);
       float rim = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.2);
       float specular = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 28.0) * edge;
-      vec3 lit = color * (0.30 + 0.64 * diffuse + 0.18 * rim);
-      return lit + vec3(1.0, 0.94, 0.82) * specular * 0.22;
+      vec3 lit = color * (uAmbient + uDiffuse * diffuse + uRim * rim);
+      return lit + vec3(1.0, 0.94, 0.82) * specular * uSpecular;
     }
 
     void main() {
@@ -264,7 +342,7 @@ function renderWithWebGL({ container, volumeData, values }) {
         float value = texture(uVolume, p).r;
         float hu = huFromValue(value);
         vec3 gradient = gradientAt(p);
-        float edge = smoothstep(0.018, 0.145, length(gradient) * 2.8);
+        float edge = smoothstep(0.018, 0.145, length(gradient) * uEdgeStrength);
         float opacity = clamp(transferOpacity(hu, edge), 0.0, 0.18);
         vec3 sampleColor = applyLighting(transferColor(hu, edge), gradient, rayDir, edge);
         color += (1.0 - alpha) * opacity * sampleColor;
@@ -290,6 +368,11 @@ function renderWithWebGL({ container, volumeData, values }) {
     threshold: gl.getUniformLocation(program, "uThreshold"),
     huLow: gl.getUniformLocation(program, "uHuLow"),
     huHigh: gl.getUniformLocation(program, "uHuHigh"),
+    ambient: gl.getUniformLocation(program, "uAmbient"),
+    diffuse: gl.getUniformLocation(program, "uDiffuse"),
+    specular: gl.getUniformLocation(program, "uSpecular"),
+    rim: gl.getUniformLocation(program, "uRim"),
+    edgeStrength: gl.getUniformLocation(program, "uEdgeStrength"),
     voxelStep: gl.getUniformLocation(program, "uVoxelStep"),
     renderMode: gl.getUniformLocation(program, "uRenderMode"),
   };
@@ -323,14 +406,15 @@ function renderWithWebGL({ container, volumeData, values }) {
     values
   );
 
+  const initialPreset = defaultPreset();
   const viewerState = {
     yaw: 0.65,
     pitch: -0.28,
-    opacityScale: 1.08,
-    brightness: 1.06,
-    threshold: 0.15,
-    steps: 224,
-    renderMode: 0,
+    preset: initialPreset,
+    opacityScale: initialPreset.opacity,
+    brightness: initialPreset.brightness,
+    threshold: initialPreset.threshold,
+    steps: initialPreset.steps,
     dragging: false,
     lastX: 0,
     lastY: 0,
@@ -339,27 +423,29 @@ function renderWithWebGL({ container, volumeData, values }) {
   const controls = document.createElement("div");
   controls.className = "volume-control-panel";
   controls.innerHTML = `
-    <label>渲染模式
+    <label class="preset-select">医学渲染协议
       <select data-volume-mode>
-        <option value="0">软组织综合</option>
-        <option value="1">骨窗高密度</option>
-        <option value="2">肺窗边界</option>
+        ${RENDERING_PRESETS.map((preset) => `<option value="${preset.id}">${preset.label}</option>`).join("")}
       </select>
     </label>
     <label>透明度
-      <input data-volume-opacity type="range" min="20" max="180" value="108" />
+      <input data-volume-opacity type="range" min="20" max="180" value="${Math.round(initialPreset.opacity * 100)}" />
     </label>
     <label>亮度
-      <input data-volume-brightness type="range" min="70" max="170" value="106" />
+      <input data-volume-brightness type="range" min="70" max="170" value="${Math.round(initialPreset.brightness * 100)}" />
     </label>
     <label>组织阈值
-      <input data-volume-threshold type="range" min="0" max="100" value="15" />
+      <input data-volume-threshold type="range" min="0" max="100" value="${Math.round(initialPreset.threshold * 100)}" />
     </label>
     <label>质量
-      <input data-volume-steps type="range" min="128" max="256" value="224" />
+      <input data-volume-steps type="range" min="128" max="256" value="${initialPreset.steps}" />
     </label>
   `;
   container.appendChild(controls);
+
+  const protocolPanel = document.createElement("div");
+  protocolPanel.className = "volume-protocol-panel";
+  container.appendChild(protocolPanel);
 
   function resize() {
     const rect = container.getBoundingClientRect();
@@ -389,13 +475,18 @@ function renderWithWebGL({ container, volumeData, values }) {
     gl.uniform1f(uniforms.threshold, viewerState.threshold);
     gl.uniform1f(uniforms.huLow, Number(huRange[0]));
     gl.uniform1f(uniforms.huHigh, Number(huRange[1]));
+    gl.uniform1f(uniforms.ambient, viewerState.preset.ambient);
+    gl.uniform1f(uniforms.diffuse, viewerState.preset.diffuse);
+    gl.uniform1f(uniforms.specular, viewerState.preset.specular);
+    gl.uniform1f(uniforms.rim, viewerState.preset.rim);
+    gl.uniform1f(uniforms.edgeStrength, viewerState.preset.edgeStrength);
     gl.uniform3f(
       uniforms.voxelStep,
       1 / Math.max(volumeData.dimensions[0], 1),
       1 / Math.max(volumeData.dimensions[1], 1),
       1 / Math.max(volumeData.dimensions[2], 1)
     );
-    gl.uniform1i(uniforms.renderMode, viewerState.renderMode);
+    gl.uniform1i(uniforms.renderMode, viewerState.preset.mode);
     gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
     gl.enableVertexAttribArray(positionLocation);
     gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
@@ -422,8 +513,34 @@ function renderWithWebGL({ container, volumeData, values }) {
     viewerState.dragging = false;
     canvas.releasePointerCapture(event.pointerId);
   });
+  function updateProtocolPanel() {
+    protocolPanel.innerHTML = `
+      <div class="protocol-kicker">Rendering Protocol</div>
+      <strong>${viewerState.preset.label}</strong>
+      <span>WL ${viewerState.preset.wl} / WW ${viewerState.preset.ww}</span>
+      <p>${viewerState.preset.summary}</p>
+    `;
+    container.dataset.preset = viewerState.preset.id;
+  }
+
+  function syncControlValues() {
+    controls.querySelector("[data-volume-opacity]").value = String(Math.round(viewerState.opacityScale * 100));
+    controls.querySelector("[data-volume-brightness]").value = String(Math.round(viewerState.brightness * 100));
+    controls.querySelector("[data-volume-threshold]").value = String(Math.round(viewerState.threshold * 100));
+    controls.querySelector("[data-volume-steps]").value = String(viewerState.steps);
+  }
+
+  updateProtocolPanel();
+
   controls.querySelector("[data-volume-mode]").addEventListener("change", (event) => {
-    viewerState.renderMode = Number(event.target.value);
+    const preset = PRESET_BY_ID.get(event.target.value) || defaultPreset();
+    viewerState.preset = preset;
+    viewerState.opacityScale = preset.opacity;
+    viewerState.brightness = preset.brightness;
+    viewerState.threshold = preset.threshold;
+    viewerState.steps = preset.steps;
+    syncControlValues();
+    updateProtocolPanel();
     draw();
   });
   controls.querySelector("[data-volume-opacity]").addEventListener("input", (event) => {

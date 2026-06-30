@@ -29,6 +29,11 @@ def read_volume_render_data(image_id: str, max_dim: int = 144, window: str = "lu
     return get_volume_render_data(image_id=image_id, max_dim=max_dim, window=window)
 
 
+@router.get("/image/{image_id}/vtk-volume")
+def read_legacy_volume_render_data(image_id: str, max_dim: int = 144, window: str = "lung") -> dict:
+    return get_volume_render_data(image_id=image_id, max_dim=max_dim, window=window)
+
+
 @router.get("/image/{image_id}/slice/{slice_index}.png")
 def read_image_slice(image_id: str, slice_index: int, window: str = "auto"):
     return render_slice_png(image_id=image_id, slice_index=slice_index, window=window)
