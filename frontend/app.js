@@ -1,8 +1,12 @@
 const state = {
   view: "dashboard",
   cases: [],
+  caseDetails: {},
+  volumeMeta: {},
   activeCaseId: null,
   activeImageId: null,
+  activeSlice: 0,
+  activeWindow: "auto",
 };
 
 const titles = {
@@ -56,6 +60,28 @@ async function apiGet(path) {
   const response = await fetch(path);
   if (!response.ok) throw new Error(`${path} 请求失败：${response.status}`);
   return response.json();
+}
+
+async function loadCaseDetail(caseId) {
+  if (!caseId) return null;
+  if (!state.caseDetails[caseId]) {
+    state.caseDetails[caseId] = await apiGet(`/api/case/${caseId}`);
+  }
+  const detail = state.caseDetails[caseId];
+  if (!state.activeImageId && detail.images?.length) {
+    state.activeImageId = detail.images[0].image_id;
+  }
+  return detail;
+}
+
+async function loadVolumeMeta(imageId) {
+  if (!imageId) return null;
+  if (!state.volumeMeta[imageId]) {
+    state.volumeMeta[imageId] = await apiGet(`/api/image/${imageId}/volume`);
+    const maxSlice = Math.max((state.volumeMeta[imageId].slice_count || 1) - 1, 0);
+    state.activeSlice = Math.min(Math.floor(maxSlice / 2), maxSlice);
+  }
+  return state.volumeMeta[imageId];
 }
 
 async function refreshCases() {
@@ -225,38 +251,112 @@ function activeCase() {
   return state.cases.find((item) => item.case_id === state.activeCaseId) || state.cases[0] || null;
 }
 
+function activeImages() {
+  const item = activeCase();
+  if (!item) return [];
+  return state.caseDetails[item.case_id]?.images || [];
+}
+
+function activeImage() {
+  const images = activeImages();
+  return images.find((image) => image.image_id === state.activeImageId) || images[0] || null;
+}
+
 function labelList() {
   return labels.map(([color, text]) => `<div class="label-row"><span class="swatch" style="background:${color}"></span>${text}</div>`).join("");
 }
 
 function renderAnnotation() {
   const item = activeCase();
+  const image = activeImage();
+  const volume = image ? state.volumeMeta[image.image_id] : null;
+  const sliceCount = volume?.slice_count || image?.slice_count || 1;
+  const maxSlice = Math.max(sliceCount - 1, 0);
+  const activeSlice = Math.min(state.activeSlice, maxSlice);
   const meta = item
     ? [["病例", item.case_id], ["患者", item.patient_id], ["影像类型", item.modality], ["状态", statusText[item.status] || item.status || "未标注"], ["图像数", item.image_count]]
     : [["病例", "暂无病例"], ["患者", "-"], ["影像类型", "-"], ["状态", "-"], ["图像数", "0"]];
+  if (image) {
+    meta.push(["图像", image.image_id]);
+    meta.push(["格式", image.file_format]);
+  }
   return `
     <div class="workbench-layout">
       <aside class="case-sidebar">
         <h2>病例信息</h2>
         <div class="case-meta">${meta.map(([key, value]) => `<div class="meta-line"><span>${key}</span><strong>${value}</strong></div>`).join("")}</div>
+        <h3 style="margin-top:24px">体数据</h3>
+        <div class="case-meta">
+          <div class="meta-line"><span>尺寸</span><strong id="volumeSize">${volume ? `${volume.width} × ${volume.height} × ${volume.slice_count}` : "加载中"}</strong></div>
+          <div class="meta-line"><span>读取器</span><strong id="volumeSource">${volume?.source || "-"}</strong></div>
+        </div>
         <h3 style="margin-top:24px">版本</h3>
         <div class="timeline"><span class="chip">v1_人工</span><span class="chip">v2_AI</span><span class="chip">v3_融合</span><span class="chip">final</span></div>
         <h3 style="margin-top:24px">标签</h3>
         <div class="label-list">${labelList()}</div>
       </aside>
       <section class="viewer">
-        <div class="viewer-toolbar"><span>${item ? item.case_id : "暂无病例"} | 轴位 Axial</span><span>窗位：肺窗 | 缩放 100%</span></div>
-        <div class="ct-frame"><div class="mask-overlay"></div><div class="roi-box"></div><div class="coordinate">x: 130 y: 220 z: 42 | HU: -620</div></div>
-        <div class="slider-row"><span>切片</span><input type="range" min="1" max="134" value="42" /><strong>42</strong></div>
+        <div class="viewer-toolbar"><span id="viewerTitle">${item ? item.case_id : "暂无病例"} | 轴位 Axial</span><span id="viewerInfo">${image ? image.image_id : "等待图像"} | 缩放 100%</span></div>
+        <div class="ct-frame real-image-frame">
+          ${image ? `<img id="sliceImage" class="ct-slice-image" alt="医学影像切片" />` : `<div class="slice-empty">暂无可显示图像</div>`}
+          <div class="mask-overlay"></div>
+          <div class="roi-box"></div>
+          <div class="coordinate" id="sliceCoordinate">z: ${activeSlice + 1} / ${sliceCount}</div>
+        </div>
+        <div class="slider-row"><span>切片</span><input id="sliceSlider" type="range" min="0" max="${maxSlice}" value="${activeSlice}" /><strong id="sliceValue">${activeSlice + 1}</strong></div>
         <div class="slider-row"><span>透明度</span><input type="range" min="0" max="100" value="54" /><strong>54%</strong></div>
+        <div class="slider-row"><span>窗位</span><select id="windowSelect"><option value="auto">自动</option><option value="lung">肺窗</option><option value="soft">软组织</option><option value="bone">骨窗</option></select><strong id="windowValue">自动</strong></div>
       </section>
       <aside class="tool-panel">
         <h2>标注工具</h2>
         <div class="tool-grid">${["画笔", "橡皮擦", "多边形", "矩形ROI", "点标注", "智能选择", "撤销", "重做", "清空", "AI预测"].map((tool) => `<button class="tool-button">${tool}</button>`).join("")}</div>
-        <div class="grid action-stack" style="margin-top:18px"><button class="primary-button">保存 Mask</button><button class="ghost-button">设为 final</button><button class="danger-button">驳回</button></div>
+        <div class="grid action-stack" style="margin-top:18px"><button class="primary-button">保存 Mask</button><button class="ghost-button">设为 final</button><a class="ghost-button export-link ${image ? "" : "disabled-link"}" href="${image ? `/api/image/${image.image_id}/export-3d` : "#"}">导出 3D 图像</a><button class="danger-button">驳回</button></div>
       </aside>
     </div>
   `;
+}
+
+async function hydrateAnnotation() {
+  const item = activeCase();
+  if (!item) return;
+  try {
+    await loadCaseDetail(item.case_id);
+    const image = activeImage();
+    if (!image) return;
+    const meta = await loadVolumeMeta(image.image_id);
+    updateSliceViewer(image, meta);
+  } catch (error) {
+    showToast(error.message || "图像读取失败");
+  }
+}
+
+function updateSliceViewer(image, meta) {
+  const imageElement = $("#sliceImage");
+  if (!imageElement || !meta) {
+    render();
+    return;
+  }
+
+  const maxSlice = Math.max((meta.slice_count || 1) - 1, 0);
+  state.activeSlice = Math.max(0, Math.min(state.activeSlice, maxSlice));
+  const slider = $("#sliceSlider");
+  if (slider) {
+    slider.max = String(maxSlice);
+    slider.value = String(state.activeSlice);
+  }
+
+  const sliceNumber = state.activeSlice + 1;
+  imageElement.src = `/api/image/${image.image_id}/slice/${state.activeSlice}.png?window=${state.activeWindow}&t=${Date.now()}`;
+  $("#sliceValue").textContent = String(sliceNumber);
+  $("#sliceCoordinate").textContent = `z: ${sliceNumber} / ${meta.slice_count}`;
+  $("#viewerInfo").textContent = `${image.image_id} | ${meta.width} × ${meta.height} × ${meta.slice_count}`;
+  $("#volumeSize").textContent = `${meta.width} × ${meta.height} × ${meta.slice_count}`;
+  $("#volumeSource").textContent = meta.source;
+  const select = $("#windowSelect");
+  if (select) {
+    select.value = state.activeWindow;
+    $("#windowValue").textContent = select.options[select.selectedIndex].textContent;
+  }
 }
 
 function renderTrain() {
@@ -311,9 +411,32 @@ function render() {
   document.querySelectorAll("[data-open-case]").forEach((button) => {
     button.addEventListener("click", () => {
       state.activeCaseId = button.dataset.openCase;
+      state.activeImageId = null;
+      state.activeSlice = 0;
       setView("annotation");
     });
   });
+  const sliceSlider = $("#sliceSlider");
+  if (sliceSlider) {
+    sliceSlider.addEventListener("input", () => {
+      state.activeSlice = Number(sliceSlider.value);
+      const image = activeImage();
+      const meta = image ? state.volumeMeta[image.image_id] : null;
+      if (image && meta) updateSliceViewer(image, meta);
+    });
+  }
+  const windowSelect = $("#windowSelect");
+  if (windowSelect) {
+    windowSelect.value = state.activeWindow;
+    windowSelect.addEventListener("change", () => {
+      state.activeWindow = windowSelect.value;
+      $("#windowValue").textContent = windowSelect.options[windowSelect.selectedIndex].textContent;
+      const image = activeImage();
+      const meta = image ? state.volumeMeta[image.image_id] : null;
+      if (image && meta) updateSliceViewer(image, meta);
+    });
+  }
+  if (state.view === "annotation") hydrateAnnotation();
 }
 
 function bindNavigation() {

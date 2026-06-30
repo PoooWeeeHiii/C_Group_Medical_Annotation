@@ -1,0 +1,282 @@
+from __future__ import annotations
+
+import gzip
+import io
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from zipfile import ZipFile
+
+import numpy as np
+from fastapi import HTTPException
+from fastapi.responses import FileResponse, Response
+from PIL import Image
+
+from backend.app.core.config import IMAGES_DB_PATH, PROJECT_ROOT
+from backend.app.services.file_service import load_json_list
+
+
+@dataclass(frozen=True)
+class VolumeData:
+    array: np.ndarray
+    spacing: tuple[float, float, float]
+    origin: tuple[float, float, float]
+    source: str
+
+
+NRRD_TYPES: dict[str, str] = {
+    "signed char": "i1",
+    "int8": "i1",
+    "uchar": "u1",
+    "unsigned char": "u1",
+    "uint8": "u1",
+    "short": "i2",
+    "short int": "i2",
+    "int16": "i2",
+    "ushort": "u2",
+    "unsigned short": "u2",
+    "uint16": "u2",
+    "int": "i4",
+    "int32": "i4",
+    "uint": "u4",
+    "unsigned int": "u4",
+    "uint32": "u4",
+    "float": "f4",
+    "double": "f8",
+}
+
+
+WINDOWS = {
+    "lung": (-600, 1500),
+    "soft": (40, 400),
+    "bone": (500, 2000),
+}
+
+
+def _image_record(image_id: str) -> dict:
+    images = load_json_list(IMAGES_DB_PATH)
+    image = next((item for item in images if item.get("image_id") == image_id), None)
+    if image is None:
+        raise HTTPException(status_code=404, detail=f"Image not found: {image_id}")
+    return image
+
+
+def _resolve_path(path_value: str) -> Path:
+    path = (PROJECT_ROOT / path_value).resolve()
+    try:
+        path.relative_to(PROJECT_ROOT.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid image path") from exc
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Image file not found: {path_value}")
+    return path
+
+
+def _read_nrrd_header(raw: bytes) -> tuple[dict[str, str], int]:
+    for marker in (b"\n\n", b"\r\n\r\n"):
+        index = raw.find(marker)
+        if index != -1:
+            header_raw = raw[:index].decode("utf-8", errors="replace")
+            data_offset = index + len(marker)
+            break
+    else:
+        raise ValueError("NRRD header terminator not found")
+
+    fields: dict[str, str] = {}
+    for line in header_raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("NRRD"):
+            continue
+        if ":" in line:
+            key, value = line.split(":", 1)
+            fields[key.strip().lower()] = value.strip()
+    return fields, data_offset
+
+
+def _spacing_from_nrrd(fields: dict[str, str]) -> tuple[float, float, float]:
+    if "spacings" in fields:
+        values = [float(item) for item in fields["spacings"].split()[:3]]
+        while len(values) < 3:
+            values.append(1.0)
+        return values[0], values[1], values[2]
+    return 1.0, 1.0, 1.0
+
+
+def _load_nrrd_bytes(raw: bytes, source: str) -> VolumeData:
+    fields, data_offset = _read_nrrd_header(raw)
+    sizes = [int(item) for item in fields.get("sizes", "").split()]
+    if len(sizes) < 2:
+        raise ValueError("NRRD sizes field is missing")
+
+    dtype_key = fields.get("type", "short").lower()
+    dtype_code = NRRD_TYPES.get(dtype_key)
+    if dtype_code is None:
+        raise ValueError(f"Unsupported NRRD type: {dtype_key}")
+
+    dtype = np.dtype(dtype_code)
+    endian = fields.get("endian", "little").lower()
+    if dtype.itemsize > 1:
+        dtype = dtype.newbyteorder(">" if endian == "big" else "<")
+
+    encoding = fields.get("encoding", "raw").lower()
+    payload = raw[data_offset:]
+    if encoding in {"gzip", "gz"}:
+        payload = gzip.decompress(payload)
+
+    if encoding in {"ascii", "text", "txt"}:
+        data = np.fromstring(payload.decode("utf-8", errors="replace"), sep=" ", dtype=dtype)
+    elif encoding in {"raw", "gzip", "gz"}:
+        data = np.frombuffer(payload, dtype=dtype)
+    else:
+        raise ValueError(f"Unsupported NRRD encoding: {encoding}")
+
+    if len(sizes) == 2:
+        shape = (1, sizes[1], sizes[0])
+    else:
+        shape = (sizes[2], sizes[1], sizes[0])
+    expected = int(np.prod(shape))
+    if data.size < expected:
+        raise ValueError("NRRD data payload is shorter than expected")
+
+    array = data[:expected].reshape(shape)
+    return VolumeData(array=array, spacing=_spacing_from_nrrd(fields), origin=(0.0, 0.0, 0.0), source=source)
+
+
+def _load_nrrd_path(path: Path) -> VolumeData:
+    return _load_nrrd_bytes(path.read_bytes(), path.name)
+
+
+def _load_zip_nrrd(path: Path) -> VolumeData:
+    with ZipFile(path) as archive:
+        names = [name for name in archive.namelist() if name.lower().endswith(".nrrd")]
+        image_names = [name for name in names if "label" not in name.lower() and "mask" not in name.lower()]
+        selected = (image_names or names)[0] if names else None
+        if selected is None:
+            raise ValueError("No NRRD file found in ZIP")
+        return _load_nrrd_bytes(archive.read(selected), selected)
+
+
+def _load_with_simpleitk(path: Path) -> VolumeData:
+    import SimpleITK as sitk
+
+    suffix = path.suffix.lower()
+    if suffix == ".zip":
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            with ZipFile(path) as archive:
+                archive.extractall(tmp_path)
+            nrrd_files = [p for p in tmp_path.rglob("*.nrrd") if "label" not in p.name.lower()]
+            nii_files = list(tmp_path.rglob("*.nii")) + list(tmp_path.rglob("*.nii.gz"))
+            candidates = nrrd_files or nii_files
+            if candidates:
+                image = sitk.ReadImage(str(candidates[0]))
+            else:
+                dicom_names = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(str(tmp_path))
+                if not dicom_names:
+                    raise ValueError("No readable medical image found in ZIP")
+                reader = sitk.ImageSeriesReader()
+                reader.SetFileNames(dicom_names)
+                image = reader.Execute()
+    elif suffix == ".dcm":
+        dicom_names = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(str(path.parent))
+        if dicom_names:
+            reader = sitk.ImageSeriesReader()
+            reader.SetFileNames(dicom_names)
+            image = reader.Execute()
+        else:
+            image = sitk.ReadImage(str(path))
+    else:
+        image = sitk.ReadImage(str(path))
+
+    array = sitk.GetArrayFromImage(image)
+    if array.ndim == 2:
+        array = array.reshape((1, array.shape[0], array.shape[1]))
+    spacing = tuple(float(v) for v in image.GetSpacing()[:3])
+    origin = tuple(float(v) for v in image.GetOrigin()[:3])
+    return VolumeData(array=array, spacing=spacing, origin=origin, source="SimpleITK")
+
+
+def load_volume(image_id: str) -> tuple[dict, VolumeData]:
+    image = _image_record(image_id)
+    path = _resolve_path(str(image["path"]))
+    try:
+        return image, _load_with_simpleitk(path)
+    except ModuleNotFoundError:
+        pass
+    except Exception:
+        # Fall through to the lightweight NRRD reader when SimpleITK cannot read
+        # a local sample. Real DICOM/NIfTI support still comes from SimpleITK.
+        pass
+
+    try:
+        if path.suffix.lower() == ".nrrd":
+            return image, _load_nrrd_path(path)
+        if path.suffix.lower() == ".zip":
+            return image, _load_zip_nrrd(path)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Cannot read medical volume: {exc}") from exc
+
+    raise HTTPException(
+        status_code=422,
+        detail="Cannot read this image without SimpleITK. Please install requirements.txt.",
+    )
+
+
+def get_volume_metadata(image_id: str) -> dict:
+    image, volume = load_volume(image_id)
+    depth, height, width = volume.array.shape[:3]
+    return {
+        "success": True,
+        "image_id": image["image_id"],
+        "case_id": image["case_id"],
+        "width": width,
+        "height": height,
+        "slice_count": depth,
+        "spacing": volume.spacing,
+        "origin": volume.origin,
+        "source": volume.source,
+        "file_format": image.get("file_format", "unknown"),
+        "path": image.get("path", ""),
+    }
+
+
+def _window_slice(slice_data: np.ndarray, window: str) -> np.ndarray:
+    data = slice_data.astype(np.float32)
+    if window in WINDOWS:
+        level, width = WINDOWS[window]
+        low = level - width / 2
+        high = level + width / 2
+    else:
+        low, high = np.percentile(data, [1, 99])
+        if high <= low:
+            low, high = float(data.min()), float(data.max())
+        if high <= low:
+            high = low + 1
+
+    data = np.clip(data, low, high)
+    data = (data - low) / (high - low) * 255.0
+    return data.astype(np.uint8)
+
+
+def render_slice_png(image_id: str, slice_index: int, window: str = "auto") -> Response:
+    _, volume = load_volume(image_id)
+    depth = volume.array.shape[0]
+    if depth <= 0:
+        raise HTTPException(status_code=422, detail="Volume has no slices")
+    index = max(0, min(slice_index, depth - 1))
+    pixels = _window_slice(volume.array[index], window)
+
+    image = Image.fromarray(pixels, mode="L")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return Response(content=buffer.getvalue(), media_type="image/png")
+
+
+def export_volume_file(image_id: str) -> FileResponse:
+    image = _image_record(image_id)
+    path = _resolve_path(str(image["path"]))
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        filename=f"{image['image_id']}_{path.name}",
+    )
