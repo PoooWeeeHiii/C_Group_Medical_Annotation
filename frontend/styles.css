@@ -761,8 +761,58 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 .swatch { width: 18px; height: 18px; border-radius: 4px; }
 .timeline { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
 .timeline .chip { border-color: rgba(0, 229, 176, 0.35); }
+.timeline .active-chip {
+  color: var(--green);
+  border-color: rgba(0, 229, 176, 0.72);
+  background: rgba(0, 229, 176, 0.12);
+}
+.mask-record-list, .version-record-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.mask-record, .version-record {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(2, 12, 24, 0.58);
+}
+.mask-record div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.mask-record strong, .version-record strong {
+  color: var(--text);
+  font-size: 13px;
+}
+.mask-record span, .version-record span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.mask-record b {
+  color: var(--green);
+  font-size: 12px;
+}
+.mask-record code {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: #b9cddd;
+  font-size: 11px;
+  line-height: 1.5;
+}
 .log-box { margin-top: 16px; min-height: 156px; padding: 14px; color: #b9cddd; border: 1px solid var(--line); border-radius: 8px; background: rgba(0, 0, 0, 0.24); font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; line-height: 1.7; white-space: pre-line; }
 .placeholder { min-height: 220px; display: grid; place-items: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; text-align: center; padding: 20px; }
+.placeholder.compact {
+  min-height: 74px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+}
 .toast { position: fixed; right: 22px; bottom: 22px; max-width: 360px; padding: 14px 16px; border: 1px solid var(--line-strong); border-radius: 8px; background: rgba(7, 17, 31, 0.94); color: var(--text); box-shadow: var(--shadow); transform: translateY(18px); opacity: 0; pointer-events: none; transition: opacity 0.2s ease, transform 0.2s ease; }
 .toast.show { transform: translateY(0); opacity: 1; }
 

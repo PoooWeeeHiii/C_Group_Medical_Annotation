@@ -2,8 +2,11 @@ const state = {
   view: "dashboard",
   cases: [],
   caseDetails: {},
+  masksByImage: {},
+  versionsByCase: {},
   volumeMeta: {},
   volumeErrors: {},
+  datasetExportResult: null,
   activeCaseId: null,
   activeImageId: null,
   activeSlice: 0,
@@ -43,6 +46,15 @@ const statusText = {
 
 const $ = (selector) => document.querySelector(selector);
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function showToast(message) {
   const toast = $("#toast");
   toast.textContent = message;
@@ -62,8 +74,12 @@ function setView(view) {
 
 async function apiGet(path) {
   const response = await fetch(path);
-  if (!response.ok) throw new Error(`${path} 请求失败：${response.status}`);
-  return response.json();
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || {});
+    throw new Error(detail || `${path} 请求失败：${response.status}`);
+  }
+  return data;
 }
 
 async function apiPost(path, payload) {
@@ -100,6 +116,24 @@ async function loadVolumeMeta(imageId) {
     state.activeSlice = Math.min(Math.floor(maxSlice / 2), maxSlice);
   }
   return state.volumeMeta[imageId];
+}
+
+async function loadImageMasks(imageId, { force = false } = {}) {
+  if (!imageId) return [];
+  if (force || !state.masksByImage[imageId]) {
+    const data = await apiGet(`/api/image/${imageId}/masks`);
+    state.masksByImage[imageId] = data.items || data.masks || [];
+  }
+  return state.masksByImage[imageId];
+}
+
+async function loadCaseVersions(caseId, { force = false } = {}) {
+  if (!caseId) return [];
+  if (force || !state.versionsByCase[caseId]) {
+    const data = await apiGet(`/api/case/${caseId}/versions`);
+    state.versionsByCase[caseId] = data.items || [];
+  }
+  return state.versionsByCase[caseId];
 }
 
 async function refreshCases() {
@@ -171,10 +205,101 @@ async function saveCurrentMask(event) {
       label: "label",
       mask_format: "nii.gz",
     });
+    await apiPost("/api/version", {
+      case_id: item.case_id,
+      version: "v1_manual",
+      annotation: data.mask.annotation_id || null,
+      model: null,
+      dataset: null,
+    });
+    await loadImageMasks(image.image_id, { force: true });
+    await loadCaseVersions(item.case_id, { force: true });
     await refreshCases();
     showToast(`Mask 保存成功：${data.mask_id}`);
+    render();
   } catch (error) {
     showToast(error.message || "Mask 保存失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+async function approveFinalMask(event) {
+  const button = event.currentTarget;
+  const item = activeCase();
+  const image = activeImage();
+  if (!item || !image) {
+    showToast("请先选择病例和图像");
+    return;
+  }
+
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "确认中...";
+  try {
+    const masks = await loadImageMasks(image.image_id, { force: true });
+    const source = [...masks].reverse().find((mask) => mask.version === "v1_manual");
+    if (!source) {
+      throw new Error("当前图像还没有 v1_manual Mask，请先保存 Mask");
+    }
+    const data = await apiPost("/api/save_mask", {
+      case_id: item.case_id,
+      image_id: image.image_id,
+      annotation_id: source.annotation_id || null,
+      version: "final",
+      label: source.label || "label",
+      mask_format: "nii.gz",
+    });
+    await apiPost("/api/version", {
+      case_id: item.case_id,
+      version: "final",
+      annotation: data.mask.annotation_id || source.annotation_id || null,
+      model: null,
+      dataset: null,
+    });
+    await loadImageMasks(image.image_id, { force: true });
+    await loadCaseVersions(item.case_id, { force: true });
+    await refreshCases();
+    showToast(`已设为 final：${data.mask_id}`);
+    render();
+  } catch (error) {
+    showToast(error.message || "final 审核失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+async function exportDataset(event) {
+  const button = event.currentTarget;
+  const item = activeCase();
+  if (!item) {
+    showToast("请先选择病例");
+    return;
+  }
+  const version = $("#exportVersion")?.value || "final";
+  const format = $("#exportFormat")?.value || "nnunet";
+  const datasetId = $("#exportDatasetId")?.value.trim() || undefined;
+
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "导出中...";
+  try {
+    const data = await apiPost("/api/export", {
+      dataset_id: datasetId,
+      name: `${item.case_id}_${version}`,
+      version,
+      train: [item.case_id],
+      val: [],
+      test: [],
+      format,
+    });
+    state.datasetExportResult = data;
+    showToast(`Dataset 导出成功：${data.dataset_id}`);
+    render();
+  } catch (error) {
+    showToast(error.message || "Dataset 导出失败");
   } finally {
     button.disabled = false;
     button.textContent = previousText;
@@ -314,6 +439,51 @@ function labelList() {
   return labels.map(([color, text]) => `<div class="label-row"><span class="swatch" style="background:${color}"></span>${text}</div>`).join("");
 }
 
+function masksForActiveImage() {
+  const image = activeImage();
+  return image ? state.masksByImage[image.image_id] || [] : [];
+}
+
+function versionsForActiveCase() {
+  const item = activeCase();
+  return item ? state.versionsByCase[item.case_id] || [] : [];
+}
+
+function renderMaskList(masks) {
+  if (!masks.length) {
+    return `<div class="placeholder compact">暂无 Mask。点击“保存 Mask”生成 v1_manual 记录。</div>`;
+  }
+  return `
+    <div class="mask-record-list">
+      ${masks.map((mask) => `
+        <article class="mask-record">
+          <div><strong>${escapeHtml(mask.mask_id)}</strong><span>${escapeHtml(mask.version)}</span></div>
+          <div><span>标签</span><b>${escapeHtml(mask.label)}</b></div>
+          <code>${escapeHtml(mask.path)}</code>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderVersionList(versions) {
+  if (!versions.length) {
+    return `<div class="placeholder compact">暂无版本记录。保存 Mask 后会写入 v1_manual，设为 final 后会写入 final。</div>`;
+  }
+  return `
+    <div class="version-record-list">
+      ${versions.map((item) => `
+        <article class="version-record">
+          <strong>${escapeHtml(item.version)}</strong>
+          <span>annotation: ${escapeHtml(item.annotation || "-")}</span>
+          <span>model: ${escapeHtml(item.model || "-")}</span>
+          <span>dataset: ${escapeHtml(item.dataset || "-")}</span>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
 function renderViewerModeButtons() {
   return `
     <div class="viewer-mode-switch">
@@ -410,11 +580,13 @@ function renderAnnotation() {
   const item = activeCase();
   const image = activeImage();
   const volume = image ? state.volumeMeta[image.image_id] : null;
+  const masks = masksForActiveImage();
+  const versions = versionsForActiveCase();
   const sliceCount = volume?.slice_count || image?.slice_count || 1;
   const maxSlice = Math.max(sliceCount - 1, 0);
   const activeSlice = Math.min(state.activeSlice, maxSlice);
   const meta = item
-    ? [["病例", item.case_id], ["患者", item.patient_id], ["影像类型", item.modality], ["状态", statusText[item.status] || item.status || "未标注"], ["图像数", item.image_count]]
+    ? [["病例", item.case_id], ["患者", item.patient_id], ["影像类型", item.modality], ["状态", statusText[item.status] || item.status || "未标注"], ["图像数", item.image_count], ["Mask数", masks.length]]
     : [["病例", "暂无病例"], ["患者", "-"], ["影像类型", "-"], ["状态", "-"], ["图像数", "0"]];
   if (image) {
     meta.push(["图像", image.image_id]);
@@ -431,7 +603,7 @@ function renderAnnotation() {
           <div class="meta-line"><span>读取器</span><strong id="volumeSource">${volume?.source || "-"}</strong></div>
         </div>
         <h3 style="margin-top:24px">版本</h3>
-        <div class="timeline"><span class="chip">v1_人工</span><span class="chip">v2_AI</span><span class="chip">v3_融合</span><span class="chip">final</span></div>
+        <div class="timeline">${["v1_manual", "v2_ai", "v3_fusion", "final"].map((version) => `<span class="chip ${versions.some((item) => item.version === version) ? "active-chip" : ""}">${version}</span>`).join("")}</div>
         <h3 style="margin-top:24px">标签</h3>
         <div class="label-list">${labelList()}</div>
       </aside>
@@ -439,7 +611,9 @@ function renderAnnotation() {
       <aside class="tool-panel">
         <h2>标注工具</h2>
         <div class="tool-grid">${["画笔", "橡皮擦", "多边形", "矩形ROI", "点标注", "智能选择", "撤销", "重做", "清空", "AI预测"].map((tool) => `<button class="tool-button">${tool}</button>`).join("")}</div>
-        <div class="grid action-stack" style="margin-top:18px"><button class="primary-button" data-save-mask ${image ? "" : "disabled"}>保存 Mask</button><button class="ghost-button">设为 final</button><a class="ghost-button export-link ${image ? "" : "disabled-link"}" href="${image ? `/api/image/${image.image_id}/export-3d` : "#"}">导出 3D 图像</a><button class="danger-button">驳回</button></div>
+        <div class="grid action-stack" style="margin-top:18px"><button class="primary-button" data-save-mask ${image ? "" : "disabled"}>保存 Mask</button><button class="ghost-button" data-final-mask ${masks.some((mask) => mask.version === "v1_manual") ? "" : "disabled"}>设为 final</button><a class="ghost-button export-link ${image ? "" : "disabled-link"}" href="${image ? `/api/image/${image.image_id}/export-3d` : "#"}">导出 3D 图像</a><button class="danger-button">驳回</button></div>
+        <h3 style="margin-top:22px">当前 Mask</h3>
+        ${renderMaskList(masks)}
       </aside>
     </div>
   `;
@@ -452,6 +626,13 @@ async function hydrateAnnotation() {
     await loadCaseDetail(item.case_id);
     const image = activeImage();
     if (!image) return;
+    const needsMaskRender = !state.masksByImage[image.image_id] || !state.versionsByCase[item.case_id];
+    await loadImageMasks(image.image_id);
+    await loadCaseVersions(item.case_id);
+    if (needsMaskRender) {
+      render();
+      return;
+    }
     const meta = await loadVolumeMeta(image.image_id);
     if (state.volumeViewMode === "2d") {
       updateSliceViewer(image, meta);
@@ -521,6 +702,18 @@ function displaySliceError(message) {
   if (source) source.textContent = "读取失败";
 }
 
+async function hydrateVersions() {
+  const item = activeCase();
+  if (!item) return;
+  const needsRender = !state.versionsByCase[item.case_id];
+  try {
+    await loadCaseVersions(item.case_id);
+    if (needsRender) render();
+  } catch (error) {
+    showToast(error.message || "版本记录加载失败");
+  }
+}
+
 function renderTrain() {
   return `
     <div class="grid cols-2">
@@ -546,9 +739,15 @@ function renderInference() {
 }
 
 function renderVersions() {
+  const item = activeCase();
+  const versions = versionsForActiveCase();
   return `
-    <section class="panel"><h2>${state.activeCaseId || "Case0001"} 版本时间线</h2><div class="timeline"><span class="chip">人工 V1</span><span class="chip">AI V1</span><span class="chip">修正 V2</span><span class="chip">final</span></div></section>
-    <div class="grid cols-2" style="margin-top:18px"><section class="viewer"><h2>版本 A</h2><div class="ct-frame" style="min-height:330px"><div class="mask-overlay"></div></div></section><section class="viewer"><h2>版本 B</h2><div class="ct-frame" style="min-height:330px"><div class="roi-box"></div></div></section></div>
+    <section class="panel">
+      <h2>${item ? item.case_id : "暂无病例"} 版本时间线</h2>
+      <div class="timeline">${["v1_manual", "v2_ai", "v3_fusion", "final"].map((version) => `<span class="chip ${versions.some((entry) => entry.version === version) ? "active-chip" : ""}">${version}</span>`).join("")}</div>
+      ${renderVersionList(versions)}
+    </section>
+    <div class="grid cols-2" style="margin-top:18px"><section class="viewer"><h2>人工 / AI 版本</h2><div class="ct-frame" style="min-height:330px"><div class="mask-overlay"></div></div></section><section class="viewer"><h2>final 审核版本</h2><div class="ct-frame" style="min-height:330px"><div class="roi-box"></div></div></section></div>
     <div class="grid cols-4" style="margin-top:18px">${metricCard("Dice", "0.86", "重叠度")}${metricCard("IoU", "0.75", "交并比")}${metricCard("HD95", "4.2", "边界距离")}${metricCard("体积差异", "12%", "差异比例")}</div>
   `;
 }
@@ -558,7 +757,32 @@ function renderQuality() {
 }
 
 function renderExport() {
-  return `<section class="panel"><div class="toolbar-row"><div class="field"><label>版本</label><select><option>final</option><option>v3_融合</option><option>v2_AI</option></select></div><div class="field"><label>格式</label><select><option>nnUNet</option><option>PNG</option><option>JSON</option><option>COCO</option><option>YOLO</option></select></div><button class="primary-button">导出 Dataset</button><button class="ghost-button">下载 ZIP</button></div></section><section class="table-wrap" style="margin-top:18px"><table><thead><tr><th>病例ID</th><th>图像路径</th><th>Mask路径</th><th>版本</th><th>数据划分</th></tr></thead><tbody><tr><td>Case0001</td><td>dataset/images/Case0001</td><td>dataset/labels/Case0001/final</td><td>final</td><td>train</td></tr></tbody></table></section>`;
+  const item = activeCase();
+  const result = state.datasetExportResult;
+  return `
+    <section class="panel">
+      <div class="toolbar-row">
+        <div class="field"><label>Dataset ID</label><input id="exportDatasetId" placeholder="自动生成 Dataset0001" /></div>
+        <div class="field"><label>版本</label><select id="exportVersion"><option value="final">final</option><option value="v3_fusion">v3_fusion</option><option value="v2_ai">v2_ai</option><option value="v1_manual">v1_manual</option></select></div>
+        <div class="field"><label>格式</label><select id="exportFormat"><option value="nnunet">nnUNet</option><option value="json">JSON Manifest</option></select></div>
+        <button class="primary-button" data-export-dataset ${item ? "" : "disabled"}>导出 Dataset</button>
+      </div>
+    </section>
+    <section class="table-wrap" style="margin-top:18px">
+      <table><thead><tr><th>病例ID</th><th>导出版本</th><th>数据划分</th><th>说明</th></tr></thead><tbody><tr><td>${item ? item.case_id : "-"}</td><td>final</td><td>train</td><td>当前最小版本按当前病例导出；val/test 暂为空。</td></tr></tbody></table>
+    </section>
+    <section class="panel" style="margin-top:18px">
+      <h2>导出结果</h2>
+      ${result ? `
+        <div class="case-meta">
+          <div class="meta-line"><span>Dataset</span><strong>${escapeHtml(result.dataset_id)}</strong></div>
+          <div class="meta-line"><span>Manifest</span><strong>${escapeHtml(result.output_path)}</strong></div>
+          <div class="meta-line"><span>Split</span><strong>${escapeHtml(result.split_path)}</strong></div>
+          <div class="meta-line"><span>Label Map</span><strong>${escapeHtml(result.label_map_path)}</strong></div>
+        </div>
+      ` : `<div class="placeholder compact">尚未导出。请先确保当前病例已有 final Mask。</div>`}
+    </section>
+  `;
 }
 
 function renderSettings() {
@@ -587,6 +811,14 @@ function render() {
   const saveMaskButton = $("[data-save-mask]");
   if (saveMaskButton) {
     saveMaskButton.addEventListener("click", saveCurrentMask);
+  }
+  const finalMaskButton = $("[data-final-mask]");
+  if (finalMaskButton) {
+    finalMaskButton.addEventListener("click", approveFinalMask);
+  }
+  const exportDatasetButton = $("[data-export-dataset]");
+  if (exportDatasetButton) {
+    exportDatasetButton.addEventListener("click", exportDataset);
   }
   document.querySelectorAll("[data-open-case]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -619,6 +851,7 @@ function render() {
     });
   }
   if (state.view === "annotation") hydrateAnnotation();
+  if (state.view === "versions") hydrateVersions();
 }
 
 async function startVolumeViewer(image) {
