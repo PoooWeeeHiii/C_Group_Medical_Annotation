@@ -140,8 +140,13 @@ async function loadVolumeMeta(imageId) {
 async function loadImageMasks(imageId, { force = false } = {}) {
   if (!imageId) return [];
   if (force || !state.masksByImage[imageId]) {
-    const data = await apiGet(`/api/image/${imageId}/masks`);
-    state.masksByImage[imageId] = data.items || data.masks || [];
+    try {
+      const data = await apiGet(`/api/image/${imageId}/masks`);
+      state.masksByImage[imageId] = data.items || data.masks || [];
+    } catch (error) {
+      console.warn("Mask 列表加载失败，已按空列表处理：", error);
+      state.masksByImage[imageId] = [];
+    }
   }
   return state.masksByImage[imageId];
 }

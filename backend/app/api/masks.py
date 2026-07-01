@@ -23,6 +23,7 @@ def read_mask(mask_id: str) -> MaskDetailResponse:
 
 
 @router.get("/image/{image_id}/masks", response_model=MaskListResponse)
+@router.get("/images/{image_id}/masks", response_model=MaskListResponse)
 def list_image_masks(image_id: str) -> MaskListResponse:
     matched = list_masks_for_image(image_id)
     return MaskListResponse(
