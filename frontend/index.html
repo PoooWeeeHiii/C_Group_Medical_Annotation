@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>医学影像标注平台</title>
+    <link rel="stylesheet" href="/frontend/styles.css?v=research-ct-viewer-20260701" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 80 80" role="img">
+              <rect x="12" y="14" width="56" height="52" rx="12" class="mark-frame" />
+              <path d="M24 43h10l5-13 8 25 6-12h9" class="mark-wave" />
+              <path d="M40 23v14M33 30h14" class="mark-cross" />
+              <line x1="18" y1="18" x2="18" y2="62" class="mark-scan" />
+            </svg>
+          </div>
+          <div>
+            <div class="brand-title">Medical Annotation</div>
+            <div class="brand-subtitle">C组医学标注平台</div>
+          </div>
+        </div>
+
+        <nav class="nav-list" aria-label="主导航">
+          <button class="nav-item active" data-view="dashboard"><span>⌁</span>数据总览</button>
+          <button class="nav-item" data-view="cases"><span>▤</span>病例中心</button>
+          <button class="nav-item" data-view="annotation"><span>◱</span>标注工作台</button>
+          <button class="nav-item" data-view="train"><span>↗</span>AI训练中心</button>
+          <button class="nav-item" data-view="inference"><span>◈</span>AI推理中心</button>
+          <button class="nav-item" data-view="versions"><span>◎</span>版本审核</button>
+          <button class="nav-item" data-view="quality"><span>◇</span>质量报告</button>
+          <button class="nav-item" data-view="export"><span>⇩</span>Dataset导出</button>
+          <button class="nav-item" data-view="settings"><span>⚙</span>系统设置</button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <span class="status-dot"></span>
+          <span id="apiStatus">后端检测中</span>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">医学 AI 工作站</div>
+            <h1 id="pageTitle">数据总览</h1>
+          </div>
+          <div class="topbar-actions">
+            <div class="date-pill" id="currentDate"></div>
+            <button class="ghost-button" id="refreshButton">刷新</button>
+          </div>
+        </header>
+
+        <section id="viewRoot" class="view-root" aria-live="polite"></section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status"></div>
+
+    <script src="/frontend/app.js?v=research-ct-viewer-20260701"></script>
+  </body>
+</html>

@@ -17,6 +17,9 @@ env/
 .vscode/
 *.swp
 
+# Frontend dependencies
+node_modules/
+
 # Local secrets and environment files
 .env
 .env.*
