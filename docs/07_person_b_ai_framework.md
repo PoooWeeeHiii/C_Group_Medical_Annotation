@@ -19,7 +19,7 @@ ai/
   loss.py            # Dice + BCE 接口
   metrics.py         # Dice / IoU 工具函数
   models/unet.py     # U-Net 2D 类 stub
-  datasets/lung_dataset.py
+  datasets/lung_dataset.py   # Day3: manifest + split + DataLoader
   checkpoints/       # gitignore，本地训练输出
   runs/              # gitignore，训练日志
 ```
@@ -75,7 +75,8 @@ python -c "from ai.metrics import dice_score; import numpy as np; print(dice_sco
 1. `preprocess.py` / `augment.py` / `pipeline.py` 已实现
 2. `scripts/convert_lung_examples.py` 将 Lung 样例导出到 `dataset/images` + `dataset/labels`
 3. `Dataset0001_manifest.json` 已更新 4 个 case 路径
-4. Day3：`lung_dataset.py` 读取 manifest + split
+4. Day3 已完成：见 [09_person_b_day3.md](09_person_b_day3.md)
+5. Day4：`UNet2D` + 训练循环
 
 ## 17:00 与 Person A 确认项
 

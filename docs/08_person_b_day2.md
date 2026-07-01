@@ -45,7 +45,6 @@ Output manifest: `dataset/splits/Dataset0001_manifest.json` (committed; image fi
 After upload via `POST /api/upload`, raw files land in `dataset/raw/CaseXXXX/`.
 Call `ai.pipeline.process_raw_upload(case_id)` to export a preview PNG into `dataset/images/`.
 
-## Day3 handoff
+## Day3 已完成
 
-- `LungSegmentationDataset` will read `Dataset0001_manifest.json` + split JSON
-- Apply `augment.augment_pair()` only on train split
+见 [09_person_b_day3.md](09_person_b_day3.md)：`LungSegmentationDataset` + `build_dataloader()`，兼容 Person A `POST /api/export` manifest。
