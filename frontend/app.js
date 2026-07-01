@@ -154,8 +154,13 @@ async function loadImageMasks(imageId, { force = false } = {}) {
 async function loadCaseVersions(caseId, { force = false } = {}) {
   if (!caseId) return [];
   if (force || !state.versionsByCase[caseId]) {
-    const data = await apiGet(`/api/case/${caseId}/versions`);
-    state.versionsByCase[caseId] = data.items || [];
+    try {
+      const data = await apiGet(`/api/case/${caseId}/versions`);
+      state.versionsByCase[caseId] = data.items || [];
+    } catch (error) {
+      console.warn("版本列表加载失败，已按空列表处理：", error);
+      state.versionsByCase[caseId] = [];
+    }
   }
   return state.versionsByCase[caseId];
 }
