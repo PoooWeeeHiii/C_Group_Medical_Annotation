@@ -46,6 +46,11 @@ const statusText = {
 };
 
 const $ = (selector) => document.querySelector(selector);
+const API_BASE = window.location.port && window.location.port !== "8000" ? "http://127.0.0.1:8000" : "";
+
+function apiUrl(path) {
+  return `${API_BASE}${path}`;
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -74,7 +79,7 @@ function setView(view) {
 }
 
 async function apiGet(path) {
-  const response = await fetch(path);
+  const response = await fetch(apiUrl(path));
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || {});
@@ -84,7 +89,7 @@ async function apiGet(path) {
 }
 
 async function apiPost(path, payload) {
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -188,7 +193,7 @@ async function uploadCase(event) {
   button.disabled = true;
   button.textContent = "上传中...";
   try {
-    const response = await fetch("/api/upload", { method: "POST", body });
+    const response = await fetch(apiUrl("/api/upload"), { method: "POST", body });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "上传失败");
     showToast(`导入成功：${data.case_id} / ${data.image_id}`);
@@ -545,9 +550,9 @@ function render3DViewer(item, image, volume) {
     <div class="viewer-subsection">
       <div class="subsection-title"><span>MPR 三平面重建</span><strong>轴位 / 冠状位 / 矢状位</strong></div>
       <div class="orthogonal-grid mpr-grid">
-        <div><span>轴位 Slice ${axialIndex + 1}</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/slice/axial/${axialIndex}.png?window=auto" alt="轴位 MPR" />` : ""}</div>
-        <div><span>冠状位 Slice ${coronalIndex + 1}</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/slice/coronal/${coronalIndex}.png?window=auto" alt="冠状位 MPR" />` : ""}</div>
-        <div><span>矢状位 Slice ${sagittalIndex + 1}</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/slice/sagittal/${sagittalIndex}.png?window=auto" alt="矢状位 MPR" />` : ""}</div>
+        <div><span>轴位 Slice ${axialIndex + 1}</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/slice/axial/${axialIndex}.png?window=auto`)}" alt="轴位 MPR" />` : ""}</div>
+        <div><span>冠状位 Slice ${coronalIndex + 1}</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/slice/coronal/${coronalIndex}.png?window=auto`)}" alt="冠状位 MPR" />` : ""}</div>
+        <div><span>矢状位 Slice ${sagittalIndex + 1}</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/slice/sagittal/${sagittalIndex}.png?window=auto`)}" alt="矢状位 MPR" />` : ""}</div>
       </div>
     </div>
   `;
@@ -556,12 +561,12 @@ function render3DViewer(item, image, volume) {
       <div class="viewer-subsection">
       <div class="subsection-title"><span>MIP / MinIP 投影</span><strong>高密度 / 低密度结构辅助观察</strong></div>
       <div class="orthogonal-grid">
-        <div><span>轴位 MIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/axial.png?method=mip&window=auto" alt="轴位 MIP" />` : ""}</div>
-        <div><span>冠状位 MIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/coronal.png?method=mip&window=auto" alt="冠状位 MIP" />` : ""}</div>
-        <div><span>矢状位 MIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/sagittal.png?method=mip&window=auto" alt="矢状位 MIP" />` : ""}</div>
-        <div><span>轴位 MinIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/axial.png?method=min&window=auto" alt="轴位 MinIP" />` : ""}</div>
-        <div><span>冠状位 MinIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/coronal.png?method=min&window=auto" alt="冠状位 MinIP" />` : ""}</div>
-        <div><span>矢状位 MinIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/sagittal.png?method=min&window=auto" alt="矢状位 MinIP" />` : ""}</div>
+        <div><span>轴位 MIP</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/projection/axial.png?method=mip&window=auto`)}" alt="轴位 MIP" />` : ""}</div>
+        <div><span>冠状位 MIP</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/projection/coronal.png?method=mip&window=auto`)}" alt="冠状位 MIP" />` : ""}</div>
+        <div><span>矢状位 MIP</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/projection/sagittal.png?method=mip&window=auto`)}" alt="矢状位 MIP" />` : ""}</div>
+        <div><span>轴位 MinIP</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/projection/axial.png?method=min&window=auto`)}" alt="轴位 MinIP" />` : ""}</div>
+        <div><span>冠状位 MinIP</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/projection/coronal.png?method=min&window=auto`)}" alt="冠状位 MinIP" />` : ""}</div>
+        <div><span>矢状位 MinIP</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/projection/sagittal.png?method=min&window=auto`)}" alt="矢状位 MinIP" />` : ""}</div>
       </div>
       </div>
     `
@@ -575,7 +580,7 @@ function render3DViewer(item, image, volume) {
     <div class="mask-overlay-panel">
       <div>
         <span>AI Mask Overlay</span>
-        <strong>${image ? `/api/image/${image.image_id}/masks` : "等待图像"}</strong>
+        <strong>${image ? apiUrl(`/api/image/${image.image_id}/masks`) : "等待图像"}</strong>
       </div>
       <button class="ghost-button" disabled>等待 Person B 输出 Mask</button>
     </div>
@@ -631,7 +636,7 @@ function renderAnnotation() {
       <aside class="tool-panel">
         <h2>标注工具</h2>
         <div class="tool-grid">${["画笔", "橡皮擦", "多边形", "矩形ROI", "点标注", "智能选择", "撤销", "重做", "清空", "AI预测"].map((tool) => `<button class="tool-button">${tool}</button>`).join("")}</div>
-        <div class="grid action-stack" style="margin-top:18px"><button class="primary-button" data-save-mask ${image ? "" : "disabled"}>保存 Mask</button><button class="ghost-button" data-final-mask ${masks.some((mask) => mask.version === "v1_manual") ? "" : "disabled"}>设为 final</button><a class="ghost-button export-link ${image ? "" : "disabled-link"}" href="${image ? `/api/image/${image.image_id}/export-3d` : "#"}">导出 3D 图像</a><button class="danger-button">驳回</button></div>
+        <div class="grid action-stack" style="margin-top:18px"><button class="primary-button" data-save-mask ${image ? "" : "disabled"}>保存 Mask</button><button class="ghost-button" data-final-mask ${masks.some((mask) => mask.version === "v1_manual") ? "" : "disabled"}>设为 final</button><a class="ghost-button export-link ${image ? "" : "disabled-link"}" href="${image ? apiUrl(`/api/image/${image.image_id}/export-3d`) : "#"}">导出 3D 图像</a><button class="danger-button">驳回</button></div>
         <h3 style="margin-top:22px">当前 Mask</h3>
         ${renderMaskList(masks)}
       </aside>
@@ -719,7 +724,7 @@ function updateSliceViewer(image, meta) {
   }
 
   const sliceNumber = state.activeSlice + 1;
-  const sliceUrl = `/api/image/${image.image_id}/slice/${state.activeSlice}.png?window=${state.activeWindow}&t=${Date.now()}`;
+  const sliceUrl = apiUrl(`/api/image/${image.image_id}/slice/${state.activeSlice}.png?window=${state.activeWindow}&t=${Date.now()}`);
   imageElement.onload = () => {
     imageElement.classList.remove("hidden");
     $("#sliceError").classList.add("hidden");
@@ -914,7 +919,7 @@ async function startVolumeViewer(image) {
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/volume_viewer.js?v=research-ct-viewer-20260701`);
+    const module = await import(`/frontend/volume_viewer.js?v=cross-origin-api-20260701`);
     await module.renderVolume3D({
       container,
       imageId: image.image_id,
