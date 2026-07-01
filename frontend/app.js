@@ -14,6 +14,7 @@ const state = {
   volumeViewMode: "2d",
   showMip: false,
   volumeLoadingKey: null,
+  recoveringAnnotation: false,
 };
 
 const titles = {
@@ -108,6 +109,19 @@ async function loadCaseDetail(caseId) {
   return detail;
 }
 
+function readableVolumeErrorMessage(message) {
+  if (message.includes("NRRD data payload is shorter than expected")) {
+    return "当前病例的 NRRD 文件不完整，无法读取真实体数据。";
+  }
+  if (message.includes("Image file not found") || message.includes("Image not found")) {
+    return "当前病例的图像文件未找到。";
+  }
+  if (message.includes("Cannot read medical volume")) {
+    return `当前病例体数据读取失败：${message}`;
+  }
+  return message;
+}
+
 async function loadVolumeMeta(imageId) {
   if (!imageId) return null;
   if (!state.volumeMeta[imageId]) {
@@ -140,7 +154,13 @@ async function refreshCases() {
   try {
     const data = await apiGet("/api/cases");
     state.cases = data.items || [];
-    if (!state.activeCaseId && state.cases.length) state.activeCaseId = state.cases[0].case_id;
+    if (
+      state.cases.length &&
+      (!state.activeCaseId || !state.cases.some((item) => item.case_id === state.activeCaseId))
+    ) {
+      state.activeCaseId = state.cases[state.cases.length - 1].case_id;
+      state.activeImageId = null;
+    }
     document.querySelector(".status-dot").classList.add("online");
     $("#apiStatus").textContent = "后端已连接";
   } catch {
@@ -645,10 +665,41 @@ async function hydrateAnnotation() {
     startVolumeViewer(image);
   } catch (error) {
     const image = activeImage();
-    const message = error.message || "图像读取失败";
+    const message = readableVolumeErrorMessage(error.message || "图像读取失败");
     if (image) state.volumeErrors[image.image_id] = message;
+    const recovered = await recoverReadableAnnotation(image?.image_id, message);
+    if (recovered) return;
     displaySliceError(message);
     showToast(message);
+  }
+}
+
+async function recoverReadableAnnotation(failedImageId, reason) {
+  if (state.recoveringAnnotation) return false;
+  state.recoveringAnnotation = true;
+  try {
+    const candidates = [...state.cases].reverse();
+    for (const caseItem of candidates) {
+      const detail = await loadCaseDetail(caseItem.case_id);
+      for (const image of detail.images || []) {
+        if (image.image_id === failedImageId) continue;
+        try {
+          await loadVolumeMeta(image.image_id);
+          state.activeCaseId = caseItem.case_id;
+          state.activeImageId = image.image_id;
+          await loadImageMasks(image.image_id, { force: true });
+          await loadCaseVersions(caseItem.case_id, { force: true });
+          showToast(`${reason} 已切换到可读病例 ${caseItem.case_id}`);
+          render();
+          return true;
+        } catch (candidateError) {
+          state.volumeErrors[image.image_id] = readableVolumeErrorMessage(candidateError.message || "图像读取失败");
+        }
+      }
+    }
+    return false;
+  } finally {
+    state.recoveringAnnotation = false;
   }
 }
 
