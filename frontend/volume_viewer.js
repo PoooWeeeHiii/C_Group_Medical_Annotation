@@ -1,4 +1,9 @@
 const activeViewers = new WeakMap();
+const API_BASE = window.location.port && window.location.port !== "8000" ? "http://127.0.0.1:8000" : "";
+
+function apiUrl(path) {
+  return `${API_BASE}${path}`;
+}
 
 const RENDERING_PRESETS = [
   {
@@ -110,14 +115,14 @@ export async function renderVolume3D({
 
 async function fetchVolumeData({ imageId, maxDim, windowName, isotropic }) {
   const query = `max_dim=${maxDim}&window=${windowName}&isotropic=${isotropic ? "true" : "false"}`;
-  const primary = await fetch(`/api/image/${imageId}/volume-data?${query}`);
+  const primary = await fetch(apiUrl(`/api/image/${imageId}/volume-data?${query}`));
   if (primary.ok) return primary;
   if (primary.status !== 404) {
     const message = await primary.text();
     throw new Error(`体数据接口失败：${message}`);
   }
 
-  const legacy = await fetch(`/api/image/${imageId}/vtk-volume?${query}`);
+  const legacy = await fetch(apiUrl(`/api/image/${imageId}/vtk-volume?${query}`));
   if (legacy.ok) return legacy;
   const message = await legacy.text();
   throw new Error(`体数据接口失败：${message}`);
