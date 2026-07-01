@@ -66,6 +66,20 @@ async function apiGet(path) {
   return response.json();
 }
 
+async function apiPost(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || {});
+    throw new Error(detail || `${path} 请求失败：${response.status}`);
+  }
+  return data;
+}
+
 async function loadCaseDetail(caseId) {
   if (!caseId) return null;
   if (!state.caseDetails[caseId]) {
@@ -134,6 +148,36 @@ async function uploadCase(event) {
   } finally {
     button.disabled = false;
     button.textContent = "上传病例";
+  }
+}
+
+async function saveCurrentMask(event) {
+  const button = event.currentTarget;
+  const item = activeCase();
+  const image = activeImage();
+  if (!item || !image) {
+    showToast("请先选择病例和图像");
+    return;
+  }
+
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "保存中...";
+  try {
+    const data = await apiPost("/api/save_mask", {
+      case_id: item.case_id,
+      image_id: image.image_id,
+      version: "v1_manual",
+      label: "label",
+      mask_format: "nii.gz",
+    });
+    await refreshCases();
+    showToast(`Mask 保存成功：${data.mask_id}`);
+  } catch (error) {
+    showToast(error.message || "Mask 保存失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
   }
 }
 
@@ -304,20 +348,48 @@ function render3DViewer(item, image, volume) {
   const height = volume?.height || 1;
   const depth = volume?.slice_count || 1;
   const canRender = Boolean(image && volume);
+  const axialIndex = Math.max(0, Math.floor(depth / 2));
+  const coronalIndex = Math.max(0, Math.floor(height / 2));
+  const sagittalIndex = Math.max(0, Math.floor(width / 2));
+  const mprGrid = `
+    <div class="viewer-subsection">
+      <div class="subsection-title"><span>MPR 三平面重建</span><strong>轴位 / 冠状位 / 矢状位</strong></div>
+      <div class="orthogonal-grid mpr-grid">
+        <div><span>轴位 Slice ${axialIndex + 1}</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/slice/axial/${axialIndex}.png?window=auto" alt="轴位 MPR" />` : ""}</div>
+        <div><span>冠状位 Slice ${coronalIndex + 1}</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/slice/coronal/${coronalIndex}.png?window=auto" alt="冠状位 MPR" />` : ""}</div>
+        <div><span>矢状位 Slice ${sagittalIndex + 1}</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/slice/sagittal/${sagittalIndex}.png?window=auto" alt="矢状位 MPR" />` : ""}</div>
+      </div>
+    </div>
+  `;
   const mipGrid = state.showMip
     ? `
+      <div class="viewer-subsection">
+      <div class="subsection-title"><span>MIP / MinIP 投影</span><strong>高密度 / 低密度结构辅助观察</strong></div>
       <div class="orthogonal-grid">
-        <div><span>轴位 MIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/axial.png?window=${state.activeWindow}" alt="轴位 MIP" />` : ""}</div>
-        <div><span>冠状位 MIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/coronal.png?window=${state.activeWindow}" alt="冠状位 MIP" />` : ""}</div>
-        <div><span>矢状位 MIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/sagittal.png?window=${state.activeWindow}" alt="矢状位 MIP" />` : ""}</div>
+        <div><span>轴位 MIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/axial.png?method=mip&window=auto" alt="轴位 MIP" />` : ""}</div>
+        <div><span>冠状位 MIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/coronal.png?method=mip&window=auto" alt="冠状位 MIP" />` : ""}</div>
+        <div><span>矢状位 MIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/sagittal.png?method=mip&window=auto" alt="矢状位 MIP" />` : ""}</div>
+        <div><span>轴位 MinIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/axial.png?method=min&window=auto" alt="轴位 MinIP" />` : ""}</div>
+        <div><span>冠状位 MinIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/coronal.png?method=min&window=auto" alt="冠状位 MinIP" />` : ""}</div>
+        <div><span>矢状位 MinIP</span>${canRender ? `<img loading="lazy" src="/api/image/${image.image_id}/projection/sagittal.png?method=min&window=auto" alt="矢状位 MinIP" />` : ""}</div>
+      </div>
       </div>
     `
     : `
       <div class="mip-placeholder">
-        <span>MIP 投影计算会扫描完整 3D 体数据，已改为按需加载以避免卡顿。</span>
-        <button class="ghost-button" data-load-mip>加载 MIP 投影</button>
+        <span>体渲染用于整体空间观察；细节诊断请结合 2D 切片。MIP/MinIP 可辅助观察高密度结构和低密度腔隙。</span>
+        <button class="ghost-button" data-load-mip>加载 MIP / MinIP</button>
       </div>
     `;
+  const maskOverlayPanel = `
+    <div class="mask-overlay-panel">
+      <div>
+        <span>AI Mask Overlay</span>
+        <strong>${image ? `/api/image/${image.image_id}/masks` : "等待图像"}</strong>
+      </div>
+      <button class="ghost-button" disabled>等待 Person B 输出 Mask</button>
+    </div>
+  `;
   return `
     <section class="viewer">
       <div class="viewer-toolbar"><span>${item ? item.case_id : "暂无病例"} | 3D体视图</span><span>${canRender ? `${width} × ${height} × ${depth}` : "等待体数据"}</span></div>
@@ -325,9 +397,11 @@ function render3DViewer(item, image, volume) {
       <div id="volumeContainer" class="volume-container" data-image-id="${image?.image_id || ""}">
         <div class="volume-status">${canRender ? "正在初始化 WebGL2 真实体渲染..." : "正在读取体数据..."}</div>
       </div>
+      ${mprGrid}
       ${mipGrid}
-      <div class="image-source-line">MIP 是最大强度投影，用于快速查看高密度结构；上方主视图是 WebGL2 体渲染，可拖拽旋转并调节渲染模式。</div>
-      <div class="image-source-line">3D来源：${canRender ? `WebGL2 3D Texture Ray Casting + /api/image/${image.image_id}/volume-data` : "等待加载"}</div>
+      ${maskOverlayPanel}
+      <div class="image-source-line">三维体渲染用于总览、软组织和骨窗观察；细小病灶请结合 2D 切片、MIP 和 MinIP。</div>
+      <div class="image-source-line">3D来源：${canRender ? `浏览器 GPU WebGL2 3D Texture Ray Casting + /api/image/${image.image_id}/volume-data?isotropic=true` : "等待加载"}</div>
     </section>
   `;
 }
@@ -365,7 +439,7 @@ function renderAnnotation() {
       <aside class="tool-panel">
         <h2>标注工具</h2>
         <div class="tool-grid">${["画笔", "橡皮擦", "多边形", "矩形ROI", "点标注", "智能选择", "撤销", "重做", "清空", "AI预测"].map((tool) => `<button class="tool-button">${tool}</button>`).join("")}</div>
-        <div class="grid action-stack" style="margin-top:18px"><button class="primary-button">保存 Mask</button><button class="ghost-button">设为 final</button><a class="ghost-button export-link ${image ? "" : "disabled-link"}" href="${image ? `/api/image/${image.image_id}/export-3d` : "#"}">导出 3D 图像</a><button class="danger-button">驳回</button></div>
+        <div class="grid action-stack" style="margin-top:18px"><button class="primary-button" data-save-mask ${image ? "" : "disabled"}>保存 Mask</button><button class="ghost-button">设为 final</button><a class="ghost-button export-link ${image ? "" : "disabled-link"}" href="${image ? `/api/image/${image.image_id}/export-3d` : "#"}">导出 3D 图像</a><button class="danger-button">驳回</button></div>
       </aside>
     </div>
   `;
@@ -510,6 +584,10 @@ function render() {
       render();
     });
   }
+  const saveMaskButton = $("[data-save-mask]");
+  if (saveMaskButton) {
+    saveMaskButton.addEventListener("click", saveCurrentMask);
+  }
   document.querySelectorAll("[data-open-case]").forEach((button) => {
     button.addEventListener("click", () => {
       state.activeCaseId = button.dataset.openCase;
@@ -552,12 +630,13 @@ async function startVolumeViewer(image) {
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/volume_viewer.js?v=protocol-engine-20260630`);
+    const module = await import(`/frontend/volume_viewer.js?v=research-ct-viewer-20260701`);
     await module.renderVolume3D({
       container,
       imageId: image.image_id,
       windowName: "volume",
       maxDim: 176,
+      isotropic: true,
     });
     container.dataset.ready = "true";
   } catch (error) {

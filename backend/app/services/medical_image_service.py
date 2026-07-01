@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import gzip
 import io
+import math
 import threading
 import tempfile
 from dataclasses import dataclass
@@ -321,6 +322,85 @@ def _downsample_volume(array: np.ndarray, max_dim: int) -> tuple[np.ndarray, tup
     return array[::stride_z, ::stride_y, ::stride_x], (stride_z, stride_y, stride_x)
 
 
+def _resample_volume_isotropic(
+    volume: VolumeData,
+    max_dim: int,
+    target_spacing: float | None = None,
+) -> tuple[VolumeData, dict]:
+    spacing = tuple(max(float(value), 1e-6) for value in volume.spacing)
+    depth, height, width = volume.array.shape[:3]
+    original_size = (width, height, depth)
+    requested_spacing = float(target_spacing) if target_spacing and target_spacing > 0 else min(spacing)
+    requested_spacing = max(requested_spacing, 1e-6)
+    max_dim = max(64, min(max_dim, 192))
+    max_voxels = max_dim**3
+
+    new_size = [
+        max(1, int(round(original_size[index] * spacing[index] / requested_spacing)))
+        for index in range(3)
+    ]
+    voxel_count = math.prod(new_size)
+    final_spacing = requested_spacing
+    if voxel_count > max_voxels:
+        scale = (voxel_count / max_voxels) ** (1.0 / 3.0)
+        final_spacing = requested_spacing * scale
+        new_size = [
+            max(1, int(round(original_size[index] * spacing[index] / final_spacing)))
+            for index in range(3)
+        ]
+
+    if max(spacing) / min(spacing) < 1.08 and all(size <= max_dim for size in original_size):
+        return volume, {
+            "requested": True,
+            "applied": False,
+            "reason": "source spacing is already close to isotropic",
+            "original_spacing": spacing,
+            "target_spacing": spacing,
+            "size": original_size,
+        }
+
+    try:
+        import SimpleITK as sitk
+    except ModuleNotFoundError:
+        return volume, {
+            "requested": True,
+            "applied": False,
+            "reason": "SimpleITK is not installed",
+            "original_spacing": spacing,
+            "target_spacing": spacing,
+            "size": original_size,
+        }
+
+    image = sitk.GetImageFromArray(volume.array.astype(np.float32, copy=False))
+    image.SetSpacing(spacing)
+    image.SetOrigin(volume.origin)
+
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetInterpolator(sitk.sitkLinear)
+    resampler.SetSize([int(value) for value in new_size])
+    resampler.SetOutputSpacing([float(final_spacing)] * 3)
+    resampler.SetOutputOrigin(image.GetOrigin())
+    resampler.SetOutputDirection(image.GetDirection())
+    resampler.SetDefaultPixelValue(-1000.0)
+    resampler.SetOutputPixelType(sitk.sitkFloat32)
+
+    resampled = resampler.Execute(image)
+    resampled_array = sitk.GetArrayFromImage(resampled)
+    resampled_volume = VolumeData(
+        array=resampled_array,
+        spacing=tuple(float(value) for value in resampled.GetSpacing()[:3]),
+        origin=tuple(float(value) for value in resampled.GetOrigin()[:3]),
+        source=f"{volume.source} + isotropic resample",
+    )
+    return resampled_volume, {
+        "requested": True,
+        "applied": True,
+        "original_spacing": spacing,
+        "target_spacing": resampled_volume.spacing,
+        "size": tuple(int(value) for value in new_size),
+    }
+
+
 def _slice_by_axis(array: np.ndarray, axis: str, slice_index: int) -> np.ndarray:
     depth, height, width = array.shape[:3]
     if axis == "axial":
@@ -379,8 +459,26 @@ def render_projection_png(image_id: str, axis: str = "axial", method: str = "mip
     return _png_response(pixels)
 
 
-def get_volume_render_data(image_id: str, max_dim: int = 144, window: str = "lung") -> dict:
+def get_volume_render_data(
+    image_id: str,
+    max_dim: int = 144,
+    window: str = "lung",
+    isotropic: bool = False,
+    target_spacing: float | None = None,
+) -> dict:
     image, volume = load_volume(image_id)
+    resampling = {
+        "requested": False,
+        "applied": False,
+        "original_spacing": volume.spacing,
+        "target_spacing": volume.spacing,
+    }
+    if isotropic:
+        volume, resampling = _resample_volume_isotropic(
+            volume=volume,
+            max_dim=max_dim,
+            target_spacing=target_spacing,
+        )
     downsampled, strides = _downsample_volume(volume.array, max_dim)
     values, hu_range = _window_volume(downsampled, window)
     depth, height, width = values.shape[:3]
@@ -397,6 +495,7 @@ def get_volume_render_data(image_id: str, max_dim: int = 144, window: str = "lun
         "origin": volume.origin,
         "scalar_type": "uint8",
         "window": window,
+        "resampling": resampling,
         "hu_range": [hu_range[0], hu_range[1]],
         "max_dim": max_dim,
         "downsample_stride": [stride_z, stride_y, stride_x],

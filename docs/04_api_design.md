@@ -30,7 +30,7 @@
 | 获取 WebGL2 体渲染数据 | GET | `/api/image/{image_id}/volume-data` | Vue |
 | 获取切片图像 | GET | `/api/image/{image_id}/slice/{slice_index}.png` | Vue |
 | 获取三轴切片图像 | GET | `/api/image/{image_id}/slice/{axis}/{slice_index}.png` | Vue |
-| 获取三轴 MIP 投影 | GET | `/api/image/{image_id}/projection/{axis}.png` | Vue、AI |
+| 获取三轴 MIP/MinIP 投影 | GET | `/api/image/{image_id}/projection/{axis}.png` | Vue、AI |
 | 导出 3D 原始图像 | GET | `/api/image/{image_id}/export-3d` | Vue、AI |
 | 创建标注记录 | POST | `/api/annotation` | Vue、AI |
 | 保存 Mask | POST | `/api/save_mask` | Vue、AI |
@@ -102,6 +102,8 @@ multipart/form-data
 ```json
 {
   "success": true,
+  "image_id": "Image0001",
+  "count": 2,
   "items": [
     {
       "case_id": "Case0001",
@@ -219,6 +221,8 @@ image/png
 | --- | --- | --- | --- |
 | `max_dim` | int | 否 | 下采样后最大维度，默认 `144`，后端限制在 `64~192`。前端 3D 视图默认请求 `176`。 |
 | `window` | string | 否 | `volume`、`lung`、`soft`、`bone`、`auto`。`volume` 使用 `[-1000, 1800] HU`，更适合综合体渲染。 |
+| `isotropic` | bool | 否 | 是否启用各向同性重采样，默认 `false`。前端 3D 视图请求 `true`。 |
+| `target_spacing` | float | 否 | 目标 spacing，单位 mm。不传时使用原始 spacing 最小值，并受 `max_dim` 限制防止体数据过大。 |
 
 响应：
 
@@ -232,6 +236,13 @@ image/png
   "origin": [0.0, 0.0, 0.0],
   "scalar_type": "uint8",
   "window": "volume",
+  "resampling": {
+    "requested": true,
+    "applied": true,
+    "original_spacing": [0.7, 0.7, 5.0],
+    "target_spacing": [1.3, 1.3, 1.3],
+    "size": [176, 176, 96]
+  },
   "hu_range": [-1000.0, 1800.0],
   "downsample_stride": [1, 3, 3],
   "value_range": [0, 255],
@@ -244,9 +255,11 @@ image/png
 - `dimensions` 顺序为 `[x, y, z]`，直接对应前端 WebGL2 3D texture 的宽、高、深。
 - `values_base64` 是按 `z, y, x` 内存顺序展开的 `uint8` 体素。
 - `hu_range` 表示 `uint8` 值映射回 CT HU 的低高范围，前端体渲染按 HU 做医学 Transfer Function。
+- `resampling` 表示体渲染数据是否经过各向同性重采样；如果环境缺少 SimpleITK 或原始 spacing 已接近各向同性，则 `applied=false`，前端仍使用原始体数据。
 - 这个接口用于真正体渲染，不是单张切片预览。
 - 后端按轴独立下采样，避免 Z 方向层数被过度压缩；前端 WebGL2 使用 3D texture ray casting、HU 分段 transfer function、gradient opacity、Phong 光照、阈值过滤和线性插值改善软组织层次和边界清晰度。
-- 前端体渲染采用 Rendering Protocol Engine：软组织、骨窗、肺窗分别使用独立的 transfer function、gradient opacity、采样步数、Early Ray Termination 和光照参数。骨窗保留 150~400 HU 松质骨并延迟终止；肺窗低透明显示肺实质，用梯度增强肺血管、支气管和胸膜边界。
+- 前端体渲染采用 CT Rendering Protocol Engine，目前收敛为三类：总览、软组织、骨窗。总览使用中性灰阶观察整体空间关系；软组织使用窄窗协议弱化骨遮挡、突出实质软组织；骨窗保留 150~400 HU 松质骨并延迟 Early Ray Termination。细小病灶仍应结合 2D 切片、MIP/MinIP 或 AI mask overlay 观察。
+- 当前高质量 3D 路线是浏览器端 GPU WebGL2 Ray Casting。vtk.js 不再通过 CDN 动态加载，后续如切换 vtk.js，应改为 npm/Vite 本地构建；如切换 WebGPU，需要新增 WGSL shader、3D texture pipeline 和浏览器兼容检测。
 
 说明：
 
@@ -255,7 +268,7 @@ image/png
 
 ### GET `/api/image/{image_id}/slice/{axis}/{slice_index}.png`
 
-用途：前端 3D/MPR 浏览器请求三轴切片。
+用途：前端 MPR 三平面重建请求三轴切片。
 
 路径参数：
 
@@ -278,7 +291,7 @@ image/png
 
 ### GET `/api/image/{image_id}/projection/{axis}.png`
 
-用途：生成 3D 体数据在某一方向上的投影图，用于 3D 体视图预览或 AI 快速质检。
+用途：生成 3D 体数据在某一方向上的投影图，用于 3D 体视图预览、MIP/MinIP 诊断辅助或 AI 快速质检。
 
 查询参数：
 
@@ -354,8 +367,7 @@ application/octet-stream
   "image_id": "Image0001",
   "version": "v1_manual",
   "label": "lung_nodule",
-  "mask_format": "nii.gz",
-  "path": "dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_lung_nodule.nii.gz"
+  "mask_format": "nii.gz"
 }
 ```
 
@@ -368,6 +380,13 @@ application/octet-stream
   "path": "dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_lung_nodule.nii.gz"
 }
 ```
+
+说明：
+
+- `mask_id` 由后端自动生成，例如 `Mask0001`。
+- `path` 由后端统一生成，不由前端传入。
+- 当前最小实现先保存 mask 元数据到 `database/dev_masks.json`，并创建 `dataset/labels/{case_id}/{version}/` 目录；真实 `.nii.gz` mask 文件后续由画笔标注或 AI 推理模块写入。
+- 当前路径规范固定为：`dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_label.nii.gz`。
 
 ## 8. 查询 Mask
 
@@ -416,6 +435,11 @@ application/octet-stream
 }
 ```
 
+说明：
+
+- 当前最小实现从 `database/dev_masks.json` 读取；文件不存在时返回空数组。
+- 前端 3D 视图已经预留 AI Mask Overlay 区块，Person B 生成的 `v2_ai` mask 写入该 JSON 或后续数据库后即可叠加显示。
+
 ## 9. 版本管理
 
 ### POST `/api/version`
@@ -426,6 +450,7 @@ application/octet-stream
 
 ```json
 {
+  "case_id": "Case0001",
   "version": "v1_manual",
   "annotation": "Annotation0001",
   "model": null,
@@ -438,9 +463,22 @@ application/octet-stream
 ```json
 {
   "success": true,
-  "version": "v1_manual"
+  "version": "v1_manual",
+  "item": {
+    "case_id": "Case0001",
+    "version": "v1_manual",
+    "annotation": "Annotation0001",
+    "model": null,
+    "dataset": null,
+    "create_time": "2026-07-01T10:00:00"
+  }
 }
 ```
+
+说明：
+
+- `version` 固定只能使用：`v1_manual`、`v2_ai`、`v3_fusion`、`final`。
+- 同一病例同一版本重复保存时，后端会更新已有记录。
 
 ### GET `/api/case/{case_id}/versions`
 
@@ -451,6 +489,8 @@ application/octet-stream
 ```json
 {
   "success": true,
+  "case_id": "Case0001",
+  "count": 2,
   "items": [
     {
       "version": "v1_manual",
@@ -542,10 +582,11 @@ application/octet-stream
 导出前检查：
 
 - 每个病例都有 image。
-- 每个病例都有指定版本 mask。
+- 每个病例都有指定版本 mask 记录。
 - 默认使用 `final` 版本。
 - train/val/test 不允许出现同一病例。
-- image 与 mask 的尺寸和空间信息必须一致。
+- 当前 JSON 阶段暂不强制 mask 文件真实存在，允许先导出占位 metadata；真实体素 mask 接入后，再开启 image 与 mask 的尺寸和空间一致性检查。
+- 成功后生成三个文件：`dataset/splits/Dataset0001_manifest.json`、`dataset/splits/Dataset0001_split.json`、`dataset/splits/Dataset0001_label_map.json`。
 
 ## 12. 前端与 AI 的调用关系
 

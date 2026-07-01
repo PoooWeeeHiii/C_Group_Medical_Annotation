@@ -2,27 +2,46 @@ const activeViewers = new WeakMap();
 
 const RENDERING_PRESETS = [
   {
-    id: "soft",
-    label: "软组织综合",
+    id: "overview",
+    label: "总览",
     mode: 0,
     wl: 40,
     ww: 400,
     opacity: 1.1,
-    brightness: 1.02,
+    brightness: 1.08,
     threshold: 0.12,
     steps: 240,
     alphaStop: 0.96,
-    opacityClamp: 0.16,
-    ambient: 0.28,
-    diffuse: 0.54,
-    specular: 0.14,
+    opacityClamp: 0.125,
+    ambient: 0.34,
+    diffuse: 0.48,
+    specular: 0.08,
     rim: 0.16,
-    edgeStrength: 1.55,
-    summary: "压低骨骼遮挡，突出脂肪、肌肉、血管和实质器官边界。",
+    edgeStrength: 1.85,
+    summary: "通用 CT 总览协议，使用中性灰阶显示整体空间关系和主要组织结构。",
+  },
+  {
+    id: "soft",
+    label: "软组织",
+    mode: 4,
+    wl: 40,
+    ww: 80,
+    opacity: 0.96,
+    brightness: 1.06,
+    threshold: 0.18,
+    steps: 320,
+    alphaStop: 0.982,
+    opacityClamp: 0.070,
+    ambient: 0.42,
+    diffuse: 0.34,
+    specular: 0.04,
+    rim: 0.10,
+    edgeStrength: 3.20,
+    summary: "窄窗软组织协议，弱化高密度骨遮挡，突出实质软组织和高密度异常区域。",
   },
   {
     id: "bone",
-    label: "骨窗高密度",
+    label: "骨窗",
     mode: 1,
     wl: 300,
     ww: 1800,
@@ -37,26 +56,7 @@ const RENDERING_PRESETS = [
     specular: 0.82,
     rim: 0.30,
     edgeStrength: 4.40,
-    summary: "连续保留松质骨到骨皮质，降低采样步长并延迟终止，改善肋骨、锁骨和肩胛骨断裂。",
-  },
-  {
-    id: "lung",
-    label: "肺窗边界",
-    mode: 2,
-    wl: -600,
-    ww: 1600,
-    opacity: 0.92,
-    brightness: 0.98,
-    threshold: 0.02,
-    steps: 360,
-    alphaStop: 0.992,
-    opacityClamp: 0.105,
-    ambient: 0.38,
-    diffuse: 0.36,
-    specular: 0.05,
-    rim: 0.08,
-    edgeStrength: 5.20,
-    summary: "低密度肺实质保持透明，肺血管、支气管和胸膜边界由 HU + Gradient 双维映射增强。",
+    summary: "连续保留松质骨到骨皮质，降低采样步长并延迟终止，改善薄骨结构断裂。",
   },
 ];
 
@@ -84,7 +84,13 @@ function clearContainer(container) {
   container.replaceChildren();
 }
 
-export async function renderVolume3D({ container, imageId, windowName = "volume", maxDim = 176 }) {
+export async function renderVolume3D({
+  container,
+  imageId,
+  windowName = "volume",
+  maxDim = 176,
+  isotropic = true,
+}) {
   if (!container || !imageId) return;
   clearContainer(container);
 
@@ -93,7 +99,7 @@ export async function renderVolume3D({ container, imageId, windowName = "volume"
   status.textContent = "正在读取真实 3D CT 体数据...";
   container.appendChild(status);
 
-  const response = await fetchVolumeData({ imageId, maxDim, windowName });
+  const response = await fetchVolumeData({ imageId, maxDim, windowName, isotropic });
 
   const volumeData = await response.json();
   const values = decodeBase64ToUint8Array(volumeData.values_base64);
@@ -102,8 +108,8 @@ export async function renderVolume3D({ container, imageId, windowName = "volume"
   renderWithWebGL({ container, volumeData, values });
 }
 
-async function fetchVolumeData({ imageId, maxDim, windowName }) {
-  const query = `max_dim=${maxDim}&window=${windowName}`;
+async function fetchVolumeData({ imageId, maxDim, windowName, isotropic }) {
+  const query = `max_dim=${maxDim}&window=${windowName}&isotropic=${isotropic ? "true" : "false"}`;
   const primary = await fetch(`/api/image/${imageId}/volume-data?${query}`);
   if (primary.ok) return primary;
   if (primary.status !== 404) {
@@ -238,8 +244,33 @@ function renderWithWebGL({ container, volumeData, values }) {
       return mix(uHuLow, uHuHigh, value);
     }
 
+    float sampleHu(vec3 p) {
+      return huFromValue(texture(uVolume, clamp(p, vec3(0.0), vec3(1.0))).r);
+    }
+
     float band(float hu, float low, float high, float feather) {
       return smoothstep(low, low + feather, hu) * (1.0 - smoothstep(high - feather, high, hu));
+    }
+
+    float localContrastAt(vec3 p) {
+      vec3 d1 = uVoxelStep * 1.5;
+      vec3 d2 = uVoxelStep * 3.0;
+      float center = sampleHu(p);
+      float n1 =
+        abs(center - sampleHu(p + vec3(d1.x, 0.0, 0.0))) +
+        abs(center - sampleHu(p - vec3(d1.x, 0.0, 0.0))) +
+        abs(center - sampleHu(p + vec3(0.0, d1.y, 0.0))) +
+        abs(center - sampleHu(p - vec3(0.0, d1.y, 0.0))) +
+        abs(center - sampleHu(p + vec3(0.0, 0.0, d1.z))) +
+        abs(center - sampleHu(p - vec3(0.0, 0.0, d1.z)));
+      float n2 =
+        abs(center - sampleHu(p + vec3(d2.x, 0.0, 0.0))) +
+        abs(center - sampleHu(p - vec3(d2.x, 0.0, 0.0))) +
+        abs(center - sampleHu(p + vec3(0.0, d2.y, 0.0))) +
+        abs(center - sampleHu(p - vec3(0.0, d2.y, 0.0))) +
+        abs(center - sampleHu(p + vec3(0.0, 0.0, d2.z))) +
+        abs(center - sampleHu(p - vec3(0.0, 0.0, d2.z)));
+      return smoothstep(30.0, 180.0, (n1 * 0.70 + n2 * 0.30) / 6.0);
     }
 
     vec3 transferColor(float hu, float edge) {
@@ -253,22 +284,42 @@ function renderWithWebGL({ container, volumeData, values }) {
       }
       if (uRenderMode == 2) {
         vec3 air = vec3(0.05, 0.09, 0.13);
-        vec3 parenchyma = vec3(0.13, 0.32, 0.44);
-        vec3 bronchial = vec3(0.48, 0.70, 0.76);
-        vec3 vessel = vec3(0.82, 0.92, 0.93);
-        vec3 c = mix(air, parenchyma, smoothstep(-960.0, -650.0, hu));
-        c = mix(c, bronchial, smoothstep(-620.0, -260.0, hu));
-        c = mix(c, vessel, smoothstep(-180.0, 220.0, hu));
-        return mix(c, vec3(0.86, 0.98, 1.0), edge * 0.28);
+        vec3 interfaceColor = vec3(0.34, 0.70, 0.84);
+        vec3 airwayColor = vec3(0.58, 0.88, 0.92);
+        vec3 vesselColor = vec3(0.90, 0.97, 0.96);
+        vec3 pleuraColor = vec3(0.80, 0.96, 1.0);
+        vec3 c = mix(air, interfaceColor, edge);
+        c = mix(c, airwayColor, band(hu, -880.0, -180.0, 180.0) * edge);
+        c = mix(c, vesselColor, band(hu, -220.0, 300.0, 120.0));
+        c = mix(c, pleuraColor, edge * smoothstep(-760.0, -260.0, hu));
+        return c;
       }
-      vec3 fat = vec3(0.70, 0.52, 0.34);
-      vec3 muscle = vec3(0.72, 0.48, 0.46);
-      vec3 vessel = vec3(0.98, 0.80, 0.62);
-      vec3 bone = vec3(0.84, 0.78, 0.68);
+      if (uRenderMode == 3) {
+        vec3 background = vec3(0.02, 0.04, 0.06);
+        vec3 vesselCore = vec3(0.88, 0.97, 0.98);
+        vec3 vesselWall = vec3(0.42, 0.78, 0.86);
+        vec3 dense = vec3(1.0, 0.90, 0.74);
+        vec3 c = mix(background, vesselWall, smoothstep(-260.0, -80.0, hu));
+        c = mix(c, vesselCore, smoothstep(-60.0, 180.0, hu));
+        c = mix(c, dense, smoothstep(260.0, 700.0, hu));
+        return mix(c, vec3(1.0), edge * 0.18);
+      }
+      if (uRenderMode == 4) {
+        vec3 csf = vec3(0.20, 0.25, 0.30);
+        vec3 grayMatter = vec3(0.62, 0.66, 0.68);
+        vec3 blood = vec3(0.95, 0.90, 0.82);
+        vec3 c = mix(csf, grayMatter, smoothstep(18.0, 48.0, hu));
+        c = mix(c, blood, smoothstep(58.0, 92.0, hu));
+        return mix(c, vec3(1.0), edge * 0.10);
+      }
+      vec3 fat = vec3(0.48, 0.49, 0.46);
+      vec3 muscle = vec3(0.62, 0.64, 0.64);
+      vec3 vessel = vec3(0.82, 0.86, 0.86);
+      vec3 bone = vec3(0.76, 0.76, 0.72);
       vec3 c = mix(fat, muscle, smoothstep(-70.0, 85.0, hu));
       c = mix(c, vessel, smoothstep(90.0, 260.0, hu));
       c = mix(c, bone, smoothstep(320.0, 950.0, hu));
-      return mix(c, vec3(1.0), edge * 0.16);
+      return mix(c, vec3(0.92, 0.96, 0.96), edge * 0.11);
     }
 
     float transferOpacity(float hu, float edge) {
@@ -287,25 +338,39 @@ function renderWithWebGL({ container, volumeData, values }) {
         if (hu < -980.0) {
           return 0.0;
         }
-        float alveoli = band(hu, -930.0, -620.0, 95.0) * 0.0026;
-        float parenchymaEdge = edge * band(hu, -940.0, -380.0, 150.0) * 0.056;
-        float bronchusEdge = edge * band(hu, -760.0, -120.0, 170.0) * 0.034;
-        float vessel = band(hu, -250.0, 260.0, 95.0) * 0.040;
-        float pleura = edge * smoothstep(-850.0, -260.0, hu) * (1.0 - smoothstep(320.0, 760.0, hu)) * 0.030;
-        float bone = smoothstep(320.0, 1300.0, hu) * 0.003;
-        return (alveoli + parenchymaEdge + bronchusEdge + vessel + pleura + bone) * uOpacityScale;
+        float alveoli = band(hu, -930.0, -650.0, 90.0) * 0.00015;
+        float airTissueInterface = edge * band(hu, -960.0, -360.0, 150.0) * 0.052;
+        float airwayWall = edge * band(hu, -900.0, -180.0, 170.0) * 0.048;
+        float vessel = band(hu, -230.0, 310.0, 105.0) * (0.020 + edge * 0.044);
+        float pleura = edge * smoothstep(-860.0, -300.0, hu) * (1.0 - smoothstep(260.0, 700.0, hu)) * 0.058;
+        float boneReject = 1.0 - smoothstep(300.0, 850.0, hu) * 0.96;
+        return (alveoli + airTissueInterface + airwayWall + vessel + pleura) * boneReject * uOpacityScale;
+      }
+      if (uRenderMode == 3) {
+        float vesselCore = band(hu, -180.0, 320.0, 95.0) * 0.070;
+        float vesselEdge = edge * band(hu, -300.0, 360.0, 125.0) * 0.050;
+        float hilum = smoothstep(40.0, 300.0, hu) * (1.0 - smoothstep(600.0, 1100.0, hu)) * 0.030;
+        float boneReject = 1.0 - smoothstep(520.0, 980.0, hu) * 0.88;
+        return (vesselCore + vesselEdge + hilum) * boneReject * uOpacityScale;
+      }
+      if (uRenderMode == 4) {
+        float brainTissue = band(hu, 18.0, 62.0, 12.0) * 0.038;
+        float grayWhiteEdge = edge * band(hu, 16.0, 72.0, 18.0) * 0.030;
+        float hyperdense = smoothstep(62.0, 96.0, hu) * (1.0 - smoothstep(150.0, 260.0, hu)) * 0.048;
+        float skullReject = 1.0 - smoothstep(180.0, 420.0, hu) * 0.96;
+        return (brainTissue + grayWhiteEdge + hyperdense) * skullReject * uOpacityScale;
       }
 
       float floorHu = mix(-260.0, 90.0, uThreshold);
       if (hu < floorHu) {
         return 0.0;
       }
-      float fat = band(hu, -180.0, -25.0, 45.0) * 0.010;
-      float muscle = band(hu, -20.0, 115.0, 42.0) * 0.030;
-      float vessel = band(hu, 90.0, 330.0, 70.0) * 0.056;
-      float bone = smoothstep(300.0, 1100.0, hu) * 0.012;
-      float gradientBoost = mix(0.52, 1.95, edge);
-      return (fat + muscle + vessel + bone + edge * 0.010) * gradientBoost * uOpacityScale;
+      float fat = band(hu, -180.0, -25.0, 45.0) * 0.007;
+      float muscle = band(hu, -20.0, 115.0, 42.0) * 0.026;
+      float vessel = band(hu, 90.0, 330.0, 70.0) * 0.044;
+      float bone = smoothstep(300.0, 1100.0, hu) * 0.006;
+      float gradientBoost = mix(0.60, 1.70, edge);
+      return (fat + muscle + vessel + bone + edge * 0.008) * gradientBoost * uOpacityScale;
     }
 
     vec3 applyLighting(vec3 color, vec3 gradient, vec3 rayDir, float edge) {
@@ -357,6 +422,9 @@ function renderWithWebGL({ container, volumeData, values }) {
         float hu = huFromValue(value);
         vec3 gradient = gradientAt(p);
         float edge = smoothstep(0.018, 0.145, length(gradient) * uEdgeStrength);
+        if (uRenderMode == 2) {
+          edge = max(edge, localContrastAt(p) * 0.62);
+        }
         float opacity = clamp(transferOpacity(hu, edge), 0.0, uOpacityClamp);
         vec3 sampleColor = applyLighting(transferColor(hu, edge), gradient, rayDir, edge);
         color += (1.0 - alpha) * opacity * sampleColor;
@@ -456,6 +524,10 @@ function renderWithWebGL({ container, volumeData, values }) {
     <label>质量
       <input data-volume-steps type="range" min="160" max="448" value="${initialPreset.steps}" />
     </label>
+    <div class="tf-editor-mini">
+      <strong>Transfer Function Editor</strong>
+      <span>HU 分段透明度 + Gradient Opacity + Ray Marching 采样</span>
+    </div>
   `;
   container.appendChild(controls);
 
@@ -532,10 +604,16 @@ function renderWithWebGL({ container, volumeData, values }) {
     canvas.releasePointerCapture(event.pointerId);
   });
   function updateProtocolPanel() {
+    const resampling = volumeData.resampling || {};
+    const spacing = Array.isArray(volumeData.spacing) ? volumeData.spacing.map((value) => Number(value).toFixed(2)).join(" / ") : "-";
+    const resampleText = resampling.requested
+      ? (resampling.applied ? "各向同性重采样已启用" : `各向同性重采样未启用：${resampling.reason || "无需处理"}`)
+      : "使用原始 spacing";
     protocolPanel.innerHTML = `
       <div class="protocol-kicker">Rendering Protocol</div>
       <strong>${viewerState.preset.label}</strong>
       <span>WL ${viewerState.preset.wl} / WW ${viewerState.preset.ww} · ${viewerState.preset.steps} samples · stop ${viewerState.preset.alphaStop}</span>
+      <span>${resampleText} · spacing ${spacing} mm</span>
       <p>${viewerState.preset.summary}</p>
     `;
     container.dataset.preset = viewerState.preset.id;

@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.api import cases, images, masks, upload
+from backend.app.api import cases, datasets, images, masks, upload, versions
 from backend.app.core.config import PROJECT_ROOT, ensure_project_dirs
 
 
@@ -33,6 +33,8 @@ app.include_router(upload.router)
 app.include_router(cases.router)
 app.include_router(images.router)
 app.include_router(masks.router)
+app.include_router(versions.router)
+app.include_router(datasets.router)
 
 if FRONTEND_DIR.exists():
     app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR), name="frontend")

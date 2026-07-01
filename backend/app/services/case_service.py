@@ -8,6 +8,7 @@ from backend.app.core.config import (
     ALLOWED_UPLOAD_EXTENSIONS,
     CASES_DB_PATH,
     IMAGES_DB_PATH,
+    MASKS_DB_PATH,
     PROJECT_ROOT,
     RAW_DATA_DIR,
     ensure_project_dirs,
@@ -135,14 +136,20 @@ def _load_images() -> list[dict]:
     return load_json_list(IMAGES_DB_PATH)
 
 
+def _load_masks() -> list[dict]:
+    return load_json_list(MASKS_DB_PATH)
+
+
 def list_cases() -> list[CaseListItem]:
     cases = _load_cases()
     images = _load_images()
+    masks = _load_masks()
 
     result: list[CaseListItem] = []
     for case in cases:
         image_count = sum(1 for image in images if image.get("case_id") == case.get("case_id"))
-        result.append(CaseListItem(**case, image_count=image_count, mask_count=0))
+        mask_count = sum(1 for mask in masks if mask.get("case_id") == case.get("case_id"))
+        result.append(CaseListItem(**case, image_count=image_count, mask_count=mask_count))
     return result
 
 

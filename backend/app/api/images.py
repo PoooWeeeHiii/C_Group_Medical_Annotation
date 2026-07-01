@@ -25,13 +25,37 @@ def read_image_volume(image_id: str) -> dict:
 
 
 @router.get("/image/{image_id}/volume-data")
-def read_volume_render_data(image_id: str, max_dim: int = 144, window: str = "lung") -> dict:
-    return get_volume_render_data(image_id=image_id, max_dim=max_dim, window=window)
+def read_volume_render_data(
+    image_id: str,
+    max_dim: int = 144,
+    window: str = "lung",
+    isotropic: bool = False,
+    target_spacing: float | None = None,
+) -> dict:
+    return get_volume_render_data(
+        image_id=image_id,
+        max_dim=max_dim,
+        window=window,
+        isotropic=isotropic,
+        target_spacing=target_spacing,
+    )
 
 
 @router.get("/image/{image_id}/vtk-volume")
-def read_legacy_volume_render_data(image_id: str, max_dim: int = 144, window: str = "lung") -> dict:
-    return get_volume_render_data(image_id=image_id, max_dim=max_dim, window=window)
+def read_legacy_volume_render_data(
+    image_id: str,
+    max_dim: int = 144,
+    window: str = "lung",
+    isotropic: bool = False,
+    target_spacing: float | None = None,
+) -> dict:
+    return get_volume_render_data(
+        image_id=image_id,
+        max_dim=max_dim,
+        window=window,
+        isotropic=isotropic,
+        target_spacing=target_spacing,
+    )
 
 
 @router.get("/image/{image_id}/slice/{slice_index}.png")
