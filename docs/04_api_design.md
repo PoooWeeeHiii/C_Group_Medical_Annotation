@@ -541,9 +541,8 @@ application/octet-stream
 
 说明：
 
-- API 文档先确定契约。
-- Day1 不实现模型推理。
-- 后续 Person B 的 `predict.py` 输出结果必须能被这个接口保存。
+- 当前 Person A 最小实现是占位接口：不实际运行模型，只生成 `v2_ai` mask metadata，并写入 `database/dev_masks.json` 与 `database/dev_versions.json`。
+- 后续 Person B 的 `predict.py` 接入后，该接口内部改为调用真实模型，并把模型输出的 `.nii.gz` mask 保存到同一路径规范。
 
 ## 11. 导出 Dataset
 
