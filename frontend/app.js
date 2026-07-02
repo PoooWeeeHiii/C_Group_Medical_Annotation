@@ -306,6 +306,38 @@ async function approveFinalMask(event) {
   }
 }
 
+async function runAIPredict(event) {
+  const button = event.currentTarget;
+  const item = activeCase();
+  const image = activeImage();
+  if (!item || !image) {
+    showToast("请先选择病例和图像");
+    return;
+  }
+
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "预测中...";
+  try {
+    const data = await apiPost("/api/ai/predict", {
+      case_id: item.case_id,
+      image_id: image.image_id,
+      model_id: "ModelPlaceholder",
+      label: "label",
+    });
+    await loadImageMasks(image.image_id, { force: true });
+    await loadCaseVersions(item.case_id, { force: true });
+    await refreshCases();
+    showToast(`AI 预测完成：${data.mask_id}`);
+    render();
+  } catch (error) {
+    showToast(error.message || "AI 预测失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
 async function exportDataset(event) {
   const button = event.currentTarget;
   const item = activeCase();
@@ -519,6 +551,15 @@ function renderVersionList(versions) {
   `;
 }
 
+function renderToolButtons() {
+  return ["画笔", "橡皮擦", "多边形", "矩形ROI", "点标注", "智能选择", "撤销", "重做", "清空", "AI预测"]
+    .map((tool) => {
+      const action = tool === "AI预测" ? "data-ai-predict" : "";
+      return `<button class="tool-button" ${action}>${tool}</button>`;
+    })
+    .join("");
+}
+
 function renderViewerModeButtons() {
   return `
     <div class="viewer-mode-switch">
@@ -645,7 +686,7 @@ function renderAnnotation() {
       ${state.volumeViewMode === "3d" ? render3DViewer(item, image, volume) : render2DViewer(item, image, volume, activeSlice, sliceCount, maxSlice)}
       <aside class="tool-panel">
         <h2>标注工具</h2>
-        <div class="tool-grid">${["画笔", "橡皮擦", "多边形", "矩形ROI", "点标注", "智能选择", "撤销", "重做", "清空", "AI预测"].map((tool) => `<button class="tool-button">${tool}</button>`).join("")}</div>
+        <div class="tool-grid">${renderToolButtons()}</div>
         <div class="grid action-stack" style="margin-top:18px"><button class="primary-button" data-save-mask ${image ? "" : "disabled"}>保存 Mask</button><button class="ghost-button" data-final-mask ${masks.some((mask) => mask.version === "v1_manual") ? "" : "disabled"}>设为 final</button><a class="ghost-button export-link ${image ? "" : "disabled-link"}" href="${image ? apiUrl(`/api/image/${image.image_id}/export-3d`) : "#"}">导出 3D 图像</a><button class="danger-button">驳回</button></div>
         <h3 style="margin-top:22px">当前 Mask</h3>
         ${renderMaskList(masks)}
@@ -881,6 +922,10 @@ function render() {
   const finalMaskButton = $("[data-final-mask]");
   if (finalMaskButton) {
     finalMaskButton.addEventListener("click", approveFinalMask);
+  }
+  const aiPredictButton = $("[data-ai-predict]");
+  if (aiPredictButton) {
+    aiPredictButton.addEventListener("click", runAIPredict);
   }
   const exportDatasetButton = $("[data-export-dataset]");
   if (exportDatasetButton) {
