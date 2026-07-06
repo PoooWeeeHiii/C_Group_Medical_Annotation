@@ -4,6 +4,7 @@ from backend.app.schemas.image import ImageDetailResponse
 from backend.app.services.case_service import get_image
 from backend.app.services.medical_image_service import (
     export_volume_file,
+    get_slice_values,
     get_volume_metadata,
     get_volume_render_data,
     render_projection_png,
@@ -66,6 +67,16 @@ def read_image_slice(image_id: str, slice_index: int, window: str = "auto"):
 @router.get("/image/{image_id}/slice/{axis}/{slice_index}.png")
 def read_image_axis_slice(image_id: str, axis: str, slice_index: int, window: str = "auto"):
     return render_slice_png(image_id=image_id, slice_index=slice_index, window=window, axis=axis)
+
+
+@router.get("/image/{image_id}/slice/{slice_index}/values")
+def read_image_slice_values(image_id: str, slice_index: int):
+    return get_slice_values(image_id=image_id, slice_index=slice_index, axis="axial")
+
+
+@router.get("/image/{image_id}/slice/{axis}/{slice_index}/values")
+def read_image_axis_slice_values(image_id: str, axis: str, slice_index: int):
+    return get_slice_values(image_id=image_id, slice_index=slice_index, axis=axis)
 
 
 @router.get("/image/{image_id}/projection/{axis}.png")

@@ -209,6 +209,41 @@ multipart/form-data
 image/png
 ```
 
+### GET `/api/image/{image_id}/slice/{slice_index}/values`
+
+用途：前端智能选择 Magic Wand 请求当前轴位切片的原始 CT 灰度/HU 值，用于基于点击点的区域生长。
+
+响应：
+
+```json
+{
+  "success": true,
+  "image_id": "Image0002",
+  "case_id": "Case0002",
+  "axis": "axial",
+  "slice_index": 42,
+  "width": 512,
+  "height": 512,
+  "scalar_type": "float32",
+  "value_min": -1024.0,
+  "value_max": 1800.0,
+  "values_base64": "..."
+}
+```
+
+说明：
+
+- `values_base64` 是按 `y, x` 顺序展开的 `float32` 数组。
+- 前端第一阶段智能选择使用 `seed HU ± threshold` 和 4 邻域连通区域生长。
+- 前端阈值滑块范围为 `10~200 HU`。
+- 场景默认值：
+  - 肺部 / 空气边界：`HU ± 100`，推荐范围 `80~120`。
+  - 骨骼：`HU ± 180`，推荐范围 `120~250`。
+  - 软组织：`HU ± 45`，推荐范围 `25~50`。
+  - 血管 / 实质器官：`HU ± 45`，推荐范围 `30~60`。
+  - 脑窗：`HU ± 25`，推荐范围 `15~35`。
+- 第二阶段再接 MedSAM / nnU-Net / Person B 模型。
+
 ### GET `/api/image/{image_id}/volume-data`
 
 用途：给前端 WebGL2 体渲染使用，返回下采样后的真实 3D 体素数据。
@@ -366,8 +401,15 @@ application/octet-stream
   "case_id": "Case0001",
   "image_id": "Image0001",
   "version": "v1_manual",
-  "label": "lung_nodule",
-  "mask_format": "nii.gz"
+  "label": "label",
+  "label_id": 1,
+  "mask_format": "json",
+  "slice_index": 42,
+  "width": 512,
+  "height": 512,
+  "encoding": "rle",
+  "mask": [[0, 1200], [1, 80], [0, 260864]],
+  "points": []
 }
 ```
 
@@ -377,7 +419,7 @@ application/octet-stream
 {
   "success": true,
   "mask_id": "Mask0001",
-  "path": "dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_lung_nodule.nii.gz"
+  "path": "dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_label.json"
 }
 ```
 
@@ -385,8 +427,9 @@ application/octet-stream
 
 - `mask_id` 由后端自动生成，例如 `Mask0001`。
 - `path` 由后端统一生成，不由前端传入。
-- 当前最小实现先保存 mask 元数据到 `database/dev_masks.json`，并创建 `dataset/labels/{case_id}/{version}/` 目录；真实 `.nii.gz` mask 文件后续由画笔标注或 AI 推理模块写入。
-- 当前路径规范固定为：`dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_label.nii.gz`。
+- 当前阶段保存真实前端标注 JSON 到 `dataset/labels/{case_id}/{version}/`，并保存 metadata 到 `database/dev_masks.json`。
+- 当前 JSON 路径规范固定为：`dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_label.json`。
+- JSON 内容使用 RLE：`mask` 为 `[value, count]` 列表；后续再升级为 `.nii.gz`。
 
 ## 8. 查询 Mask
 
@@ -402,9 +445,21 @@ application/octet-stream
   "mask": {
     "mask_id": "Mask0001",
     "annotation_id": "Annotation0001",
-    "path": "dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_lung_nodule.nii.gz",
+    "path": "dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_label.json",
     "version": "v1_manual",
-    "label": "lung_nodule"
+    "label": "label",
+    "mask_format": "json",
+    "slice_index": 42,
+    "encoding": "rle"
+  },
+  "content": {
+    "case_id": "Case0001",
+    "image_id": "Image0001",
+    "slice_index": 42,
+    "label": "label",
+    "encoding": "rle",
+    "mask": [[0, 1200], [1, 80], [0, 260864]],
+    "points": []
   }
 }
 ```
@@ -422,14 +477,16 @@ application/octet-stream
     {
       "mask_id": "Mask0001",
       "version": "v1_manual",
-      "label": "lung_nodule",
-      "path": "dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_lung_nodule.nii.gz"
+      "label": "label",
+      "mask_format": "json",
+      "path": "dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0001_v1_manual_label.json"
     },
     {
       "mask_id": "Mask0002",
-      "version": "v2_ai",
-      "label": "lung_nodule",
-      "path": "dataset/labels/Case0001/v2_ai/Case0001_Image0001_Mask0002_v2_ai_lung_nodule.nii.gz"
+      "version": "v1_manual",
+      "label": "label",
+      "mask_format": "nii.gz",
+      "path": "dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0002_v1_manual_label.nii.gz"
     }
   ]
 }
@@ -438,6 +495,145 @@ application/octet-stream
 说明：
 
 - 当前最小实现从 `database/dev_masks.json` 读取；文件不存在时返回空数组。
+
+## 9. 导出 3D NIfTI Mask
+
+### POST `/api/export_mask_nifti`
+
+用途：把同一图像、同一版本、同一 label 下保存的多个 2D JSON slice mask 合成为 3D volume mask，并导出 `.nii.gz`。
+
+请求：
+
+```json
+{
+  "case_id": "Case0001",
+  "image_id": "Image0001",
+  "version": "v1_manual",
+  "label": "label"
+}
+```
+
+响应：
+
+```json
+{
+  "success": true,
+  "mask_id": "Mask0002",
+  "path": "dataset/labels/Case0001/v1_manual/Case0001_Image0001_Mask0002_v1_manual_label.nii.gz",
+  "source_mask_ids": ["Mask0001"],
+  "shape": [120, 512, 512],
+  "spacing": [0.8, 0.8, 1.5],
+  "origin": [0.0, 0.0, 0.0],
+  "direction": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+}
+```
+
+说明：
+
+- 后端读取原 CT 的 `shape / spacing / origin / direction`。
+- JSON slice mask 按 `slice_index` 写入 3D `mask[z, y, x]`。
+- 使用 SimpleITK 写出 `.nii.gz`。
+- 导出的 mask 与原 CT 使用相同 `spacing / origin / direction`，用于在 3D Slicer 中对齐。
+
+## 10. Label Propagation
+
+### POST `/api/label_propagate`
+
+用途：把少量 2D sparse JSON mask 自动传播成完整 3D mask。当前 V1 使用 image-guided signed distance map：先按真实 spacing 做距离场传播，再用 CT 原图 HU 范围和形态学后处理约束结果。
+
+请求：
+
+```json
+{
+  "case_id": "Case0001",
+  "image_id": "Image0001",
+  "source_version": "v1_manual",
+  "output_version": "v3_fusion",
+  "label": "label",
+  "method": "image_guided_distance",
+  "fill_holes": true,
+  "keep_largest_component": false,
+  "image_guidance": true,
+  "hu_margin": null,
+  "closing_radius": 1
+}
+```
+
+响应：
+
+```json
+{
+  "success": true,
+  "mask_id": "Mask0003",
+  "path": "dataset/labels/Case0001/v3_fusion/Case0001_Image0001_Mask0003_v3_fusion_label.nii.gz",
+  "method": "image_guided_distance",
+  "source_mask_ids": ["Mask0001", "Mask0002"],
+  "annotated_slices": [42, 61],
+  "propagated_slices": 134,
+  "shape": [134, 512, 512]
+}
+```
+
+说明：
+
+- 已标注切片作为 hard constraint，不被传播算法修改。
+- 中间层使用 signed distance map 插值，而不是直接插值二值 mask。
+- 距离场使用原 CT 的 `spacing`，层厚会影响传播范围；只有一层标注时不会再简单复制到整个体积，而会随 z 距离逐渐收缩。
+- `image_guidance=true` 时，会从医生手工 mask 内估计前景 HU 范围，再过滤传播候选区域，减少传播到无关组织。
+- `closing_radius` 用于二维形态学闭合，`fill_holes` 用于填洞，`keep_largest_component` 可在需要单一器官时只保留最大连通域。
+- 当前版本适合课程项目和第一版 Demo；后续可替换为 Sli2Vol / SAM2-3D / MONAI 模型式传播。
+
+### GET `/api/mask/{mask_id}/slice/{slice_index}`
+
+用途：从 Label Propagation / DeepEdit 生成的 3D NIfTI mask 中读取某一层，用于 2D 标注工作台逐层显示传播结果。
+
+响应：
+
+```json
+{
+  "success": true,
+  "mask_id": "Mask0003",
+  "version": "v3_fusion",
+  "slice_index": 42,
+  "width": 512,
+  "height": 512,
+  "encoding": "rle",
+  "mask": [[0, 1200], [1, 80], [0, 260864]]
+}
+```
+
+说明：
+
+- 前端切换 2D 切片时自动请求当前层传播结果。
+- 传播结果会写入前端 `sliceMasks[image_id][slice_index]`，所以可以直接可视化并继续手工修正。
+
+## 11. DeepEdit 式交互优化
+
+### POST `/api/deepedit/refine`
+
+用途：为后续接入 MONAI Label DeepEdit / Person B 模型预留交互式修正接口。当前 V1 先复用 Label Propagation，形成“用户新标一层 → 全局 3D mask 更新”的闭环。
+
+请求：
+
+```json
+{
+  "case_id": "Case0001",
+  "image_id": "Image0001",
+  "source_version": "v1_manual",
+  "current_mask_version": "v3_fusion",
+  "output_version": "v3_fusion",
+  "label": "label",
+  "positive_points": [],
+  "negative_points": [],
+  "confirmed_slices": [42]
+}
+```
+
+说明：
+
+- 当前 `refinement_mode=label_propagation_placeholder`。
+- 后续模型版本应输入 `image_volume + current_mask + positive/negative clicks + confirmed_slices`。
+- `confirmed_slices` 必须作为 hard constraint，防止模型覆盖医生已确认标注。
 - 前端 3D 视图已经预留 AI Mask Overlay 区块，Person B 生成的 `v2_ai` mask 写入该 JSON 或后续数据库后即可叠加显示。
 
 ## 9. 版本管理

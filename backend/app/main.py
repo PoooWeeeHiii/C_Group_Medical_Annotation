@@ -5,9 +5,11 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.app.api import ai, cases, datasets, images, masks, upload, versions
 from backend.app.core.config import PROJECT_ROOT, ensure_project_dirs
+from backend.app.services.sqlite_service import ensure_sqlite_ready
 
 
 ensure_project_dirs()
+ensure_sqlite_ready()
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 FRONTEND_INDEX = FRONTEND_DIR / "index.html"
 

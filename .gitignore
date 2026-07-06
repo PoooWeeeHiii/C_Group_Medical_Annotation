@@ -66,6 +66,9 @@ knowledge/
 # Logs and generated files
 *.log
 database/dev_*.json
+database/*.db
+database/*.db-shm
+database/*.db-wal
 outputs/
 tmp/
 temp/

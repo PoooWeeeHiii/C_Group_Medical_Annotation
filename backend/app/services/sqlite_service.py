@@ -1,0 +1,338 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from backend.app.core.config import (
+    CASES_DB_PATH,
+    DATASETS_DB_PATH,
+    DATABASE_DIR,
+    IMAGES_DB_PATH,
+    MASKS_DB_PATH,
+    SCHEMA_SQL_PATH,
+    SQLITE_DB_PATH,
+    VERSIONS_DB_PATH,
+)
+
+
+_MIGRATED = False
+
+
+JSON_PATH_TO_TABLE = {
+    CASES_DB_PATH.resolve(): "cases",
+    IMAGES_DB_PATH.resolve(): "images",
+    MASKS_DB_PATH.resolve(): "masks",
+    VERSIONS_DB_PATH.resolve(): "versions",
+    DATASETS_DB_PATH.resolve(): "datasets",
+}
+
+
+def _json_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _create_time(item: dict[str, Any]) -> str:
+    return str(item.get("create_time") or datetime.now().replace(microsecond=0).isoformat())
+
+
+def _read_json_list_direct(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise ValueError(f"{path} must contain a JSON list")
+    return data
+
+
+def connect() -> sqlite3.Connection:
+    DATABASE_DIR.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(SQLITE_DB_PATH)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
+def init_sqlite_database() -> None:
+    if not SCHEMA_SQL_PATH.exists():
+        raise FileNotFoundError(f"schema.sql not found: {SCHEMA_SQL_PATH}")
+    with connect() as connection:
+        connection.executescript(SCHEMA_SQL_PATH.read_text(encoding="utf-8"))
+
+
+def ensure_sqlite_ready() -> None:
+    global _MIGRATED
+    init_sqlite_database()
+    if not _MIGRATED:
+        migrate_json_to_sqlite()
+        _MIGRATED = True
+
+
+def _upsert_case(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
+    connection.execute(
+        """
+        INSERT INTO cases (case_id, patient_id, modality, source_group, status, create_time)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(case_id) DO UPDATE SET
+            patient_id=excluded.patient_id,
+            modality=excluded.modality,
+            source_group=excluded.source_group,
+            status=excluded.status,
+            create_time=excluded.create_time
+        """,
+        (
+            item.get("case_id"),
+            item.get("patient_id") or item.get("case_id"),
+            item.get("modality") or "CT",
+            item.get("source_group") or "local",
+            item.get("status") or "unannotated",
+            _create_time(item),
+        ),
+    )
+
+
+def _upsert_image(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
+    connection.execute(
+        """
+        INSERT INTO images (
+            image_id, case_id, path, filename, file_format, width, height, slice_count,
+            spacing, origin, direction, create_time
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(image_id) DO UPDATE SET
+            case_id=excluded.case_id,
+            path=excluded.path,
+            filename=excluded.filename,
+            file_format=excluded.file_format,
+            width=excluded.width,
+            height=excluded.height,
+            slice_count=excluded.slice_count,
+            spacing=excluded.spacing,
+            origin=excluded.origin,
+            direction=excluded.direction,
+            create_time=excluded.create_time
+        """,
+        (
+            item.get("image_id"),
+            item.get("case_id"),
+            item.get("path") or "",
+            item.get("filename"),
+            item.get("file_format"),
+            int(item.get("width") or 0),
+            int(item.get("height") or 0),
+            item.get("slice_count"),
+            _json_text(item.get("spacing")),
+            _json_text(item.get("origin")),
+            _json_text(item.get("direction")),
+            _create_time(item),
+        ),
+    )
+
+
+def _ensure_annotation(connection: sqlite3.Connection, annotation_id: str | None, image_id: str | None, source: str) -> None:
+    if not annotation_id or not image_id:
+        return
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO annotations (annotation_id, image_id, user_id, source, create_time)
+        VALUES (?, ?, NULL, ?, CURRENT_TIMESTAMP)
+        """,
+        (annotation_id, image_id, source),
+    )
+
+
+def _upsert_mask(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
+    source = "ai" if item.get("version") == "v2_ai" else "manual"
+    if item.get("version") == "v3_fusion":
+        source = "fusion"
+    _ensure_annotation(connection, item.get("annotation_id"), item.get("image_id"), source)
+    connection.execute(
+        """
+        INSERT INTO masks (
+            mask_id, annotation_id, case_id, image_id, path, version, label, label_id,
+            mask_format, slice_index, width, height, encoding, source_mask_ids,
+            shape, spacing, origin, direction, create_time
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(mask_id) DO UPDATE SET
+            annotation_id=excluded.annotation_id,
+            case_id=excluded.case_id,
+            image_id=excluded.image_id,
+            path=excluded.path,
+            version=excluded.version,
+            label=excluded.label,
+            label_id=excluded.label_id,
+            mask_format=excluded.mask_format,
+            slice_index=excluded.slice_index,
+            width=excluded.width,
+            height=excluded.height,
+            encoding=excluded.encoding,
+            source_mask_ids=excluded.source_mask_ids,
+            shape=excluded.shape,
+            spacing=excluded.spacing,
+            origin=excluded.origin,
+            direction=excluded.direction,
+            create_time=excluded.create_time
+        """,
+        (
+            item.get("mask_id"),
+            item.get("annotation_id"),
+            item.get("case_id"),
+            item.get("image_id"),
+            item.get("path") or "",
+            item.get("version") or "v1_manual",
+            item.get("label") or "label",
+            item.get("label_id"),
+            item.get("mask_format") or "nii.gz",
+            item.get("slice_index"),
+            item.get("width"),
+            item.get("height"),
+            item.get("encoding"),
+            _json_text(item.get("source_mask_ids")),
+            _json_text(item.get("shape")),
+            _json_text(item.get("spacing")),
+            _json_text(item.get("origin")),
+            _json_text(item.get("direction")),
+            _create_time(item),
+        ),
+    )
+
+
+def _ensure_model(connection: sqlite3.Connection, model_id: str | None) -> None:
+    if not model_id:
+        return
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO models (model_id, version, dice, path, metrics_json, create_time)
+        VALUES (?, ?, NULL, NULL, NULL, CURRENT_TIMESTAMP)
+        """,
+        (model_id, model_id),
+    )
+
+
+def _ensure_dataset(connection: sqlite3.Connection, dataset_id: str | None) -> None:
+    if not dataset_id:
+        return
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO datasets (dataset_id, name, version, train, val, test, format, create_time)
+        VALUES (?, ?, 'final', '[]', '[]', '[]', 'nnunet', CURRENT_TIMESTAMP)
+        """,
+        (dataset_id, dataset_id),
+    )
+
+
+def _upsert_version(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
+    _ensure_model(connection, item.get("model"))
+    _ensure_dataset(connection, item.get("dataset"))
+    connection.execute(
+        """
+        INSERT INTO versions (case_id, version, annotation, model, dataset, create_time)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(case_id, version) DO UPDATE SET
+            annotation=excluded.annotation,
+            model=excluded.model,
+            dataset=excluded.dataset,
+            create_time=excluded.create_time
+        """,
+        (
+            item.get("case_id"),
+            item.get("version") or "v1_manual",
+            item.get("annotation"),
+            item.get("model"),
+            item.get("dataset"),
+            _create_time(item),
+        ),
+    )
+
+
+def _upsert_dataset(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
+    connection.execute(
+        """
+        INSERT INTO datasets (
+            dataset_id, name, version, train, val, test, format,
+            manifest_path, split_path, label_map_path, create_time
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(dataset_id) DO UPDATE SET
+            name=excluded.name,
+            version=excluded.version,
+            train=excluded.train,
+            val=excluded.val,
+            test=excluded.test,
+            format=excluded.format,
+            manifest_path=excluded.manifest_path,
+            split_path=excluded.split_path,
+            label_map_path=excluded.label_map_path,
+            create_time=excluded.create_time
+        """,
+        (
+            item.get("dataset_id"),
+            item.get("name") or "medical_segmentation_dataset",
+            item.get("version") or "final",
+            _json_text(item.get("train") or []),
+            _json_text(item.get("val") or []),
+            _json_text(item.get("test") or []),
+            item.get("format") or "nnunet",
+            item.get("manifest_path") or item.get("output_path"),
+            item.get("split_path"),
+            item.get("label_map_path"),
+            _create_time(item),
+        ),
+    )
+
+
+UPSERT_BY_TABLE = {
+    "cases": _upsert_case,
+    "images": _upsert_image,
+    "masks": _upsert_mask,
+    "versions": _upsert_version,
+    "datasets": _upsert_dataset,
+}
+
+
+def sync_items_to_sqlite(path: Path, items: list[dict[str, Any]]) -> bool:
+    table = JSON_PATH_TO_TABLE.get(path.resolve())
+    if table is None:
+        return False
+    ensure_sqlite_ready()
+    upsert = UPSERT_BY_TABLE[table]
+    with connect() as connection:
+        for item in items:
+            upsert(connection, item)
+    return True
+
+
+def migrate_json_to_sqlite() -> None:
+    init_sqlite_database()
+    with connect() as connection:
+        for path, table in JSON_PATH_TO_TABLE.items():
+            upsert = UPSERT_BY_TABLE[table]
+            for item in _read_json_list_direct(path):
+                upsert(connection, item)
+
+
+def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    return [{key: row[key] for key in row.keys()} for row in rows]
+
+
+def load_items_from_sqlite(path: Path) -> list[dict[str, Any]] | None:
+    table = JSON_PATH_TO_TABLE.get(path.resolve())
+    if table is None:
+        return None
+    ensure_sqlite_ready()
+    with connect() as connection:
+        if table == "versions":
+            rows = connection.execute(
+                "SELECT case_id, version, annotation, model, dataset, create_time FROM versions ORDER BY version_id"
+            ).fetchall()
+        else:
+            rows = connection.execute(f"SELECT * FROM {table}").fetchall()
+    return _rows_to_dicts(rows)

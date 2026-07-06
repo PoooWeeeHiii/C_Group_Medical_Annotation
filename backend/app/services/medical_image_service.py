@@ -24,6 +24,7 @@ class VolumeData:
     array: np.ndarray
     spacing: tuple[float, float, float]
     origin: tuple[float, float, float]
+    direction: tuple[float, ...]
     source: str
 
 
@@ -116,6 +117,14 @@ def _spacing_from_nrrd(fields: dict[str, str]) -> tuple[float, float, float]:
     return 1.0, 1.0, 1.0
 
 
+def _direction_3d(values: tuple[float, ...]) -> tuple[float, ...]:
+    if len(values) == 9:
+        return values
+    if len(values) == 4:
+        return (values[0], values[1], 0.0, values[2], values[3], 0.0, 0.0, 0.0, 1.0)
+    return (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+
+
 def _load_nrrd_bytes(raw: bytes, source: str) -> VolumeData:
     fields, data_offset = _read_nrrd_header(raw)
     sizes = [int(item) for item in fields.get("sizes", "").split()]
@@ -153,7 +162,13 @@ def _load_nrrd_bytes(raw: bytes, source: str) -> VolumeData:
         raise ValueError("NRRD data payload is shorter than expected")
 
     array = data[:expected].reshape(shape)
-    return VolumeData(array=array, spacing=_spacing_from_nrrd(fields), origin=(0.0, 0.0, 0.0), source=source)
+    return VolumeData(
+        array=array,
+        spacing=_spacing_from_nrrd(fields),
+        origin=(0.0, 0.0, 0.0),
+        direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        source=source,
+    )
 
 
 def _load_nrrd_path(path: Path) -> VolumeData:
@@ -207,7 +222,8 @@ def _load_with_simpleitk(path: Path) -> VolumeData:
         array = array.reshape((1, array.shape[0], array.shape[1]))
     spacing = tuple(float(v) for v in image.GetSpacing()[:3])
     origin = tuple(float(v) for v in image.GetOrigin()[:3])
-    return VolumeData(array=array, spacing=spacing, origin=origin, source="SimpleITK")
+    direction = _direction_3d(tuple(float(v) for v in image.GetDirection()))
+    return VolumeData(array=array, spacing=spacing, origin=origin, direction=direction, source="SimpleITK")
 
 
 def _load_volume_from_path(path: Path) -> VolumeData:
@@ -267,6 +283,7 @@ def get_volume_metadata(image_id: str) -> dict:
         "slice_count": depth,
         "spacing": volume.spacing,
         "origin": volume.origin,
+        "direction": volume.direction,
         "source": volume.source,
         "file_format": image.get("file_format", "unknown"),
         "path": image.get("path", ""),
@@ -374,6 +391,7 @@ def _resample_volume_isotropic(
     image = sitk.GetImageFromArray(volume.array.astype(np.float32, copy=False))
     image.SetSpacing(spacing)
     image.SetOrigin(volume.origin)
+    image.SetDirection(volume.direction)
 
     resampler = sitk.ResampleImageFilter()
     resampler.SetInterpolator(sitk.sitkLinear)
@@ -390,6 +408,7 @@ def _resample_volume_isotropic(
         array=resampled_array,
         spacing=tuple(float(value) for value in resampled.GetSpacing()[:3]),
         origin=tuple(float(value) for value in resampled.GetOrigin()[:3]),
+        direction=tuple(float(value) for value in resampled.GetDirection()),
         source=f"{volume.source} + isotropic resample",
     )
     return resampled_volume, {
@@ -449,6 +468,30 @@ def render_slice_png(image_id: str, slice_index: int, window: str = "auto", axis
     return _png_response(pixels)
 
 
+def get_slice_values(image_id: str, slice_index: int, axis: str = "axial") -> dict:
+    image, volume = load_volume(image_id)
+    if volume.array.size <= 0:
+        raise HTTPException(status_code=422, detail="Volume has no slices")
+    if axis not in AXES:
+        raise HTTPException(status_code=400, detail=f"Unsupported axis: {axis}")
+
+    values = np.ascontiguousarray(_slice_by_axis(volume.array, axis, slice_index).astype(np.float32, copy=False))
+    height, width = values.shape[:2]
+    return {
+        "success": True,
+        "image_id": image["image_id"],
+        "case_id": image["case_id"],
+        "axis": axis,
+        "slice_index": max(0, min(slice_index, volume.array.shape[0] - 1)) if axis == "axial" else slice_index,
+        "width": width,
+        "height": height,
+        "scalar_type": "float32",
+        "value_min": float(values.min()),
+        "value_max": float(values.max()),
+        "values_base64": base64.b64encode(values.tobytes(order="C")).decode("ascii"),
+    }
+
+
 def render_projection_png(image_id: str, axis: str = "axial", method: str = "mip", window: str = "auto") -> Response:
     _, volume = load_volume(image_id)
     if volume.array.size <= 0:
@@ -493,6 +536,7 @@ def get_volume_render_data(
         "dimensions": [width, height, depth],
         "spacing": [sx * stride_x, sy * stride_y, sz * stride_z],
         "origin": volume.origin,
+        "direction": volume.direction,
         "scalar_type": "uint8",
         "window": window,
         "resampling": resampling,

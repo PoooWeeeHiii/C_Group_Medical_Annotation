@@ -92,6 +92,7 @@ function clearContainer(container) {
 export async function renderVolume3D({
   container,
   imageId,
+  maskId = null,
   windowName = "volume",
   maxDim = 176,
   isotropic = true,
@@ -108,9 +109,21 @@ export async function renderVolume3D({
 
   const volumeData = await response.json();
   const values = decodeBase64ToUint8Array(volumeData.values_base64);
+  let maskData = null;
+  let maskValues = null;
+  if (maskId) {
+    status.textContent = "正在读取 3D Mask 实体数据...";
+    const maskResponse = await fetch(apiUrl(`/api/mask/${maskId}/volume-data?max_dim=${maxDim}`));
+    if (!maskResponse.ok) {
+      const message = await maskResponse.text();
+      throw new Error(`3D Mask 接口失败：${message}`);
+    }
+    maskData = await maskResponse.json();
+    maskValues = decodeBase64ToUint8Array(maskData.values_base64);
+  }
 
   status.textContent = "正在初始化 WebGL2 体渲染引擎...";
-  renderWithWebGL({ container, volumeData, values });
+  renderWithWebGL({ container, volumeData, values, maskData, maskValues });
 }
 
 async function fetchVolumeData({ imageId, maxDim, windowName, isotropic }) {
@@ -157,7 +170,7 @@ function createProgram(gl, vertexSource, fragmentSource) {
   return program;
 }
 
-function renderWithWebGL({ container, volumeData, values }) {
+function renderWithWebGL({ container, volumeData, values, maskData = null, maskValues = null }) {
   clearContainer(container);
 
   const canvas = document.createElement("canvas");
@@ -195,6 +208,8 @@ function renderWithWebGL({ container, volumeData, values }) {
     out vec4 outColor;
 
     uniform sampler3D uVolume;
+    uniform sampler3D uMask;
+    uniform bool uHasMask;
     uniform float uYaw;
     uniform float uPitch;
     uniform float uAspect;
@@ -276,6 +291,18 @@ function renderWithWebGL({ container, volumeData, values }) {
         abs(center - sampleHu(p + vec3(0.0, 0.0, d2.z))) +
         abs(center - sampleHu(p - vec3(0.0, 0.0, d2.z)));
       return smoothstep(30.0, 180.0, (n1 * 0.70 + n2 * 0.30) / 6.0);
+    }
+
+    float maskAt(vec3 p) {
+      float m = texture(uMask, clamp(p, vec3(0.0), vec3(1.0))).r;
+      vec3 d = uVoxelStep * 1.35;
+      m = max(m, texture(uMask, clamp(p + vec3(d.x, 0.0, 0.0), vec3(0.0), vec3(1.0))).r);
+      m = max(m, texture(uMask, clamp(p - vec3(d.x, 0.0, 0.0), vec3(0.0), vec3(1.0))).r);
+      m = max(m, texture(uMask, clamp(p + vec3(0.0, d.y, 0.0), vec3(0.0), vec3(1.0))).r);
+      m = max(m, texture(uMask, clamp(p - vec3(0.0, d.y, 0.0), vec3(0.0), vec3(1.0))).r);
+      m = max(m, texture(uMask, clamp(p + vec3(0.0, 0.0, d.z), vec3(0.0), vec3(1.0))).r);
+      m = max(m, texture(uMask, clamp(p - vec3(0.0, 0.0, d.z), vec3(0.0), vec3(1.0))).r);
+      return m;
     }
 
     vec3 transferColor(float hu, float edge) {
@@ -417,9 +444,11 @@ function renderWithWebGL({ container, volumeData, values }) {
       float dt = distance / uSteps;
       vec3 color = vec3(0.0);
       float alpha = 0.0;
+      vec3 maskColorAccum = vec3(0.0);
+      float maskAlphaAccum = 0.0;
 
       for (int i = 0; i < 448; i++) {
-        if (float(i) >= uSteps || alpha > uAlphaStop) {
+        if (float(i) >= uSteps || (!uHasMask && alpha > uAlphaStop)) {
           break;
         }
         vec3 p = rayOrigin + rayDir * (nearHit + (float(i) + 0.5) * dt);
@@ -432,13 +461,31 @@ function renderWithWebGL({ container, volumeData, values }) {
         }
         float opacity = clamp(transferOpacity(hu, edge), 0.0, uOpacityClamp);
         vec3 sampleColor = applyLighting(transferColor(hu, edge), gradient, rayDir, edge);
+        if (uHasMask) {
+          float maskValue = maskAt(p);
+          if (maskValue > 0.001) {
+            vec3 maskCore = vec3(0.00, 1.00, 0.74);
+            vec3 maskRim = vec3(1.00, 0.94, 0.20);
+            float maskEdge = smoothstep(0.12, 0.70, length(gradient) * 3.2);
+            vec3 maskSampleColor = mix(maskCore, maskRim, maskEdge);
+            float maskAlpha = mix(0.16, 0.30, clamp(maskValue, 0.0, 1.0));
+            maskColorAccum += (1.0 - maskAlphaAccum) * maskAlpha * maskSampleColor;
+            maskAlphaAccum += (1.0 - maskAlphaAccum) * maskAlpha;
+            sampleColor = mix(sampleColor, maskSampleColor, 0.72);
+            opacity = max(opacity, 0.065);
+          }
+        }
         color += (1.0 - alpha) * opacity * sampleColor;
         alpha += (1.0 - alpha) * opacity;
       }
 
       vec3 background = vec3(0.01, 0.025, 0.045);
       color *= uBrightness;
-      outColor = vec4(mix(background, color, min(alpha * 1.45, 1.0)), 1.0);
+      vec3 finalColor = mix(background, color, min(alpha * 1.45, 1.0));
+      if (uHasMask && maskAlphaAccum > 0.01) {
+        finalColor = mix(finalColor, maskColorAccum, min(maskAlphaAccum * 1.55, 0.92));
+      }
+      outColor = vec4(finalColor, 1.0);
     }
   `;
 
@@ -446,6 +493,8 @@ function renderWithWebGL({ container, volumeData, values }) {
   const positionLocation = gl.getAttribLocation(program, "aPosition");
   const uniforms = {
     volume: gl.getUniformLocation(program, "uVolume"),
+    mask: gl.getUniformLocation(program, "uMask"),
+    hasMask: gl.getUniformLocation(program, "uHasMask"),
     yaw: gl.getUniformLocation(program, "uYaw"),
     pitch: gl.getUniformLocation(program, "uPitch"),
     aspect: gl.getUniformLocation(program, "uAspect"),
@@ -495,6 +544,38 @@ function renderWithWebGL({ container, volumeData, values }) {
     values
   );
 
+  let maskTexture = null;
+  const maskDimensionsMatch = Boolean(
+    maskData &&
+    maskValues &&
+    Array.isArray(maskData.dimensions) &&
+    maskData.dimensions[0] === volumeData.dimensions[0] &&
+    maskData.dimensions[1] === volumeData.dimensions[1] &&
+    maskData.dimensions[2] === volumeData.dimensions[2]
+  );
+  if (maskDimensionsMatch) {
+    maskTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_3D, maskTexture);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(
+      gl.TEXTURE_3D,
+      0,
+      gl.R8,
+      maskData.dimensions[0],
+      maskData.dimensions[1],
+      maskData.dimensions[2],
+      0,
+      gl.RED,
+      gl.UNSIGNED_BYTE,
+      maskValues
+    );
+  }
+
   const initialPreset = defaultPreset();
   const viewerState = {
     yaw: 0.65,
@@ -537,8 +618,9 @@ function renderWithWebGL({ container, volumeData, values }) {
   container.appendChild(controls);
 
   const protocolPanel = document.createElement("div");
-  protocolPanel.className = "volume-protocol-panel";
+  protocolPanel.className = "volume-protocol-panel collapsed";
   container.appendChild(protocolPanel);
+  let protocolCollapsed = true;
 
   function resize() {
     const rect = container.getBoundingClientRect();
@@ -559,6 +641,10 @@ function renderWithWebGL({ container, volumeData, values }) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_3D, texture);
     gl.uniform1i(uniforms.volume, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_3D, maskTexture || texture);
+    gl.uniform1i(uniforms.mask, 1);
+    gl.uniform1i(uniforms.hasMask, maskTexture ? 1 : 0);
     gl.uniform1f(uniforms.yaw, viewerState.yaw);
     gl.uniform1f(uniforms.pitch, viewerState.pitch);
     gl.uniform1f(uniforms.aspect, canvas.width / Math.max(canvas.height, 1));
@@ -611,16 +697,30 @@ function renderWithWebGL({ container, volumeData, values }) {
   function updateProtocolPanel() {
     const resampling = volumeData.resampling || {};
     const spacing = Array.isArray(volumeData.spacing) ? volumeData.spacing.map((value) => Number(value).toFixed(2)).join(" / ") : "-";
+    const maskText = maskTexture
+      ? `Mask 实体叠加：${maskData.mask_id} · ${maskData.version} · ${maskData.dimensions.join("×")}`
+      : (maskData ? "Mask 尺寸与 CT 体数据不一致，已跳过叠加" : "未加载 3D Mask");
     const resampleText = resampling.requested
       ? (resampling.applied ? "各向同性重采样已启用" : `各向同性重采样未启用：${resampling.reason || "无需处理"}`)
       : "使用原始 spacing";
+    protocolPanel.classList.toggle("collapsed", protocolCollapsed);
     protocolPanel.innerHTML = `
-      <div class="protocol-kicker">Rendering Protocol</div>
-      <strong>${viewerState.preset.label}</strong>
-      <span>WL ${viewerState.preset.wl} / WW ${viewerState.preset.ww} · ${viewerState.preset.steps} samples · stop ${viewerState.preset.alphaStop}</span>
-      <span>${resampleText} · spacing ${spacing} mm</span>
-      <p>${viewerState.preset.summary}</p>
+      <button class="protocol-toggle" type="button" data-protocol-toggle>
+        <span>Rendering Protocol</span>
+        <strong>${viewerState.preset.label}</strong>
+        <b>${protocolCollapsed ? "展开" : "收起"}</b>
+      </button>
+      <div class="protocol-details">
+        <span>WL ${viewerState.preset.wl} / WW ${viewerState.preset.ww} · ${viewerState.preset.steps} samples · stop ${viewerState.preset.alphaStop}</span>
+        <span>${resampleText} · spacing ${spacing} mm</span>
+        <span>${maskText}</span>
+        <p>${viewerState.preset.summary}</p>
+      </div>
     `;
+    protocolPanel.querySelector("[data-protocol-toggle]").addEventListener("click", () => {
+      protocolCollapsed = !protocolCollapsed;
+      updateProtocolPanel();
+    });
     container.dataset.preset = viewerState.preset.id;
   }
 
@@ -669,6 +769,7 @@ function renderWithWebGL({ container, volumeData, values }) {
     delete() {
       resizeObserver.disconnect();
       gl.deleteTexture(texture);
+      if (maskTexture) gl.deleteTexture(maskTexture);
       gl.deleteBuffer(vertexBuffer);
       gl.deleteProgram(program);
     },

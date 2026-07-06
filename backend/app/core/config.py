@@ -7,6 +7,8 @@ RAW_DATA_DIR = DATASET_DIR / "raw"
 LABELS_DATA_DIR = DATASET_DIR / "labels"
 SPLITS_DATA_DIR = DATASET_DIR / "splits"
 DATABASE_DIR = PROJECT_ROOT / "database"
+SCHEMA_SQL_PATH = DATABASE_DIR / "schema.sql"
+SQLITE_DB_PATH = DATABASE_DIR / "app.db"
 
 CASES_DB_PATH = DATABASE_DIR / "dev_cases.json"
 IMAGES_DB_PATH = DATABASE_DIR / "dev_images.json"
