@@ -397,9 +397,20 @@ td { color: #dbeaf4; font-size: 14px; }
 }
 .roi-box { position: absolute; left: 30%; top: 29%; width: 36%; height: 33%; border: 2px solid var(--blue); box-shadow: 0 0 22px rgba(0, 194, 255, 0.55); }
 .coordinate { position: absolute; right: 14px; bottom: 14px; color: #dcecf5; font-size: 12px; background: rgba(0, 0, 0, 0.45); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; z-index: 5; }
-.slider-row { display: grid; grid-template-columns: 82px 1fr 58px; gap: 10px; align-items: center; margin-top: 14px; color: var(--muted); font-size: 13px; }
+.slider-row { display: grid; grid-template-columns: 96px 1fr 64px; gap: 10px; align-items: center; margin-top: 14px; color: var(--muted); font-size: 13px; }
 input[type="range"] { width: 100%; accent-color: var(--blue); }
 .slider-row select { min-height: 36px; color: var(--text); background: rgba(5, 14, 26, 0.72); border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; }
+.axis-control-row select { border-color: rgba(56, 163, 255, 0.72); box-shadow: 0 0 0 1px rgba(56, 163, 255, 0.18); }
+.fixed-axis-pill {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  color: var(--text);
+  background: rgba(5, 14, 26, 0.72);
+  border: 1px solid rgba(56, 163, 255, 0.52);
+  border-radius: 8px;
+}
 .image-source-line {
   margin-top: 10px;
   color: var(--muted);
@@ -823,6 +834,38 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 }
 .annotation-state-line strong {
   color: var(--text);
+}
+.deepedit-controls {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  border: 1px solid rgba(0, 229, 176, 0.22);
+  border-radius: 8px;
+  background: rgba(0, 229, 176, 0.06);
+}
+.segmented-control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.segmented-control button {
+  min-height: 32px;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(5, 14, 26, 0.7);
+  cursor: pointer;
+}
+.segmented-control button.active {
+  border-color: rgba(0, 229, 176, 0.7);
+  background: rgba(0, 229, 176, 0.16);
+}
+.deepedit-controls small {
+  color: var(--muted);
+  line-height: 1.5;
 }
 .magic-wand-controls {
   display: grid;

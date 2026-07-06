@@ -12,6 +12,7 @@ class MaskRecord(BaseModel):
     version: str = "v1_manual"
     label: str = "label"
     mask_format: str = "nii.gz"
+    axis: str | None = None
     slice_index: int | None = None
     width: int | None = None
     height: int | None = None
@@ -26,6 +27,7 @@ class SaveMaskRequest(BaseModel):
     version: str = "v1_manual"
     label: str = Field(default="label", min_length=1)
     mask_format: str = "nii.gz"
+    axis: str = "axial"
     slice_index: int | None = None
     width: int | None = None
     height: int | None = None
@@ -87,6 +89,12 @@ class LabelPropagationRequest(BaseModel):
     image_guidance: bool = True
     hu_margin: float | None = None
     closing_radius: int = 1
+    random_walker_beta: float = 90.0
+    random_walker_roi_margin: int = 24
+    random_walker_max_nodes: int = 45000
+    connected_component_mode: str = "seeded"
+    connected_component_min_voxels: int = 64
+    connected_component_max_components: int = 8
 
 
 class LabelPropagationResponse(BaseModel):
@@ -109,12 +117,18 @@ class DeepEditRefineRequest(BaseModel):
     image_id: str
     source_version: str = "v1_manual"
     current_mask_version: str = "v3_fusion"
+    current_mask_id: str | None = None
     output_version: str = "v3_fusion"
     label: str = "label"
+    model_id: str | None = "DeepEdit"
     positive_points: list[list[float]] = []
     negative_points: list[list[float]] = []
+    scribbles: list[dict[str, Any]] = []
+    interaction: dict[str, Any] = {}
     confirmed_slices: list[int] = []
 
 
 class DeepEditRefineResponse(LabelPropagationResponse):
-    refinement_mode: str = "label_propagation_placeholder"
+    refinement_mode: str = "deepedit_fallback_random_walker"
+    model_status: str = "fallback"
+    model_message: str | None = None

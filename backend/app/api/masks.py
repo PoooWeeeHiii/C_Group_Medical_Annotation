@@ -63,6 +63,11 @@ def read_mask_slice_data(mask_id: str, slice_index: int) -> dict:
     return get_mask_slice_data(mask_id=mask_id, slice_index=slice_index)
 
 
+@router.get("/mask/{mask_id}/slice/{axis}/{slice_index}")
+def read_mask_axis_slice_data(mask_id: str, axis: str, slice_index: int) -> dict:
+    return get_mask_slice_data(mask_id=mask_id, axis=axis, slice_index=slice_index)
+
+
 @router.get("/image/{image_id}/masks", response_model=MaskListResponse)
 @router.get("/images/{image_id}/masks", response_model=MaskListResponse)
 def list_image_masks(image_id: str) -> MaskListResponse:

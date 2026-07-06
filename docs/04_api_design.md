@@ -539,7 +539,10 @@ application/octet-stream
 
 ### POST `/api/label_propagate`
 
-用途：把少量 2D sparse JSON mask 自动传播成完整 3D mask。当前 V1 使用 image-guided signed distance map：先按真实 spacing 做距离场传播，再用 CT 原图 HU 范围和形态学后处理约束结果。
+用途：把少量 2D sparse JSON mask 自动传播成完整 3D mask。当前 V2 支持两类方法：
+
+- `image_guided_distance`：按真实 spacing 做 signed distance map 传播，再用 CT 原图 HU 范围和形态学后处理约束结果。
+- `random_walker`：先生成 signed distance 候选区域，再在每张候选切片上构建 4 邻域灰度图，用前景/背景种子求解 graph Laplacian，得到 graph-based segmentation 结果。
 
 请求：
 
@@ -550,12 +553,18 @@ application/octet-stream
   "source_version": "v1_manual",
   "output_version": "v3_fusion",
   "label": "label",
-  "method": "image_guided_distance",
+  "method": "random_walker",
   "fill_holes": true,
   "keep_largest_component": false,
   "image_guidance": true,
   "hu_margin": null,
-  "closing_radius": 1
+  "closing_radius": 1,
+  "random_walker_beta": 90.0,
+  "random_walker_roi_margin": 24,
+  "random_walker_max_nodes": 45000,
+  "connected_component_mode": "seeded",
+  "connected_component_min_voxels": 64,
+  "connected_component_max_components": 8
 }
 ```
 
@@ -566,7 +575,7 @@ application/octet-stream
   "success": true,
   "mask_id": "Mask0003",
   "path": "dataset/labels/Case0001/v3_fusion/Case0001_Image0001_Mask0003_v3_fusion_label.nii.gz",
-  "method": "image_guided_distance",
+  "method": "random_walker",
   "source_mask_ids": ["Mask0001", "Mask0002"],
   "annotated_slices": [42, 61],
   "propagated_slices": 134,
@@ -580,8 +589,13 @@ application/octet-stream
 - 中间层使用 signed distance map 插值，而不是直接插值二值 mask。
 - 距离场使用原 CT 的 `spacing`，层厚会影响传播范围；只有一层标注时不会再简单复制到整个体积，而会随 z 距离逐渐收缩。
 - `image_guidance=true` 时，会从医生手工 mask 内估计前景 HU 范围，再过滤传播候选区域，减少传播到无关组织。
-- `closing_radius` 用于二维形态学闭合，`fill_holes` 用于填洞，`keep_largest_component` 可在需要单一器官时只保留最大连通域。
-- 当前版本适合课程项目和第一版 Demo；后续可替换为 Sli2Vol / SAM2-3D / MONAI 模型式传播。
+- `closing_radius` 用于二维形态学闭合，`fill_holes` 用于填洞。
+- `connected_component_mode=seeded` 是默认 3D 连通域策略：优先保留与人工稀疏标注相连的组件，同时删除小孤立噪点。这样比直接 `keep_largest_component=true` 更安全，不会轻易删除医生标过的小病灶或多发区域。
+- `keep_largest_component=true` 仍兼容旧逻辑，会强制只保留最大 3D 连通域；仅建议单器官、单目标任务使用。
+- `connected_component_min_voxels` 控制噪点清理阈值；`connected_component_max_components` 控制 seeded 找不到匹配组件时的回退保留数量。
+- `method=random_walker` 是当前 graph-based segmentation V2：前景种子来自手工标注或候选区域腐蚀，背景种子来自候选区域外扩后的外部区域；边权由 CT 灰度差决定。
+- `random_walker_beta` 越大，边界越依赖灰度突变；`random_walker_max_nodes` 控制单层 ROI 图规模，过大的 ROI 会回退到 signed distance 候选，避免接口卡死。
+- 当前版本适合课程项目和第一版 Demo；后续可替换为 MONAI Label / DeepEdit 或 Person B 训练好的分割模型。
 
 ### GET `/api/mask/{mask_id}/slice/{slice_index}`
 
@@ -611,7 +625,9 @@ application/octet-stream
 
 ### POST `/api/deepedit/refine`
 
-用途：为后续接入 MONAI Label DeepEdit / Person B 模型预留交互式修正接口。当前 V1 先复用 Label Propagation，形成“用户新标一层 → 全局 3D mask 更新”的闭环。
+用途：DeepEdit 交互式修正接口。前端会传入当前 3D mask、正点、负点、scribble 摘要和确认切片；后端优先调用外部 DeepEdit / MONAI Label 服务。若未配置 `DEEPEDIT_SERVICE_URL`，当前 V2 会明确 fallback 到 `random_walker + seeded connected component`，形成“用户提示 → graph-based refinement → 全局 3D mask 更新”的闭环。
+
+前端按钮已统一为“智能3D传播修正”：它同时承担初始 2D→3D 传播和后续 DeepEdit 式修正，不再单独暴露 `Label Propagation` 与 `DeepEdit` 两个按钮。
 
 请求：
 
@@ -621,18 +637,36 @@ application/octet-stream
   "image_id": "Image0001",
   "source_version": "v1_manual",
   "current_mask_version": "v3_fusion",
+  "current_mask_id": "Mask0123",
   "output_version": "v3_fusion",
   "label": "label",
-  "positive_points": [],
-  "negative_points": [],
+  "model_id": "DeepEdit",
+  "positive_points": [[230, 188, 42]],
+  "negative_points": [[280, 210, 42]],
+  "scribbles": [
+    {
+      "axis": "axial",
+      "slice_index": 42,
+      "width": 512,
+      "height": 512,
+      "label_id": 1,
+      "foreground_pixels": 3192,
+      "encoding": "saved_v1_manual_rle"
+    }
+  ],
+  "interaction": {
+    "type": "deepedit",
+    "prompt_source": "2d_axial_canvas"
+  },
   "confirmed_slices": [42]
 }
 ```
 
 说明：
 
-- 当前 `refinement_mode=label_propagation_placeholder`。
-- 后续模型版本应输入 `image_volume + current_mask + positive/negative clicks + confirmed_slices`。
+- 配置 `DEEPEDIT_SERVICE_URL` 后，后端会向 `{DEEPEDIT_SERVICE_URL}/infer` 发送 `image_path + current_mask_path + positive/negative clicks + scribbles + confirmed_slices`。
+- 未配置模型服务时，响应会返回 `model_status=fallback_no_deepedit_model` 和 `refinement_mode=deepedit_fallback_random_walker`，表示这不是神经网络 DeepEdit。
+- 神经网络模型版本应输入 `image_volume + current_mask + positive/negative clicks + scribbles + confirmed_slices`。
 - `confirmed_slices` 必须作为 hard constraint，防止模型覆盖医生已确认标注。
 - 前端 3D 视图已经预留 AI Mask Overlay 区块，Person B 生成的 `v2_ai` mask 写入该 JSON 或后续数据库后即可叠加显示。
 

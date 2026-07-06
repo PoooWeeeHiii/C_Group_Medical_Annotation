@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 
@@ -9,6 +10,8 @@ SPLITS_DATA_DIR = DATASET_DIR / "splits"
 DATABASE_DIR = PROJECT_ROOT / "database"
 SCHEMA_SQL_PATH = DATABASE_DIR / "schema.sql"
 SQLITE_DB_PATH = DATABASE_DIR / "app.db"
+DEEPEDIT_SERVICE_URL = os.getenv("DEEPEDIT_SERVICE_URL", "").strip()
+DEEPEDIT_SERVICE_TIMEOUT_SECONDS = float(os.getenv("DEEPEDIT_SERVICE_TIMEOUT_SECONDS", "30"))
 
 CASES_DB_PATH = DATABASE_DIR / "dev_cases.json"
 IMAGES_DB_PATH = DATABASE_DIR / "dev_images.json"

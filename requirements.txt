@@ -6,6 +6,7 @@ sqlalchemy
 
 # Medical image processing
 numpy
+scipy
 pydicom
 SimpleITK
 opencv-python
@@ -20,4 +21,3 @@ scikit-learn
 # Utilities
 python-multipart
 pytest
-

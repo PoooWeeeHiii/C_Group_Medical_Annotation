@@ -14,6 +14,8 @@ const state = {
   activeCaseId: null,
   activeImageId: null,
   activeSlice: 0,
+  activeAxis: "axial",
+  activeSlices: { axial: 0, coronal: 0, sagittal: 0 },
   activeWindow: "auto",
   annotationTool: "brush",
   annotationLabel: "label",
@@ -25,6 +27,7 @@ const state = {
   annotationPolygonPreviewPoint: null,
   annotationIgnoreNextClickUntil: 0,
   annotationPreviewRect: null,
+  deepEditPromptMode: "positive",
   magicWandPreset: "soft",
   magicWandThreshold: 45,
   magicWandMaxPixels: 180000,
@@ -88,11 +91,63 @@ const magicWandPresets = {
   custom: { label: "自定义", threshold: 45, range: "10~200" },
 };
 
+const sliceAxes = {
+  axial: { label: "轴位 Axial", coordinate: "z" },
+  coronal: { label: "冠状位 Coronal", coordinate: "y" },
+  sagittal: { label: "矢状位 Sagittal", coordinate: "x" },
+};
+
 const $ = (selector) => document.querySelector(selector);
 const API_BASE = window.location.port && window.location.port !== "8000" ? "http://127.0.0.1:8000" : "";
 
 function apiUrl(path) {
   return `${API_BASE}${path}`;
+}
+
+function activeAxis() {
+  return sliceAxes[state.activeAxis] ? state.activeAxis : "axial";
+}
+
+function axisLabel(axis = activeAxis()) {
+  return sliceAxes[axis]?.label || axis;
+}
+
+function axisCoordinateName(axis = activeAxis()) {
+  return sliceAxes[axis]?.coordinate || "z";
+}
+
+function axisSliceCount(meta, axis = activeAxis()) {
+  if (!meta) return 1;
+  if (axis === "coronal") return Math.max(Number(meta.height || 1), 1);
+  if (axis === "sagittal") return Math.max(Number(meta.width || 1), 1);
+  return Math.max(Number(meta.slice_count || 1), 1);
+}
+
+function currentSliceIndex(axis = activeAxis()) {
+  return Number(state.activeSlices?.[axis] ?? state.activeSlice ?? 0);
+}
+
+function setCurrentSliceIndex(value, axis = activeAxis()) {
+  const next = Math.max(0, Number(value) || 0);
+  if (!state.activeSlices) state.activeSlices = { axial: 0, coronal: 0, sagittal: 0 };
+  state.activeSlices[axis] = next;
+  if (axis === "axial") state.activeSlice = next;
+}
+
+function sliceStorageKey(axis = activeAxis(), sliceIndex = currentSliceIndex(axis)) {
+  return `${axis}:${Number(sliceIndex) || 0}`;
+}
+
+function parseSliceStorageKey(key) {
+  const raw = String(key);
+  if (raw.includes(":")) {
+    const [axis, sliceIndex] = raw.split(":");
+    return {
+      axis: sliceAxes[axis] ? axis : "axial",
+      sliceIndex: Number(sliceIndex) || 0,
+    };
+  }
+  return { axis: "axial", sliceIndex: Number(raw) || 0 };
 }
 
 function escapeHtml(value) {
@@ -174,9 +229,15 @@ async function loadVolumeMeta(imageId) {
   if (!imageId) return null;
   if (!state.volumeMeta[imageId]) {
     state.volumeMeta[imageId] = await apiGet(`/api/image/${imageId}/volume`);
-    const maxSlice = Math.max((state.volumeMeta[imageId].slice_count || 1) - 1, 0);
+    state.activeAxis = "axial";
     const restoredSlice = state.restoredMaskSlices[imageId];
-    state.activeSlice = Math.min(restoredSlice ?? Math.floor(maxSlice / 2), maxSlice);
+    const axis = "axial";
+    const maxSlice = Math.max(axisSliceCount(state.volumeMeta[imageId], axis) - 1, 0);
+    if (restoredSlice && (!restoredSlice.axis || restoredSlice.axis === "axial")) {
+      setCurrentSliceIndex(Math.min(restoredSlice.sliceIndex ?? Math.floor(maxSlice / 2), maxSlice), axis);
+    } else {
+      setCurrentSliceIndex(Math.min(Math.floor(maxSlice / 2), maxSlice), axis);
+    }
   }
   return state.volumeMeta[imageId];
 }
@@ -440,57 +501,54 @@ async function saveCurrentSliceIfAnnotated(item, image) {
   }
 }
 
-async function runLabelPropagation(event) {
-  const button = event.currentTarget;
-  const item = activeCase();
-  const image = activeImage();
-  if (!item || !image) {
-    showToast("请先选择病例和图像");
-    return;
+function deepEditPromptPayload(image) {
+  const positive = [];
+  const negative = [];
+  const imagePoints = state.pointAnnotations[image.image_id] || {};
+  for (const [sliceKey, points] of Object.entries(imagePoints)) {
+    const { axis, sliceIndex } = parseSliceStorageKey(sliceKey);
+    if (axis !== "axial") continue;
+    for (const point of points || []) {
+      const target = (point.promptType || "positive") === "negative" ? negative : positive;
+      target.push([Number(point.x) || 0, Number(point.y) || 0, Number(point.sliceIndex ?? sliceIndex) || 0]);
+    }
   }
-
-  button.disabled = true;
-  const previousText = button.textContent;
-  button.textContent = "保存并传播...";
-  try {
-    await saveCurrentSliceIfAnnotated(item, image);
-    button.textContent = "DeepEdit优化...";
-    const data = await apiPost("/api/deepedit/refine", {
-      case_id: item.case_id,
-      image_id: image.image_id,
-      source_version: "v1_manual",
-      current_mask_version: "v3_fusion",
-      output_version: "v3_fusion",
-      label: state.annotationLabel,
-      positive_points: [],
-      negative_points: [],
-      confirmed_slices: Object.keys(state.sliceMasks[image.image_id] || {}).map((value) => Number(value)),
-    });
-    await apiPost("/api/version", {
-      case_id: item.case_id,
-      version: "v3_fusion",
-      annotation: data.mask_id,
-      model: data.refinement_mode || "label_propagation_deepedit_placeholder",
-      dataset: null,
-    });
-    await loadImageMasks(image.image_id, { force: true });
-    await loadCaseVersions(item.case_id, { force: true });
-    await refreshCases();
-    state.active3DMaskId = data.mask_id;
-    state.volumeViewMode = "3d";
-    state.volumeLoadingKey = null;
-    state.propagatedSliceLoads = {};
-    showToast(`Label Propagation + DeepEdit 完成：${data.mask_id}，已切换到 3D 实体叠加`);
-    render();
-  } catch (error) {
-    showToast(error.message || "Label Propagation 失败");
-  } finally {
-    button.disabled = false;
-    button.textContent = previousText;
-  }
+  return { positive, negative };
 }
 
-async function runDeepEditRefine(event) {
+function deepEditScribblePayload(image) {
+  const scribbles = [];
+  const imageMasks = state.sliceMasks[image.image_id] || {};
+  for (const [sliceKey, mask] of Object.entries(imageMasks)) {
+    const { axis, sliceIndex } = parseSliceStorageKey(sliceKey);
+    if (axis !== "axial" || !mask?.data) continue;
+    const foregroundPixels = mask.data.reduce((sum, value) => sum + (value > 0 ? 1 : 0), 0);
+    if (!foregroundPixels) continue;
+    scribbles.push({
+      axis,
+      slice_index: sliceIndex,
+      width: mask.width,
+      height: mask.height,
+      label_id: state.annotationLabelId,
+      foreground_pixels: foregroundPixels,
+      encoding: "saved_v1_manual_rle",
+    });
+  }
+  return scribbles;
+}
+
+function confirmedSliceIndices(image) {
+  const values = new Set([currentSliceIndex()]);
+  const imageMasks = state.sliceMasks[image.image_id] || {};
+  const imagePoints = state.pointAnnotations[image.image_id] || {};
+  for (const key of [...Object.keys(imageMasks), ...Object.keys(imagePoints)]) {
+    const { axis, sliceIndex } = parseSliceStorageKey(key);
+    if (axis === "axial") values.add(sliceIndex);
+  }
+  return [...values].sort((a, b) => a - b);
+}
+
+async function runSmart3DRefine(event) {
   const button = event.currentTarget;
   const item = activeCase();
   const image = activeImage();
@@ -501,19 +559,33 @@ async function runDeepEditRefine(event) {
 
   button.disabled = true;
   const previousText = button.textContent;
-  button.textContent = "优化中...";
+  button.textContent = "保存并生成...";
   try {
     await saveCurrentSliceIfAnnotated(item, image);
+    button.textContent = "智能修正中...";
+    const currentMasks = await loadImageMasks(image.image_id, { force: true });
+    const current3DMask = latest3DMask(currentMasks);
+    const prompts = deepEditPromptPayload(image);
+    const scribbles = deepEditScribblePayload(image);
     const data = await apiPost("/api/deepedit/refine", {
       case_id: item.case_id,
       image_id: image.image_id,
       source_version: "v1_manual",
       current_mask_version: "v3_fusion",
+      current_mask_id: current3DMask?.mask_id || null,
       output_version: "v3_fusion",
       label: state.annotationLabel,
-      positive_points: [],
-      negative_points: [],
-      confirmed_slices: [state.activeSlice],
+      model_id: "DeepEdit",
+      positive_points: prompts.positive,
+      negative_points: prompts.negative,
+      scribbles,
+      interaction: {
+        type: "deepedit",
+        prompt_source: "2d_axial_canvas",
+        current_tool: state.annotationTool,
+        prompt_mode: state.deepEditPromptMode,
+      },
+      confirmed_slices: confirmedSliceIndices(image),
     });
     await apiPost("/api/version", {
       case_id: item.case_id,
@@ -529,10 +601,10 @@ async function runDeepEditRefine(event) {
     state.volumeViewMode = "3d";
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
-    showToast(`DeepEdit 2D→3D 完成：${data.mask_id}，已切换到 3D 实体叠加`);
+    showToast(`智能3D传播修正完成：${data.mask_id} · ${data.model_status || data.refinement_mode}`);
     render();
   } catch (error) {
-    showToast(error.message || "DeepEdit 优化失败");
+    showToast(error.message || "智能3D传播修正失败");
   } finally {
     button.disabled = false;
     button.textContent = previousText;
@@ -905,6 +977,19 @@ function renderMagicWandControls() {
   `;
 }
 
+function renderDeepEditControls() {
+  return `
+    <div class="deepedit-controls">
+      <span>DeepEdit提示</span>
+      <div class="segmented-control">
+        <button class="${state.deepEditPromptMode === "positive" ? "active" : ""}" data-deepedit-prompt="positive" type="button">正点</button>
+        <button class="${state.deepEditPromptMode === "negative" ? "active" : ""}" data-deepedit-prompt="negative" type="button">负点</button>
+      </div>
+      <small>点标注会作为神经网络交互提示；画笔/多边形作为 scribble mask。</small>
+    </div>
+  `;
+}
+
 function renderViewerModeButtons() {
   return `
     <div class="viewer-mode-switch">
@@ -914,20 +999,21 @@ function renderViewerModeButtons() {
   `;
 }
 
-function render2DViewer(item, image, volume, activeSlice, sliceCount, maxSlice) {
+function render2DViewer(item, image, volume, activeSlice, sliceCount, maxSlice, axis) {
   return `
     <section class="viewer">
-      <div class="viewer-toolbar"><span id="viewerTitle">${item ? item.case_id : "暂无病例"} | 轴位 Axial</span><span id="viewerInfo">${image ? image.image_id : "等待图像"} | 缩放 100%</span></div>
+      <div class="viewer-toolbar"><span id="viewerTitle">${item ? item.case_id : "暂无病例"} | ${axisLabel(axis)}</span><span id="viewerInfo">${image ? image.image_id : "等待图像"} | 缩放 100%</span></div>
       ${renderViewerModeButtons()}
       <div class="ct-frame real-image-frame">
         ${image ? `<img id="sliceImage" class="ct-slice-image" alt="医学影像切片" />` : ""}
         <div id="sliceError" class="slice-empty ${image ? "hidden" : ""}">${image ? "正在读取体数据..." : "暂无可显示图像"}</div>
         ${image ? `<canvas id="annotationCanvas" class="annotation-canvas" aria-label="标注画布"></canvas>` : ""}
-        <div class="coordinate" id="sliceCoordinate">z: ${activeSlice + 1} / ${sliceCount}</div>
+        <div class="coordinate" id="sliceCoordinate">${axisCoordinateName(axis)}: ${activeSlice + 1} / ${sliceCount}</div>
       </div>
+      <div class="slider-row fixed-axis-row"><span>标注平面</span><div class="fixed-axis-pill">轴位 Axial</div><strong>Z</strong></div>
       <div class="slider-row"><span>切片</span><input id="sliceSlider" type="range" min="0" max="${maxSlice}" value="${activeSlice}" /><strong id="sliceValue">${activeSlice + 1}</strong></div>
       <div class="slider-row"><span>透明度</span><input type="range" min="0" max="100" value="54" /><strong>54%</strong></div>
-      <div class="slider-row"><span>窗位</span><select id="windowSelect"><option value="auto">自动</option><option value="lung">肺窗</option><option value="soft">软组织</option><option value="bone">骨窗</option></select><strong id="windowValue">自动</strong></div>
+      <div class="slider-row"><span>窗宽窗位</span><select id="windowSelect" aria-label="选择CT窗宽窗位"><option value="auto">自动</option><option value="lung">肺窗</option><option value="soft">软组织</option><option value="bone">骨窗</option></select><strong id="windowValue">自动</strong></div>
       <div class="image-source-line" id="sliceSource">切片接口：等待加载</div>
     </section>
   `;
@@ -977,7 +1063,7 @@ function render3DViewer(item, image, volume, masks = []) {
       <div>
         <span>3D Mask 实体叠加</span>
         <strong>${active3DMask ? `${active3DMask.mask_id} · ${active3DMask.version}` : "暂无 3D Mask"}</strong>
-        <code>${active3DMask ? active3DMask.path : "请先在 2D 中保存 Mask，再执行 Label Propagation"}</code>
+        <code>${active3DMask ? active3DMask.path : "请先在 2D 中保存 Mask，再执行智能3D传播修正"}</code>
       </div>
       <button class="primary-button" data-render-annotation-3d ${canRender ? "" : "disabled"}>高亮显示当前标注</button>
     </div>
@@ -999,14 +1085,16 @@ function render3DViewer(item, image, volume, masks = []) {
 }
 
 function renderAnnotation() {
+  state.activeAxis = "axial";
   const item = activeCase();
   const image = activeImage();
   const volume = image ? state.volumeMeta[image.image_id] : null;
   const masks = masksForActiveImage();
   const versions = versionsForActiveCase();
-  const sliceCount = volume?.slice_count || image?.slice_count || 1;
+  const axis = activeAxis();
+  const sliceCount = axisSliceCount(volume || image, axis);
   const maxSlice = Math.max(sliceCount - 1, 0);
-  const activeSlice = Math.min(state.activeSlice, maxSlice);
+  const activeSlice = Math.min(currentSliceIndex(axis), maxSlice);
   const meta = item
     ? [["病例", item.case_id], ["患者", item.patient_id], ["影像类型", item.modality], ["状态", statusText[item.status] || item.status || "未标注"], ["图像数", item.image_count], ["Mask数", masks.length]]
     : [["病例", "暂无病例"], ["患者", "-"], ["影像类型", "-"], ["状态", "-"], ["图像数", "0"]];
@@ -1029,17 +1117,17 @@ function renderAnnotation() {
         <h3 style="margin-top:24px">标签</h3>
         <div class="label-list">${labelList()}</div>
       </aside>
-      ${state.volumeViewMode === "3d" ? render3DViewer(item, image, volume, masks) : render2DViewer(item, image, volume, activeSlice, sliceCount, maxSlice)}
+      ${state.volumeViewMode === "3d" ? render3DViewer(item, image, volume, masks) : render2DViewer(item, image, volume, activeSlice, sliceCount, maxSlice, axis)}
       <aside class="tool-panel">
         <h2>标注工具</h2>
         <div class="tool-grid">${renderToolButtons()}</div>
         <div class="annotation-state-line"><span>当前工具：<strong id="annotationToolLabel">${annotationToolLabel()}</strong></span><span>当前 label：<strong>${escapeHtml(state.annotationLabel)} #${state.annotationLabelId}</strong></span><span>智能阈值：<strong>HU ± ${state.magicWandThreshold}</strong></span><span>当前切片：<strong id="annotationMaskStats">0 像素</strong></span></div>
         ${renderMagicWandControls()}
+        ${renderDeepEditControls()}
         <div class="grid action-stack" style="margin-top:18px">
           <button class="primary-button" data-save-mask ${image ? "" : "disabled"}>保存 Mask</button>
           <button class="ghost-button" data-final-mask ${masks.some((mask) => mask.version === "v1_manual") ? "" : "disabled"}>设为 final</button>
-          <button class="ghost-button" data-label-propagate ${image ? "" : "disabled"}>Label Propagation</button>
-          <button class="ghost-button" data-deepedit-refine ${image ? "" : "disabled"}>DeepEdit优化（占位）</button>
+          <button class="ghost-button" data-smart-3d-refine ${image ? "" : "disabled"}>智能3D传播修正</button>
           <button class="ghost-button" data-export-mask-nifti ${image ? "" : "disabled"}>导出 3D Mask</button>
           <button class="ghost-button" data-start-3d-render ${image ? "" : "disabled"}>导出 3D 图像</button>
           <button class="danger-button">驳回</button>
@@ -1122,16 +1210,19 @@ function updateSliceViewer(image, meta) {
     return;
   }
 
-  const maxSlice = Math.max((meta.slice_count || 1) - 1, 0);
-  state.activeSlice = Math.max(0, Math.min(state.activeSlice, maxSlice));
+  const axis = activeAxis();
+  const sliceCount = axisSliceCount(meta, axis);
+  const maxSlice = Math.max(sliceCount - 1, 0);
+  setCurrentSliceIndex(Math.max(0, Math.min(currentSliceIndex(axis), maxSlice)), axis);
+  const sliceIndex = currentSliceIndex(axis);
   const slider = $("#sliceSlider");
   if (slider) {
     slider.max = String(maxSlice);
-    slider.value = String(state.activeSlice);
+    slider.value = String(sliceIndex);
   }
 
-  const sliceNumber = state.activeSlice + 1;
-  const sliceUrl = apiUrl(`/api/image/${image.image_id}/slice/${state.activeSlice}.png?window=${state.activeWindow}&t=${Date.now()}`);
+  const sliceNumber = sliceIndex + 1;
+  const sliceUrl = apiUrl(`/api/image/${image.image_id}/slice/${axis}/${sliceIndex}.png?window=${state.activeWindow}&t=${Date.now()}`);
   imageElement.onload = () => {
     imageElement.classList.remove("hidden");
     $("#sliceError").classList.add("hidden");
@@ -1144,8 +1235,8 @@ function updateSliceViewer(image, meta) {
   };
   imageElement.src = sliceUrl;
   $("#sliceValue").textContent = String(sliceNumber);
-  $("#sliceCoordinate").textContent = `z: ${sliceNumber} / ${meta.slice_count}`;
-  $("#sliceSource").textContent = `切片接口：/api/image/${image.image_id}/slice/${state.activeSlice}.png`;
+  $("#sliceCoordinate").textContent = `${axisCoordinateName(axis)}: ${sliceNumber} / ${sliceCount}`;
+  $("#sliceSource").textContent = `切片接口：/api/image/${image.image_id}/slice/${axis}/${sliceIndex}.png`;
   const propagatedMask = latestPropagatedMask(state.masksByImage[image.image_id] || []);
   if (propagatedMask) {
     $("#sliceSource").textContent += ` · 传播Mask：${propagatedMask.mask_id} / ${propagatedMask.version}`;
@@ -1157,6 +1248,11 @@ function updateSliceViewer(image, meta) {
   if (select) {
     select.value = state.activeWindow;
     $("#windowValue").textContent = select.options[select.selectedIndex].textContent;
+  }
+  const axisSelect = $("#axisSelect");
+  if (axisSelect) {
+    axisSelect.value = axis;
+    $("#axisValue").textContent = axisCoordinateName(axis).toUpperCase();
   }
 }
 
@@ -1359,7 +1455,7 @@ function currentSliceMask({ create = true } = {}) {
   const canvas = $("#annotationCanvas");
   if (!image || !canvas || !canvas.width || !canvas.height) return null;
   const imageId = image.image_id;
-  const sliceKey = String(state.activeSlice);
+  const sliceKey = sliceStorageKey();
   if (!state.sliceMasks[imageId]) state.sliceMasks[imageId] = {};
   let mask = state.sliceMasks[imageId][sliceKey];
   const needsNewMask = !mask || mask.width !== canvas.width || mask.height !== canvas.height;
@@ -1378,7 +1474,7 @@ function currentSlicePoints({ create = true } = {}) {
   const image = activeImage();
   if (!image) return null;
   const imageId = image.image_id;
-  const sliceKey = String(state.activeSlice);
+  const sliceKey = sliceStorageKey();
   if (!state.pointAnnotations[imageId]) state.pointAnnotations[imageId] = {};
   if (!state.pointAnnotations[imageId][sliceKey] && create) {
     state.pointAnnotations[imageId][sliceKey] = [];
@@ -1428,10 +1524,10 @@ function decodeFloat32Base64(base64) {
   return new Float32Array(bytes.buffer);
 }
 
-async function loadSliceValues(imageId, sliceIndex) {
-  const key = `${imageId}:${sliceIndex}:axial`;
+async function loadSliceValues(imageId, sliceIndex, axis = activeAxis()) {
+  const key = `${imageId}:${axis}:${sliceIndex}`;
   if (!state.sliceValueCache[key]) {
-    const data = await apiGet(`/api/image/${imageId}/slice/${sliceIndex}/values`);
+    const data = await apiGet(`/api/image/${imageId}/slice/${axis}/${sliceIndex}/values`);
     state.sliceValueCache[key] = {
       width: data.width,
       height: data.height,
@@ -1462,7 +1558,8 @@ function currentSliceMaskPayload(item, image) {
     label: state.annotationLabel,
     label_id: state.annotationLabelId,
     mask_format: "json",
-    slice_index: state.activeSlice,
+    axis: activeAxis(),
+    slice_index: currentSliceIndex(),
     width: canvas.width,
     height: canvas.height,
     encoding: "rle",
@@ -1471,7 +1568,7 @@ function currentSliceMaskPayload(item, image) {
   };
 }
 
-function buildSliceMaskPayload(item, image, sliceIndex, mask, points = []) {
+function buildSliceMaskPayload(item, image, axis, sliceIndex, mask, points = []) {
   const data = mask?.data || new Uint8Array((mask?.width || 0) * (mask?.height || 0));
   const hasMaskPixels = data.some((value) => value > 0);
   if (!hasMaskPixels && !points.length) return null;
@@ -1483,6 +1580,7 @@ function buildSliceMaskPayload(item, image, sliceIndex, mask, points = []) {
     label: state.annotationLabel,
     label_id: state.annotationLabelId,
     mask_format: "json",
+    axis,
     slice_index: Number(sliceIndex),
     width: mask.width,
     height: mask.height,
@@ -1498,8 +1596,14 @@ async function saveAllAnnotatedMasks(item, image) {
   const sliceKeys = new Set([...Object.keys(imageMasks), ...Object.keys(imagePoints)]);
   const saved = [];
 
-  for (const sliceKey of [...sliceKeys].sort((a, b) => Number(a) - Number(b))) {
-    const payload = buildSliceMaskPayload(item, image, sliceKey, imageMasks[sliceKey], imagePoints[sliceKey] || []);
+  for (const sliceKey of [...sliceKeys].sort((a, b) => {
+    const axisOrder = { axial: 0, coronal: 1, sagittal: 2 };
+    const left = parseSliceStorageKey(a);
+    const right = parseSliceStorageKey(b);
+    return (axisOrder[left.axis] - axisOrder[right.axis]) || (left.sliceIndex - right.sliceIndex);
+  })) {
+    const parsed = parseSliceStorageKey(sliceKey);
+    const payload = buildSliceMaskPayload(item, image, parsed.axis, parsed.sliceIndex, imageMasks[sliceKey], imagePoints[sliceKey] || []);
     if (!payload) continue;
     const data = await apiPost("/api/save_mask", payload);
     saved.push(data);
@@ -1534,18 +1638,20 @@ async function restoreSavedMaskContents(imageId, masks) {
       const width = Number(content.width || 0);
       const height = Number(content.height || 0);
       const sliceIndex = Number(content.slice_index ?? 0);
+      const axis = sliceAxes[content.axis] ? content.axis : "axial";
+      const sliceKey = sliceStorageKey(axis, sliceIndex);
       if (!width || !height) continue;
       if (!state.sliceMasks[imageId]) state.sliceMasks[imageId] = {};
-      state.sliceMasks[imageId][String(sliceIndex)] = {
+      state.sliceMasks[imageId][sliceKey] = {
         width,
         height,
         data: decodeMaskRle(content.mask, width, height),
       };
       if (Array.isArray(content.points) && content.points.length) {
         if (!state.pointAnnotations[imageId]) state.pointAnnotations[imageId] = {};
-        state.pointAnnotations[imageId][String(sliceIndex)] = content.points.map((point) => ({ ...point }));
+        state.pointAnnotations[imageId][sliceKey] = content.points.map((point) => ({ ...point }));
       }
-      state.restoredMaskSlices[imageId] = sliceIndex;
+      state.restoredMaskSlices[imageId] = { axis, sliceIndex };
       state.loadedMaskContents[mask.mask_id] = true;
     } catch (error) {
       console.warn(`Mask 内容加载失败：${mask.mask_id}`, error);
@@ -1561,20 +1667,22 @@ async function restorePropagatedSliceMask(imageId) {
   const propagatedMask = latestPropagatedMask(state.masksByImage[imageId] || []);
   if (!propagatedMask) return;
 
-  const sliceIndex = state.activeSlice;
-  const loadKey = `${imageId}:${propagatedMask.mask_id}:${sliceIndex}`;
+  const axis = activeAxis();
+  const sliceIndex = currentSliceIndex(axis);
+  const sliceKey = sliceStorageKey(axis, sliceIndex);
+  const loadKey = `${imageId}:${propagatedMask.mask_id}:${axis}:${sliceIndex}`;
   if (state.propagatedSliceLoads[loadKey]) {
     renderCurrentSliceMask();
     return;
   }
 
   try {
-    const data = await apiGet(`/api/mask/${propagatedMask.mask_id}/slice/${sliceIndex}`);
+    const data = await apiGet(`/api/mask/${propagatedMask.mask_id}/slice/${axis}/${sliceIndex}`);
     if (data.width !== canvas.width || data.height !== canvas.height) {
       throw new Error(`传播结果尺寸不匹配：${data.width}×${data.height} / ${canvas.width}×${canvas.height}`);
     }
     if (!state.sliceMasks[imageId]) state.sliceMasks[imageId] = {};
-    state.sliceMasks[imageId][String(sliceIndex)] = {
+    state.sliceMasks[imageId][sliceKey] = {
       width: data.width,
       height: data.height,
       data: decodeMaskRle(data.mask, data.width, data.height),
@@ -1596,7 +1704,8 @@ function currentSliceSnapshot() {
   const points = currentSlicePoints({ create: false }) || [];
   return {
     imageId: image.image_id,
-    sliceIndex: state.activeSlice,
+    axis: activeAxis(),
+    sliceIndex: currentSliceIndex(),
     width: canvas.width,
     height: canvas.height,
     data: mask ? new Uint8Array(mask.data) : new Uint8Array(canvas.width * canvas.height),
@@ -1606,14 +1715,16 @@ function currentSliceSnapshot() {
 
 function applySliceSnapshot(snapshot) {
   if (!snapshot) return;
+  const axis = sliceAxes[snapshot.axis] ? snapshot.axis : "axial";
+  const sliceKey = sliceStorageKey(axis, snapshot.sliceIndex);
   if (!state.sliceMasks[snapshot.imageId]) state.sliceMasks[snapshot.imageId] = {};
-  state.sliceMasks[snapshot.imageId][String(snapshot.sliceIndex)] = {
+  state.sliceMasks[snapshot.imageId][sliceKey] = {
     width: snapshot.width,
     height: snapshot.height,
     data: new Uint8Array(snapshot.data),
   };
   if (!state.pointAnnotations[snapshot.imageId]) state.pointAnnotations[snapshot.imageId] = {};
-  state.pointAnnotations[snapshot.imageId][String(snapshot.sliceIndex)] = (snapshot.points || []).map((point) => ({ ...point }));
+  state.pointAnnotations[snapshot.imageId][sliceKey] = (snapshot.points || []).map((point) => ({ ...point }));
   state.annotationDrawing = false;
   state.annotationLastPoint = null;
   state.annotationShapeStart = null;
@@ -1690,7 +1801,8 @@ function drawPointAnnotations(context) {
   if (!context || !points.length) return;
   context.save();
   for (const point of points) {
-    const color = labels[point.labelId]?.[0] || annotationStrokeStyle();
+    const promptType = point.promptType || "positive";
+    const color = promptType === "negative" ? "#ff4d4f" : labels[point.labelId]?.[0] || annotationStrokeStyle();
     context.strokeStyle = "rgba(255, 255, 255, 0.95)";
     context.fillStyle = color;
     context.lineWidth = 2;
@@ -1701,8 +1813,10 @@ function drawPointAnnotations(context) {
     context.beginPath();
     context.moveTo(point.x - 9, point.y);
     context.lineTo(point.x + 9, point.y);
-    context.moveTo(point.x, point.y - 9);
-    context.lineTo(point.x, point.y + 9);
+    if (promptType !== "negative") {
+      context.moveTo(point.x, point.y - 9);
+      context.lineTo(point.x, point.y + 9);
+    }
     context.stroke();
   }
   context.restore();
@@ -1810,7 +1924,9 @@ function drawAnnotationPoint(point) {
     id: `Point${String(points.length + 1).padStart(4, "0")}`,
     x: Math.round(point.x),
     y: Math.round(point.y),
-    z: state.activeSlice,
+    axis: activeAxis(),
+    sliceIndex: currentSliceIndex(),
+    promptType: state.deepEditPromptMode,
     labelId: state.annotationLabelId,
     label: state.annotationLabel,
   });
@@ -1844,7 +1960,7 @@ async function runMagicWandSelection(point) {
   if (!mask) return;
 
   try {
-    const slice = await loadSliceValues(image.image_id, state.activeSlice);
+    const slice = await loadSliceValues(image.image_id, currentSliceIndex(), activeAxis());
     if (slice.width !== mask.width || slice.height !== mask.height) {
       throw new Error(`智能选择尺寸不匹配：切片 ${slice.width}×${slice.height}，画布 ${mask.width}×${mask.height}`);
     }
@@ -1956,9 +2072,10 @@ function closePolygonAnnotation() {
 function updateAnnotationCoordinate(point) {
   const coordinate = $("#sliceCoordinate");
   const image = activeImage();
-  const z = state.activeSlice + 1;
+  const axis = activeAxis();
+  const sliceNumber = currentSliceIndex(axis) + 1;
   if (!coordinate || !point) return;
-  coordinate.textContent = `x: ${Math.round(point.x)}  y: ${Math.round(point.y)}  z: ${z} | ${image?.image_id || "-"}`;
+  coordinate.textContent = `x: ${Math.round(point.x)}  y: ${Math.round(point.y)}  ${axisCoordinateName(axis)}: ${sliceNumber} | ${axisLabel(axis)} | ${image?.image_id || "-"}`;
 }
 
 function handleAnnotationPointerDown(event) {
@@ -2172,6 +2289,12 @@ function render() {
     button.addEventListener("click", () => setAnnotationTool(button.dataset.annotationTool));
   });
   bindMagicWandControls();
+  document.querySelectorAll("[data-deepedit-prompt]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.deepEditPromptMode = button.dataset.deepeditPrompt === "negative" ? "negative" : "positive";
+      render();
+    });
+  });
   bindAnnotationCanvas();
   const saveMaskButton = $("[data-save-mask]");
   if (saveMaskButton) {
@@ -2189,13 +2312,9 @@ function render() {
   if (exportMaskNiftiButton) {
     exportMaskNiftiButton.addEventListener("click", exportMaskNifti);
   }
-  const labelPropagateButton = $("[data-label-propagate]");
-  if (labelPropagateButton) {
-    labelPropagateButton.addEventListener("click", runLabelPropagation);
-  }
-  const deepEditRefineButton = $("[data-deepedit-refine]");
-  if (deepEditRefineButton) {
-    deepEditRefineButton.addEventListener("click", runDeepEditRefine);
+  const smart3DRefineButton = $("[data-smart-3d-refine]");
+  if (smart3DRefineButton) {
+    smart3DRefineButton.addEventListener("click", runSmart3DRefine);
   }
   const renderAnnotation3DButton = $("[data-render-annotation-3d]");
   if (renderAnnotation3DButton) {
@@ -2213,7 +2332,9 @@ function render() {
     button.addEventListener("click", () => {
       state.activeCaseId = button.dataset.openCase;
       state.activeImageId = null;
+      state.activeAxis = "axial";
       state.activeSlice = 0;
+      state.activeSlices = { axial: 0, coronal: 0, sagittal: 0 };
       state.undoStack = [];
       state.redoStack = [];
       setView("annotation");
@@ -2222,7 +2343,7 @@ function render() {
   const sliceSlider = $("#sliceSlider");
   if (sliceSlider) {
     const refreshSlice = () => {
-      state.activeSlice = Number(sliceSlider.value);
+      setCurrentSliceIndex(Number(sliceSlider.value));
       const image = activeImage();
       const meta = image ? state.volumeMeta[image.image_id] : null;
       if (image && meta) updateSliceViewer(image, meta);
@@ -2230,6 +2351,7 @@ function render() {
     sliceSlider.addEventListener("input", refreshSlice);
     sliceSlider.addEventListener("change", refreshSlice);
   }
+  state.activeAxis = "axial";
   const windowSelect = $("#windowSelect");
   if (windowSelect) {
     windowSelect.value = state.activeWindow;
