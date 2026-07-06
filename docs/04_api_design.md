@@ -708,7 +708,7 @@ application/octet-stream
 
 ### POST `/api/ai/predict`
 
-用途：对某个病例或图像运行 AI 自动标注。
+用途：对某个病例或图像运行 AI 自动标注，生成真实 `v2_ai` NIfTI mask。
 
 请求：
 
@@ -737,8 +737,10 @@ application/octet-stream
 
 说明：
 
-- 当前 Person A 最小实现是占位接口：不实际运行模型，只生成 `v2_ai` mask metadata，并写入 `database/dev_masks.json` 与 `database/dev_versions.json`。
-- 后续 Person B 的 `predict.py` 接入后，该接口内部改为调用真实模型，并把模型输出的 `.nii.gz` mask 保存到同一路径规范。
+- 当前实现会调用 `ai/predict.py` 的 `predict_mask_array()`，生成真实 3D mask，并保存为 `.nii.gz`。
+- 写入 `masks.version=v2_ai`、`versions.version=v2_ai`，并登记 `models.model_id`。
+- 生成的 mask 必须与原 CT 保持同一 `shape / spacing / origin / direction`。
+- 目前内置 `builtin_ct_threshold` 作为 CT 阈值/连通域 baseline。Person B 后续可替换 `ai/predict.py` 内部实现为 nnU-Net / MONAI / MedSAM 推理，但必须保持输入 CT volume、输出 3D mask array 的契约。
 
 ## 11. 导出 Dataset
 

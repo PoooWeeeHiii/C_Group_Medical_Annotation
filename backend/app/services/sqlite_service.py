@@ -226,6 +226,29 @@ def _ensure_model(connection: sqlite3.Connection, model_id: str | None) -> None:
     )
 
 
+def _upsert_model(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
+    connection.execute(
+        """
+        INSERT INTO models (model_id, version, dice, path, metrics_json, create_time)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(model_id) DO UPDATE SET
+            version=excluded.version,
+            dice=excluded.dice,
+            path=excluded.path,
+            metrics_json=excluded.metrics_json,
+            create_time=excluded.create_time
+        """,
+        (
+            item.get("model_id"),
+            item.get("version") or item.get("model_id"),
+            item.get("dice"),
+            item.get("path"),
+            _json_text(item.get("metrics_json")),
+            _create_time(item),
+        ),
+    )
+
+
 def _ensure_dataset(connection: sqlite3.Connection, dataset_id: str | None) -> None:
     if not dataset_id:
         return
@@ -302,6 +325,7 @@ UPSERT_BY_TABLE = {
     "cases": _upsert_case,
     "images": _upsert_image,
     "masks": _upsert_mask,
+    "models": _upsert_model,
     "versions": _upsert_version,
     "datasets": _upsert_dataset,
 }

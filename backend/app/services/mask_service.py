@@ -224,6 +224,7 @@ def _append_3d_mask_record(
     source_mask_ids: list[str],
     mask_stack: np.ndarray,
     volume,
+    annotation_id: str | None = None,
 ) -> tuple[MaskRecord, str]:
     depth, height, width = mask_stack.shape[:3]
     mask_id = next_sqlite_entity_id("Mask", "masks", "mask_id")
@@ -239,7 +240,7 @@ def _append_3d_mask_record(
 
     record = {
         "mask_id": mask_id,
-        "annotation_id": None,
+        "annotation_id": annotation_id,
         "case_id": request_case_id,
         "image_id": image_id,
         "path": mask_path,
