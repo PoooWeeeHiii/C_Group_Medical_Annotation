@@ -9,9 +9,7 @@ import numpy as np
 from fastapi import HTTPException
 
 from backend.app.core.config import (
-    IMAGES_DB_PATH,
     LABELS_DATA_DIR,
-    MASKS_DB_PATH,
     PROJECT_ROOT,
     ensure_project_dirs,
 )
@@ -27,12 +25,10 @@ from backend.app.schemas.mask import (
     SaveMaskResponse,
 )
 from backend.app.services.file_service import (
-    load_json_list,
-    next_entity_id,
     path_for_api,
-    save_json_list,
 )
 from backend.app.services.medical_image_service import load_volume
+from backend.app.services.sqlite_service import get_record, list_records, next_sqlite_entity_id, upsert_record
 
 
 VALID_MASK_VERSIONS = {"v1_manual", "v2_ai", "v3_fusion", "final"}
@@ -49,12 +45,11 @@ def _normalize_label(label: str) -> str:
 
 
 def _load_masks() -> list[dict]:
-    return load_json_list(MASKS_DB_PATH)
+    return list_records("masks")
 
 
 def _image_record(image_id: str) -> dict:
-    images = load_json_list(IMAGES_DB_PATH)
-    image = next((item for item in images if item.get("image_id") == image_id), None)
+    image = get_record("images", "image_id", image_id)
     if image is None:
         raise HTTPException(status_code=404, detail=f"Image not found: {image_id}")
     return image
@@ -231,7 +226,7 @@ def _append_3d_mask_record(
     volume,
 ) -> tuple[MaskRecord, str]:
     depth, height, width = mask_stack.shape[:3]
-    mask_id = next_entity_id("Mask", masks, "mask_id")
+    mask_id = next_sqlite_entity_id("Mask", "masks", "mask_id")
     mask_path = _mask_path(
         case_id=request_case_id,
         image_id=image_id,
@@ -262,8 +257,7 @@ def _append_3d_mask_record(
         "origin": [float(value) for value in volume.origin],
         "direction": [float(value) for value in volume.direction],
     }
-    masks.append(record)
-    save_json_list(MASKS_DB_PATH, masks)
+    upsert_record("masks", record)
     return MaskRecord(**record), mask_path
 
 
@@ -404,8 +398,7 @@ def save_mask(request: SaveMaskRequest) -> SaveMaskResponse:
             detail=f"Image {request.image_id} does not belong to case {request.case_id}",
         )
 
-    masks = _load_masks()
-    mask_id = next_entity_id("Mask", masks, "mask_id")
+    mask_id = next_sqlite_entity_id("Mask", "masks", "mask_id")
     label = _normalize_label(request.label)
     mask_path = _mask_path(
         case_id=request.case_id,
@@ -433,8 +426,7 @@ def save_mask(request: SaveMaskRequest) -> SaveMaskResponse:
         "encoding": request.encoding,
         "create_time": _now_iso(),
     }
-    masks.append(record)
-    save_json_list(MASKS_DB_PATH, masks)
+    upsert_record("masks", record)
 
     mask = MaskRecord(**record)
     return SaveMaskResponse(success=True, mask_id=mask_id, path=mask_path, mask=mask)

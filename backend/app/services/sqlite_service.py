@@ -70,9 +70,18 @@ def init_sqlite_database() -> None:
 def ensure_sqlite_ready() -> None:
     global _MIGRATED
     init_sqlite_database()
-    if not _MIGRATED:
+    if not _MIGRATED and not sqlite_has_core_data():
         migrate_json_to_sqlite()
-        _MIGRATED = True
+    _MIGRATED = True
+
+
+def sqlite_has_core_data() -> bool:
+    with connect() as connection:
+        for table in ("cases", "images", "masks", "versions", "datasets"):
+            count = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            if int(count) > 0:
+                return True
+    return False
 
 
 def _upsert_case(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
@@ -321,6 +330,60 @@ def migrate_json_to_sqlite() -> None:
 
 def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     return [{key: row[key] for key in row.keys()} for row in rows]
+
+
+def list_records(table: str) -> list[dict[str, Any]]:
+    if table not in UPSERT_BY_TABLE:
+        raise ValueError(f"Unsupported table: {table}")
+    ensure_sqlite_ready()
+    with connect() as connection:
+        if table == "versions":
+            rows = connection.execute(
+                "SELECT case_id, version, annotation, model, dataset, create_time FROM versions ORDER BY version_id"
+            ).fetchall()
+        else:
+            rows = connection.execute(f"SELECT * FROM {table}").fetchall()
+    return _rows_to_dicts(rows)
+
+
+def get_record(table: str, key: str, value: str) -> dict[str, Any] | None:
+    if table not in UPSERT_BY_TABLE:
+        raise ValueError(f"Unsupported table: {table}")
+    ensure_sqlite_ready()
+    with connect() as connection:
+        row = connection.execute(f"SELECT * FROM {table} WHERE {key} = ?", (value,)).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_record(table: str, item: dict[str, Any]) -> None:
+    if table not in UPSERT_BY_TABLE:
+        raise ValueError(f"Unsupported table: {table}")
+    ensure_sqlite_ready()
+    with connect() as connection:
+        UPSERT_BY_TABLE[table](connection, item)
+
+
+def upsert_records(table: str, items: list[dict[str, Any]]) -> None:
+    if table not in UPSERT_BY_TABLE:
+        raise ValueError(f"Unsupported table: {table}")
+    ensure_sqlite_ready()
+    with connect() as connection:
+        upsert = UPSERT_BY_TABLE[table]
+        for item in items:
+            upsert(connection, item)
+
+
+def next_sqlite_entity_id(prefix: str, table: str, key: str) -> str:
+    records = list_records(table)
+    import re
+
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    max_number = 0
+    for record in records:
+        match = pattern.match(str(record.get(key) or ""))
+        if match:
+            max_number = max(max_number, int(match.group(1)))
+    return f"{prefix}{max_number + 1:04d}"
 
 
 def load_items_from_sqlite(path: Path) -> list[dict[str, Any]] | None:

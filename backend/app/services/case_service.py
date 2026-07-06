@@ -6,9 +6,6 @@ from fastapi import HTTPException, UploadFile
 
 from backend.app.core.config import (
     ALLOWED_UPLOAD_EXTENSIONS,
-    CASES_DB_PATH,
-    IMAGES_DB_PATH,
-    MASKS_DB_PATH,
     PROJECT_ROOT,
     RAW_DATA_DIR,
     ensure_project_dirs,
@@ -17,11 +14,14 @@ from backend.app.schemas.case import CaseListItem, CaseRecord
 from backend.app.schemas.image import ImageRecord
 from backend.app.schemas.upload import UploadResponse
 from backend.app.services.file_service import (
-    load_json_list,
-    next_entity_id,
     path_for_api,
-    save_json_list,
     save_upload_file,
+)
+from backend.app.services.sqlite_service import (
+    get_record,
+    list_records,
+    next_sqlite_entity_id,
+    upsert_record,
 )
 
 
@@ -129,15 +129,15 @@ def _infer_dimensions(path: Path) -> tuple[int, int, int | None]:
 
 
 def _load_cases() -> list[dict]:
-    return load_json_list(CASES_DB_PATH)
+    return list_records("cases")
 
 
 def _load_images() -> list[dict]:
-    return load_json_list(IMAGES_DB_PATH)
+    return list_records("images")
 
 
 def _load_masks() -> list[dict]:
-    return load_json_list(MASKS_DB_PATH)
+    return list_records("masks")
 
 
 def list_cases() -> list[CaseListItem]:
@@ -154,10 +154,9 @@ def list_cases() -> list[CaseListItem]:
 
 
 def get_case(case_id: str) -> tuple[CaseRecord, list[ImageRecord]]:
-    cases = _load_cases()
     images = _load_images()
 
-    case_data = next((case for case in cases if case.get("case_id") == case_id), None)
+    case_data = get_record("cases", "case_id", case_id)
     if case_data is None:
         raise HTTPException(status_code=404, detail=f"Case not found: {case_id}")
 
@@ -166,8 +165,7 @@ def get_case(case_id: str) -> tuple[CaseRecord, list[ImageRecord]]:
 
 
 def get_image(image_id: str) -> ImageRecord:
-    images = _load_images()
-    image_data = next((image for image in images if image.get("image_id") == image_id), None)
+    image_data = get_record("images", "image_id", image_id)
     if image_data is None:
         raise HTTPException(status_code=404, detail=f"Image not found: {image_id}")
     return ImageRecord(**image_data)
@@ -186,11 +184,8 @@ async def create_case_from_upload(
             detail="Unsupported file type. Please upload DICOM, NIfTI, NRRD, PNG/JPG, or zip.",
         )
 
-    cases = _load_cases()
-    images = _load_images()
-
-    case_id = next_entity_id("Case", cases, "case_id")
-    image_id = next_entity_id("Image", images, "image_id")
+    case_id = next_sqlite_entity_id("Case", "cases", "case_id")
+    image_id = next_sqlite_entity_id("Image", "images", "image_id")
     case_patient_id = patient_id or case_id
     case_modality = (modality or "CT").upper()
 
@@ -218,10 +213,8 @@ async def create_case_from_upload(
         "slice_count": slice_count,
     }
 
-    cases.append(case_record)
-    images.append(image_record)
-    save_json_list(CASES_DB_PATH, cases)
-    save_json_list(IMAGES_DB_PATH, images)
+    upsert_record("cases", case_record)
+    upsert_record("images", image_record)
 
     return UploadResponse(
         success=True,

@@ -8,21 +8,15 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from backend.app.core.config import (
-    CASES_DB_PATH,
-    DATASETS_DB_PATH,
-    IMAGES_DB_PATH,
-    MASKS_DB_PATH,
     PROJECT_ROOT,
     SPLITS_DATA_DIR,
     ensure_project_dirs,
 )
 from backend.app.schemas.dataset import DatasetExportRequest, DatasetExportResponse
 from backend.app.services.file_service import (
-    load_json_list,
-    next_entity_id,
     path_for_api,
-    save_json_list,
 )
+from backend.app.services.sqlite_service import list_records, next_sqlite_entity_id, upsert_record
 from backend.app.services.version_service import VALID_VERSIONS
 
 
@@ -53,19 +47,19 @@ def _validate_disjoint_splits(train: list[str], val: list[str], test: list[str])
 
 
 def _case_lookup() -> dict[str, dict]:
-    return {case["case_id"]: case for case in load_json_list(CASES_DB_PATH)}
+    return {case["case_id"]: case for case in list_records("cases")}
 
 
 def _images_by_case() -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = {}
-    for image in load_json_list(IMAGES_DB_PATH):
+    for image in list_records("images"):
         result.setdefault(str(image.get("case_id")), []).append(image)
     return result
 
 
 def _masks_by_case_and_version() -> dict[tuple[str, str], list[dict]]:
     result: dict[tuple[str, str], list[dict]] = {}
-    for mask in load_json_list(MASKS_DB_PATH):
+    for mask in list_records("masks"):
         key = (str(mask.get("case_id")), str(mask.get("version")))
         result.setdefault(key, []).append(mask)
     return result
@@ -135,8 +129,7 @@ def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
         )
     _validate_disjoint_splits(request.train, request.val, request.test)
 
-    datasets = load_json_list(DATASETS_DB_PATH)
-    dataset_id = request.dataset_id or next_entity_id("Dataset", datasets, "dataset_id")
+    dataset_id = request.dataset_id or next_sqlite_entity_id("Dataset", "datasets", "dataset_id")
 
     cases = _case_lookup()
     images = _images_by_case()
@@ -184,6 +177,9 @@ def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
         "name": request.name,
         "version": version,
         "format": request.format,
+        "train": request.train,
+        "val": request.val,
+        "test": request.test,
         "manifest_path": path_for_api(manifest_path, PROJECT_ROOT),
         "split_path": path_for_api(split_path, PROJECT_ROOT),
         "label_map_path": path_for_api(label_map_path, PROJECT_ROOT),
@@ -192,15 +188,7 @@ def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
         "test_count": len(test_records),
         "create_time": manifest_payload["create_time"],
     }
-    existing_index = next(
-        (index for index, item in enumerate(datasets) if item.get("dataset_id") == dataset_id),
-        None,
-    )
-    if existing_index is None:
-        datasets.append(dataset_record)
-    else:
-        datasets[existing_index] = dataset_record
-    save_json_list(DATASETS_DB_PATH, datasets)
+    upsert_record("datasets", dataset_record)
 
     return DatasetExportResponse(
         success=True,

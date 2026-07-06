@@ -15,8 +15,8 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse, Response
 from PIL import Image
 
-from backend.app.core.config import IMAGES_DB_PATH, PROJECT_ROOT
-from backend.app.services.file_service import load_json_list
+from backend.app.core.config import PROJECT_ROOT
+from backend.app.services.sqlite_service import get_record
 
 
 @dataclass(frozen=True)
@@ -69,8 +69,7 @@ _MAX_CACHED_VOLUMES = 4
 
 
 def _image_record(image_id: str) -> dict:
-    images = load_json_list(IMAGES_DB_PATH)
-    image = next((item for item in images if item.get("image_id") == image_id), None)
+    image = get_record("images", "image_id", image_id)
     if image is None:
         raise HTTPException(status_code=404, detail=f"Image not found: {image_id}")
     return image
