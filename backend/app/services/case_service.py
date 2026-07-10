@@ -23,6 +23,7 @@ from backend.app.services.sqlite_service import (
     next_sqlite_entity_id,
     upsert_record,
 )
+from backend.app.services.workflow_service import latest_reject_note
 
 
 def _now_iso() -> str:
@@ -149,7 +150,11 @@ def list_cases() -> list[CaseListItem]:
     for case in cases:
         image_count = sum(1 for image in images if image.get("case_id") == case.get("case_id"))
         mask_count = sum(1 for mask in masks if mask.get("case_id") == case.get("case_id"))
-        result.append(CaseListItem(**case, image_count=image_count, mask_count=mask_count))
+        enriched = {
+            **case,
+            "reject_note": latest_reject_note(str(case.get("case_id") or "")),
+        }
+        result.append(CaseListItem(**enriched, image_count=image_count, mask_count=mask_count))
     return result
 
 
@@ -161,7 +166,8 @@ def get_case(case_id: str) -> tuple[CaseRecord, list[ImageRecord]]:
         raise HTTPException(status_code=404, detail=f"Case not found: {case_id}")
 
     case_images = [ImageRecord(**image) for image in images if image.get("case_id") == case_id]
-    return CaseRecord(**case_data), case_images
+    enriched = {**case_data, "reject_note": latest_reject_note(case_id)}
+    return CaseRecord(**enriched), case_images
 
 
 def get_image(image_id: str) -> ImageRecord:

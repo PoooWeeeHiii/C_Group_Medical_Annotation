@@ -50,6 +50,19 @@ const state = {
   showMip: false,
   volumeLoadingKey: null,
   recoveringAnnotation: false,
+  models: [],
+  selectedModelId: "",
+  inferencePreview: null,
+  lastCompareResult: null,
+  reviewQueue: [],
+  versionDiff: null,
+  versionCompareA: "",
+  versionCompareB: "",
+  qualityCaseId: "",
+  qualityMaskId: "",
+  qualityRefMaskId: "",
+  qualityReport: null,
+  qualityMasks: [],
 };
 
 const titles = {
@@ -377,6 +390,144 @@ async function loadCaseVersions(caseId, { force = false } = {}) {
   return state.versionsByCase[caseId];
 }
 
+async function loadModels({ force = false } = {}) {
+  if (!force && state.models.length) return state.models;
+  try {
+    const data = await apiGet("/api/models");
+    state.models = data.items || [];
+    if (!state.selectedModelId && state.models.length) {
+      state.selectedModelId = state.models[0].model_id;
+    } else if (state.selectedModelId && !state.models.some((item) => item.model_id === state.selectedModelId)) {
+      state.selectedModelId = state.models[0]?.model_id || "";
+    }
+  } catch (error) {
+    console.warn("模型列表加载失败：", error);
+    state.models = [];
+  }
+  return state.models;
+}
+
+async function loadReviewQueue({ force = false } = {}) {
+  if (!canReview()) {
+    state.reviewQueue = [];
+    return [];
+  }
+  if (!force && state.reviewQueue.length) return state.reviewQueue;
+  try {
+    const data = await apiGet("/api/review/queue");
+    state.reviewQueue = data.items || [];
+  } catch (error) {
+    console.warn("审核队列加载失败：", error);
+    state.reviewQueue = [];
+  }
+  return state.reviewQueue;
+}
+
+function niftiMasksForCase(caseId) {
+  const detail = state.caseDetails[caseId];
+  const imageIds = (detail?.images || []).map((image) => image.image_id);
+  const masks = [];
+  for (const imageId of imageIds) {
+    for (const mask of state.masksByImage[imageId] || []) {
+      if (mask.mask_format === "nii.gz" || String(mask.path || "").endsWith(".nii.gz")) {
+        masks.push(mask);
+      }
+    }
+  }
+  return masks.sort((a, b) => String(b.create_time || "").localeCompare(String(a.create_time || "")));
+}
+
+async function ensureCaseMasksLoaded(caseId) {
+  if (!caseId) return [];
+  const detail = await loadCaseDetail(caseId);
+  const images = detail?.images || [];
+  for (const image of images) {
+    await loadImageMasks(image.image_id);
+  }
+  return niftiMasksForCase(caseId);
+}
+
+async function runVersionDiff(event) {
+  const button = event?.currentTarget;
+  const maskA = state.versionCompareA || $("#versionCompareA")?.value;
+  const maskB = state.versionCompareB || $("#versionCompareB")?.value;
+  if (!maskA || !maskB) {
+    showToast("请选择两个 Mask 进行版本 diff");
+    return;
+  }
+  if (button) button.disabled = true;
+  try {
+    const data = await apiGet(`/api/mask/${maskA}/compare/${maskB}`);
+    state.versionDiff = data;
+    state.lastCompareResult = data;
+    showToast(`Diff Dice=${Number(data.dice).toFixed(4)} · ΔV=${Number(data.volume_diff_ml).toFixed(2)} ml`);
+    render();
+  } catch (error) {
+    showToast(error.message || "版本 diff 失败");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function rollbackMaskVersion(maskId) {
+  if (!maskId) return;
+  if (!window.confirm(`确认将 ${maskId} 回滚复制为新的 v3_preview？`)) return;
+  try {
+    const data = await apiPost(`/api/mask/${maskId}/rollback`, {});
+    const item = activeCase();
+    if (item) {
+      await loadCaseDetail(item.case_id);
+      await ensureCaseMasksLoaded(item.case_id);
+      await loadCaseVersions(item.case_id, { force: true });
+    }
+    state.active3DMaskId = data.mask_id;
+    showToast(data.message || `已回滚为 ${data.mask_id}`);
+    render();
+  } catch (error) {
+    showToast(error.message || "回滚失败");
+  }
+}
+
+async function loadQualityReport() {
+  const maskId = state.qualityMaskId || $("#qualityMaskSelect")?.value;
+  const refId = state.qualityRefMaskId || $("#qualityRefSelect")?.value || "";
+  if (!maskId) {
+    showToast("请先选择要评价的 Mask 版本");
+    return;
+  }
+  state.qualityMaskId = maskId;
+  state.qualityRefMaskId = refId;
+  try {
+    const query = refId ? `?ref=${encodeURIComponent(refId)}` : "";
+    const data = await apiGet(`/api/mask/${maskId}/metrics${query}`);
+    state.qualityReport = data;
+    if (data.overlap) {
+      state.lastCompareResult = {
+        ...data.overlap,
+        pred_mask_id: maskId,
+        ref_mask_id: refId,
+        dice: data.overlap.dice,
+        iou: data.overlap.iou,
+        precision: data.overlap.precision,
+        recall: data.overlap.recall,
+      };
+    }
+    render();
+  } catch (error) {
+    showToast(error.message || "质量指标加载失败");
+  }
+}
+
+function selectedModel() {
+  return state.models.find((item) => item.model_id === state.selectedModelId) || state.models[0] || null;
+}
+
+function promptCounts(image) {
+  if (!image) return { positive: 0, negative: 0 };
+  const prompts = deepEditPromptPayload(image);
+  return { positive: prompts.positive.length, negative: prompts.negative.length };
+}
+
 async function refreshCases() {
   try {
     const data = await apiGet("/api/cases");
@@ -508,7 +659,9 @@ async function approveCaseReview(event) {
     const data = await apiPost(`/api/case/${item.case_id}/approve`, { note: "approved" });
     await refreshCases();
     await refreshTasks();
-    showToast(`审核通过：${data.case_id} → ${data.status}`);
+    await loadReviewQueue({ force: true });
+    state._reviewQueueHydrated = true;
+    showToast(`审核通过并 promote → final：${data.case_id} → ${data.status}`);
     render();
   } catch (error) {
     showToast(error.message || "审核通过失败");
@@ -531,9 +684,12 @@ async function rejectCaseReview(event) {
   button.textContent = "驳回中...";
   try {
     const data = await apiPost(`/api/case/${item.case_id}/reject`, { note });
+    delete state.caseDetails[item.case_id];
     await refreshCases();
     await refreshTasks();
-    showToast(`已驳回：${data.case_id} → ${data.status}`);
+    await loadReviewQueue({ force: true });
+    state._reviewQueueHydrated = true;
+    showToast(`已驳回：${data.case_id} → ${data.status}（版本保留，不进 final）`);
     render();
   } catch (error) {
     showToast(error.message || "驳回失败");
@@ -789,6 +945,13 @@ async function runAIPredict(event) {
     return;
   }
 
+  await loadModels();
+  const model = selectedModel();
+  if (!model) {
+    showToast("暂无可用模型，请先在推理中心确认模型注册表");
+    return;
+  }
+
   button.disabled = true;
   const previousText = button.textContent;
   button.textContent = "预测中...";
@@ -796,8 +959,8 @@ async function runAIPredict(event) {
     const data = await apiPost("/api/ai/predict", {
       case_id: item.case_id,
       image_id: image.image_id,
-      model_id: "spleen_nnunetv2_task506",
-      label: "spleen",
+      model_id: model.model_id,
+      label: model.label || state.annotationLabel || "label",
     });
     await loadImageMasks(image.image_id, { force: true });
     await loadCaseVersions(item.case_id, { force: true });
@@ -806,10 +969,89 @@ async function runAIPredict(event) {
     state.volumeViewMode = "3d";
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
-    showToast(`脾脏 AI 预测完成：${data.mask_id}`);
+    state.inferencePreview = {
+      case_id: item.case_id,
+      image_id: image.image_id,
+      mask_id: data.mask_id,
+      model_id: data.model_id,
+      version: data.version,
+    };
+    if (model.label) state.annotationLabel = model.label;
+    showToast(`AI 预测完成：${data.mask_id} · ${data.model_id}`);
     render();
   } catch (error) {
     showToast(error.message || "AI 预测失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+async function loadV2AiTo2D(event) {
+  const button = event?.currentTarget;
+  const item = activeCase();
+  const image = activeImage();
+  if (!item || !image) {
+    showToast("请先选择病例和图像");
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const masks = await loadImageMasks(image.image_id, { force: true });
+    const aiMask = latestMaskByVersion(masks, "v2_ai");
+    if (!aiMask) {
+      throw new Error("当前图像尚无 v2_ai Mask，请先运行 AI 预测");
+    }
+    state.active3DMaskId = aiMask.mask_id;
+    state.volumeViewMode = "2d";
+    state.propagatedSliceLoads = {};
+    if (aiMask.label) state.annotationLabel = aiMask.label;
+    const quality = await loadMaskQuality(aiMask.mask_id).catch(() => null);
+    const range = quality?.slice_range;
+    if (range && range.start != null && range.end != null) {
+      state.activeAxis = "axial";
+      setCurrentSliceIndex(Math.floor((Number(range.start) + Number(range.end)) / 2), "axial");
+    }
+    showToast(`已从 v2_ai 加载到 2D：${aiMask.mask_id}`);
+    render();
+  } catch (error) {
+    showToast(error.message || "加载 v2_ai 失败");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function compareActiveMasks(event) {
+  const button = event.currentTarget;
+  const image = activeImage();
+  if (!image) {
+    showToast("请先选择图像");
+    return;
+  }
+  const masks = await loadImageMasks(image.image_id, { force: true });
+  const pred = latestMaskByVersion(masks, "v2_ai") || latest3DMask(masks);
+  const ref = latestMaskByVersion(masks, "final") ||
+    latestMaskByVersion(masks, "v3_fusion") ||
+    latestMaskByVersion(masks, "v3_preview");
+  if (!pred || !ref || pred.mask_id === ref.mask_id) {
+    showToast("需要两个不同的 3D Mask（如 v2_ai 与 final/v3_preview）才能计算 Dice");
+    return;
+  }
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "计算中...";
+  try {
+    const data = await apiPost("/api/masks/compare", {
+      pred_mask_id: pred.mask_id,
+      ref_mask_id: ref.mask_id,
+    });
+    state.lastCompareResult = data;
+    showToast(`Dice=${data.dice.toFixed(4)} · IoU=${data.iou.toFixed(4)}（${pred.version} vs ${ref.version}）`);
+    render();
+  } catch (error) {
+    showToast(error.message || "Dice 计算失败");
   } finally {
     button.disabled = false;
     button.textContent = previousText;
@@ -956,14 +1198,16 @@ async function runSmart3DRefine(event) {
     await saveCurrentSliceIfAnnotated(item, image);
     button.textContent = "智能修正中...";
     const currentMasks = await loadImageMasks(image.image_id, { force: true });
-    const current3DMask = latest3DMask(currentMasks);
+    const current3DMask = latest3DMask(currentMasks) ||
+      latestMaskByVersion(currentMasks, "v2_ai") ||
+      latestMaskByVersion(currentMasks, "v3_preview");
     const prompts = deepEditPromptPayload(image);
     const scribbles = deepEditScribblePayload(image);
     const data = await apiPost("/api/deepedit/refine", {
       case_id: item.case_id,
       image_id: image.image_id,
       source_version: "v1_manual",
-      current_mask_version: "v3_fusion",
+      current_mask_version: current3DMask?.version || "v3_fusion",
       current_mask_id: current3DMask?.mask_id || null,
       output_version: "v3_preview",
       label: state.annotationLabel,
@@ -979,6 +1223,8 @@ async function runSmart3DRefine(event) {
         prompt_source: "2d_axial_canvas",
         current_tool: state.annotationTool,
         prompt_mode: "brush_positive_smart_eraser_negative",
+        positive_count: prompts.positive.length,
+        negative_count: prompts.negative.length,
       },
       confirmed_slices: confirmedSliceIndices(image),
     });
@@ -1513,12 +1759,26 @@ function renderMagicWandControls() {
 }
 
 function renderSmartRefineHint() {
+  const image = activeImage();
+  const counts = promptCounts(image);
   return `
     <div class="deepedit-controls">
       <span>智能修正提示</span>
+      <div class="prompt-count-row">
+        <strong class="prompt-positive" id="promptPositiveCount">正点 ${counts.positive}</strong>
+        <strong class="prompt-negative" id="promptNegativeCount">负点 ${counts.negative}</strong>
+      </div>
       <small>画笔/多边形/矩形 = 正向标注；智能橡皮擦点击相似区域自动擦除，并同时记为 DeepEdit 负点。点击“智能3D传播修正”后会一起更新 3D Mask。</small>
     </div>
   `;
+}
+
+function updatePromptCountDisplay() {
+  const counts = promptCounts(activeImage());
+  const positive = $("#promptPositiveCount");
+  const negative = $("#promptNegativeCount");
+  if (positive) positive.textContent = `正点 ${counts.positive}`;
+  if (negative) negative.textContent = `负点 ${counts.negative}`;
 }
 
 function renderRefineParamControls() {
@@ -1588,18 +1848,33 @@ function render3DViewer(item, image, volume, masks = []) {
   const height = volume?.height || 1;
   const depth = volume?.slice_count || 1;
   const canRender = Boolean(image && volume);
+  const niftiMasks = [...(masks || [])]
+    .filter((mask) => mask.mask_format === "nii.gz" || String(mask.path || "").endsWith(".nii.gz"))
+    .sort((a, b) => String(b.create_time || "").localeCompare(String(a.create_time || "")));
   const active3DMask = latest3DMask(masks);
-  const axialIndex = Math.max(0, Math.floor(depth / 2));
-  const coronalIndex = Math.max(0, Math.floor(height / 2));
-  const sagittalIndex = Math.max(0, Math.floor(width / 2));
+  const axialIndex = Math.min(currentSliceIndex("axial"), Math.max(depth - 1, 0));
+  const coronalIndex = Math.min(currentSliceIndex("coronal"), Math.max(height - 1, 0));
+  const sagittalIndex = Math.min(currentSliceIndex("sagittal"), Math.max(width - 1, 0));
   const mprGrid = `
     <div class="viewer-subsection">
-      <div class="subsection-title"><span>MPR 三平面重建</span><strong>轴位 / 冠状位 / 矢状位</strong></div>
+      <div class="subsection-title"><span>MPR 三平面重建（与选中 Mask / 切片联动）</span><strong>点击可回 2D 修正</strong></div>
       <div class="orthogonal-grid mpr-grid">
-        <div><span>轴位 Slice ${axialIndex + 1}</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/slice/axial/${axialIndex}.png?window=auto`)}" alt="轴位 MPR" />` : ""}</div>
-        <div><span>冠状位 Slice ${coronalIndex + 1}</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/slice/coronal/${coronalIndex}.png?window=auto`)}" alt="冠状位 MPR" />` : ""}</div>
-        <div><span>矢状位 Slice ${sagittalIndex + 1}</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/slice/sagittal/${sagittalIndex}.png?window=auto`)}" alt="矢状位 MPR" />` : ""}</div>
+        <button type="button" class="mpr-jump" data-jump-2d-axis="axial" data-jump-2d-slice="${axialIndex}">
+          <span>轴位 Slice ${axialIndex + 1}</span>
+          ${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/slice/axial/${axialIndex}.png?window=auto`)}" alt="轴位 MPR" />` : ""}
+        </button>
+        <button type="button" class="mpr-jump" data-jump-2d-axis="coronal" data-jump-2d-slice="${coronalIndex}">
+          <span>冠状位 Slice ${coronalIndex + 1}</span>
+          ${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/slice/coronal/${coronalIndex}.png?window=auto`)}" alt="冠状位 MPR" />` : ""}
+        </button>
+        <button type="button" class="mpr-jump" data-jump-2d-axis="sagittal" data-jump-2d-slice="${sagittalIndex}">
+          <span>矢状位 Slice ${sagittalIndex + 1}</span>
+          ${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/slice/sagittal/${sagittalIndex}.png?window=auto`)}" alt="矢状位 MPR" />` : ""}
+        </button>
       </div>
+      <div class="slider-row"><span>轴位联动</span><input id="mprAxialSlider" type="range" min="0" max="${Math.max(depth - 1, 0)}" value="${axialIndex}" /><strong>${axialIndex + 1}</strong></div>
+      <div class="slider-row"><span>冠状联动</span><input id="mprCoronalSlider" type="range" min="0" max="${Math.max(height - 1, 0)}" value="${coronalIndex}" /><strong>${coronalIndex + 1}</strong></div>
+      <div class="slider-row"><span>矢状联动</span><input id="mprSagittalSlider" type="range" min="0" max="${Math.max(width - 1, 0)}" value="${sagittalIndex}" /><strong>${sagittalIndex + 1}</strong></div>
     </div>
   `;
   const mipGrid = state.showMip
@@ -1622,12 +1897,21 @@ function render3DViewer(item, image, volume, masks = []) {
         <button class="ghost-button" data-load-mip>加载 MIP / MinIP</button>
       </div>
     `;
+  const maskOptions = niftiMasks.length
+    ? niftiMasks.map((mask) => `
+        <option value="${escapeHtml(mask.mask_id)}" ${active3DMask?.mask_id === mask.mask_id ? "selected" : ""}>
+          ${escapeHtml(mask.mask_id)} · ${escapeHtml(mask.version)} · ${escapeHtml(mask.label)}
+        </option>
+      `).join("")
+    : `<option value="">暂无 3D Mask</option>`;
   const maskOverlayPanel = `
     <div class="mask-overlay-panel">
       <div>
-        <span>3D Mask 实体叠加</span>
+        <span>3D Mask 选中高亮</span>
         <strong>${active3DMask ? `${active3DMask.mask_id} · ${active3DMask.version}` : "暂无 3D Mask"}</strong>
-        <code>${active3DMask ? active3DMask.path : "请先在 2D 中保存 Mask，再执行智能3D传播修正"}</code>
+        <label class="mask-select-row" for="active3DMaskSelect">选择 Mask</label>
+        <select id="active3DMaskSelect" ${niftiMasks.length ? "" : "disabled"}>${maskOptions}</select>
+        <code>${active3DMask ? active3DMask.path : "主路径：2D 稀疏标注 → 传播 → 2D 回看修正；3D 负责可视化与闭环，不做体素画笔"}</code>
         ${renderMaskQualitySummary(active3DMask)}
       </div>
       <button class="primary-button" data-render-annotation-3d ${canRender ? "" : "disabled"}>高亮显示当前标注</button>
@@ -1637,14 +1921,14 @@ function render3DViewer(item, image, volume, masks = []) {
     <section class="viewer">
       <div class="viewer-toolbar"><span>${item ? item.case_id : "暂无病例"} | 3D体视图</span><span>${canRender ? `${width} × ${height} × ${depth}` : "等待体数据"}</span></div>
       ${renderViewerModeButtons()}
-      <div id="volumeContainer" class="volume-container" data-image-id="${image?.image_id || ""}" data-mask-id="${active3DMask?.mask_id || ""}">
+      <div id="volumeContainer" class="volume-container" data-image-id="${image?.image_id || ""}" data-mask-id="${active3DMask?.mask_id || ""}" data-highlight-mask="true">
         <div class="volume-status">${canRender ? "正在初始化 VTK 综合重建..." : "正在读取体数据..."}</div>
       </div>
       ${mprGrid}
       ${mipGrid}
       ${maskOverlayPanel}
-      <div class="image-source-line">三维视图默认使用 VTK 综合重建：外层、肺/低密度腔、软组织、骨性结构和 Mask 均使用 VTK mesh。</div>
-      <div class="image-source-line">3D来源：${canRender ? `/api/image/${image.image_id}/surface-mesh?protocol=body|lung|soft|bone${active3DMask ? ` + /api/mask/${active3DMask.mask_id}/surface-mesh` : ""}；WebGL2 体渲染保留为备用` : "等待加载"}</div>
+      <div class="image-source-line">三维体数据标注 = 体渲染可视化 + 3D mask 生成/编辑闭环（2D 修正为主），不是必须 3D 画笔。</div>
+      <div class="image-source-line">3D来源：${canRender ? `/api/image/${image.image_id}/surface-mesh?protocol=body|lung|soft|bone${active3DMask ? ` + /api/mask/${active3DMask.mask_id}/surface-mesh` : ""}；选中 Mask 高亮叠加` : "等待加载"}</div>
     </section>
   `;
 }
@@ -1668,16 +1952,25 @@ function renderAnnotation() {
   }
   const previewMask = latestMaskByVersion(masks, "v3_preview");
   const fusionMask = latestMaskByVersion(masks, "v3_fusion");
+  const aiMask = latestMaskByVersion(masks, "v2_ai");
   const versionTimeline = ["v1_manual", "v2_ai", "v3_preview", "v3_fusion", "final"];
+  const model = selectedModel();
+  const rejectNote = item?.reject_note || state.caseDetails[item?.case_id]?.case?.reject_note || "";
   return `
     <div class="workbench-layout">
       <aside class="case-sidebar">
         <h2>病例信息</h2>
         <div class="case-meta">${meta.map(([key, value]) => `<div class="meta-line"><span>${key}</span><strong>${value}</strong></div>`).join("")}</div>
+        ${rejectNote ? `<div class="reject-note-box"><span>驳回意见</span><strong>${escapeHtml(rejectNote)}</strong><small>版本保留在 v3_preview / v2_ai，未进入 final</small></div>` : ""}
         <h3 style="margin-top:24px">体数据</h3>
         <div class="case-meta">
           <div class="meta-line"><span>尺寸</span><strong id="volumeSize">${volume ? `${volume.width} × ${volume.height} × ${volume.slice_count}` : "加载中"}</strong></div>
           <div class="meta-line"><span>读取器</span><strong id="volumeSource">${volume?.source || "-"}</strong></div>
+        </div>
+        <h3 style="margin-top:24px">AI 模型</h3>
+        <div class="case-meta">
+          <div class="meta-line"><span>当前模型</span><strong>${model ? escapeHtml(model.display_name || model.model_id) : "未加载"}</strong></div>
+          <div class="meta-line"><span>model_id</span><strong>${model ? escapeHtml(model.model_id) : "-"}</strong></div>
         </div>
         <h3 style="margin-top:24px">版本</h3>
         <div class="timeline">${versionTimeline.map((version) => `<span class="chip ${versions.some((item) => item.version === version) ? "active-chip" : ""}">${version}</span>`).join("")}</div>
@@ -1694,15 +1987,18 @@ function renderAnnotation() {
         ${renderRefineParamControls()}
         <div class="grid action-stack" style="margin-top:18px">
           <button class="primary-button" data-save-mask ${image && canAnnotate() ? "" : "disabled"}>保存 Mask</button>
+          <button class="ghost-button" data-load-v2-ai ${image && aiMask ? "" : "disabled"}>从 v2_ai 加载到 2D</button>
           <button class="ghost-button" data-submit-case ${image && (currentRole() === "annotator" || currentRole() === "admin") ? "" : "disabled"}>提交审核</button>
           <button class="ghost-button" data-smart-3d-refine ${image && canAnnotate() ? "" : "disabled"}>智能3D传播修正</button>
           <button class="ghost-button" data-confirm-fusion ${previewMask && canAnnotate() ? "" : "disabled"}>确认 v3_fusion</button>
           <button class="ghost-button" data-final-mask ${(previewMask || fusionMask) && canConfirmFinal() ? "" : "disabled"}>确认 final</button>
+          <button class="ghost-button" data-compare-masks ${image ? "" : "disabled"}>计算 Dice</button>
           <button class="ghost-button" data-approve-case ${item && canReview() ? "" : "disabled"}>审核通过</button>
           <button class="danger-button" data-reject-case ${item && canReview() ? "" : "disabled"}>驳回</button>
           <button class="ghost-button" data-export-mask-nifti ${image && canAnnotate() ? "" : "disabled"}>导出 3D Mask</button>
           <button class="ghost-button" data-start-3d-render ${image ? "" : "disabled"}>导出 3D 图像</button>
         </div>
+        ${state.lastCompareResult ? `<div class="compare-result-box"><span>最近 Dice</span><strong>${Number(state.lastCompareResult.dice).toFixed(4)}</strong><small>${escapeHtml(state.lastCompareResult.pred_mask_id)} vs ${escapeHtml(state.lastCompareResult.ref_mask_id)}</small></div>` : ""}
         <h3 style="margin-top:22px">当前 Mask</h3>
         ${renderMaskList(masks)}
       </aside>
@@ -2755,6 +3051,7 @@ async function runSmartEraseSelection(point) {
     }
     recordSmartEraseRegion(selected, width, { x: startX, y: startY });
     renderCurrentSliceMask();
+    updatePromptCountDisplay();
     const modeText = mode === "mask" ? "连通标注区域" : `HU ± ${threshold}`;
     showToast(`智能擦除完成：识别 ${selected.length} 像素，清除 ${erased} 标注，已记为 DeepEdit 负点（${modeText}）`);
   } catch (error) {
@@ -2922,14 +3219,37 @@ function bindAnnotationCanvas() {
 }
 
 async function hydrateVersions() {
-  const item = activeCase();
-  if (!item) return;
-  const needsRender = !state.versionsByCase[item.case_id];
+  if (state._hydratingVersions) return;
+  state._hydratingVersions = true;
   try {
-    await loadCaseVersions(item.case_id);
-    if (needsRender) render();
+    const firstQueueLoad = !state._reviewQueueHydrated;
+    await loadReviewQueue({ force: firstQueueLoad });
+    state._reviewQueueHydrated = true;
+    const item = activeCase();
+    if (!item) {
+      if (firstQueueLoad) render();
+      return;
+    }
+    const needsMasks = !niftiMasksForCase(item.case_id).length;
+    const needsVersions = !state.versionsByCase[item.case_id];
+    await loadCaseDetail(item.case_id);
+    if (needsVersions) await loadCaseVersions(item.case_id, { force: true });
+    if (needsMasks) await ensureCaseMasksLoaded(item.case_id);
+    const masks = niftiMasksForCase(item.case_id);
+    let changed = false;
+    if (!state.versionCompareA && masks[0]) {
+      state.versionCompareA = masks[0].mask_id;
+      changed = true;
+    }
+    if (!state.versionCompareB && (masks[1] || masks[0])) {
+      state.versionCompareB = (masks[1] || masks[0]).mask_id;
+      changed = true;
+    }
+    if (firstQueueLoad || needsMasks || needsVersions || changed) render();
   } catch (error) {
     showToast(error.message || "版本记录加载失败");
+  } finally {
+    state._hydratingVersions = false;
   }
 }
 
@@ -2947,37 +3267,361 @@ Epoch 03 | Loss 0.618 | Dice 0.59
 }
 
 function renderInference() {
+  const item = activeCase();
+  const image = activeImage();
+  const models = state.models || [];
+  const modelOptions = models.length
+    ? models.map((model) => `
+        <option value="${escapeHtml(model.model_id)}" ${state.selectedModelId === model.model_id ? "selected" : ""}>
+          ${escapeHtml(model.display_name || model.model_id)}${model.external_ready ? " · 外部权重就绪" : ""}
+        </option>
+      `).join("")
+    : `<option value="">加载中 / 暂无模型</option>`;
+  const caseOptions = state.cases.map((caseItem) => `
+    <option value="${escapeHtml(caseItem.case_id)}" ${item?.case_id === caseItem.case_id ? "selected" : ""}>
+      ${escapeHtml(caseItem.case_id)} · ${escapeHtml(statusText[caseItem.status] || caseItem.status)}
+    </option>
+  `).join("");
+  const preview = state.inferencePreview;
+  const previewMaskId = preview?.mask_id || latestMaskByVersion(masksForActiveImage(), "v2_ai")?.mask_id || "";
+  const previewImageId = preview?.image_id || image?.image_id || "";
+  const sliceIndex = currentSliceIndex("axial");
+  const selected = selectedModel();
   return `
-    <section class="panel toolbar-row"><div class="field"><label>模型版本</label><select><option>UNet_V1</option><option>Attention_UNet_V1</option></select></div><button class="primary-button">开始推理</button><button class="ghost-button">保存为 v2_ai</button></section>
+    <section class="panel">
+      <h2>AI 推理中心</h2>
+      <p class="panel-lead">选择病例与模型后运行 predict，结果写入 <code>v2_ai</code>，可在此预览并跳转标注台修正。</p>
+      <div class="toolbar-row inference-toolbar">
+        <div class="field"><label>病例</label><select id="inferenceCaseSelect">${caseOptions || "<option value=''>暂无病例</option>"}</select></div>
+        <div class="field"><label>模型</label><select id="inferenceModelSelect">${modelOptions}</select></div>
+        <button class="primary-button" data-ai-predict ${item && image ? "" : "disabled"}>开始推理</button>
+        <button class="ghost-button" data-load-v2-ai ${previewMaskId || latestMaskByVersion(masksForActiveImage(), "v2_ai") ? "" : "disabled"}>预览并加载到 2D</button>
+        <button class="ghost-button" data-open-annotation-from-inference ${item ? "" : "disabled"}>打开标注台</button>
+      </div>
+      <div class="case-meta" style="margin-top:14px">
+        <div class="meta-line"><span>model_id</span><strong>${selected ? escapeHtml(selected.model_id) : "-"}</strong></div>
+        <div class="meta-line"><span>label</span><strong>${selected ? escapeHtml(selected.label) : "-"}</strong></div>
+        <div class="meta-line"><span>backend</span><strong>${selected ? escapeHtml(selected.backend) : "-"}</strong></div>
+        <div class="meta-line"><span>说明</span><strong>${selected ? escapeHtml(selected.description || "-") : "-"}</strong></div>
+      </div>
+    </section>
     <div class="grid cols-3" style="margin-top:18px">
-      <section class="viewer"><h2>原始图像</h2><div class="ct-frame" style="min-height:320px"></div></section>
-      <section class="viewer"><h2>AI Mask</h2><div class="ct-frame" style="min-height:320px"><div class="mask-overlay"></div></div></section>
-      <section class="viewer"><h2>叠加显示</h2><div class="ct-frame" style="min-height:320px"><div class="mask-overlay"></div><div class="roi-box"></div></div></section>
+      <section class="viewer">
+        <h2>原始图像</h2>
+        <div class="ct-frame inference-frame">
+          ${previewImageId ? `<img src="${apiUrl(`/api/image/${previewImageId}/slice/axial/${sliceIndex}.png?window=auto`)}" alt="原始切片" />` : `<div class="slice-empty">选择病例后显示</div>`}
+        </div>
+      </section>
+      <section class="viewer">
+        <h2>AI Mask (v2_ai)</h2>
+        <div class="ct-frame inference-frame">
+          ${previewMaskId ? `<img src="${apiUrl(`/api/mask/${previewMaskId}/slice/axial/${sliceIndex}`).replace('/slice/', '/slice/')}" alt="AI mask 占位" class="hidden" /><div class="mask-overlay inference-mask" data-inference-mask="${escapeHtml(previewMaskId)}" data-inference-slice="${sliceIndex}"></div><canvas id="inferenceMaskCanvas" class="inference-mask-canvas"></canvas>` : `<div class="slice-empty">推理后显示 v2_ai</div>`}
+        </div>
+      </section>
+      <section class="viewer">
+        <h2>叠加预览</h2>
+        <div class="ct-frame inference-frame">
+          ${previewImageId ? `<img src="${apiUrl(`/api/image/${previewImageId}/slice/axial/${sliceIndex}.png?window=auto`)}" alt="叠加底图" /><canvas id="inferenceOverlayCanvas" class="inference-mask-canvas"></canvas>` : `<div class="slice-empty">等待推理</div>`}
+        </div>
+      </section>
     </div>
+    <section class="panel" style="margin-top:18px">
+      <h2>最近推理结果</h2>
+      ${preview ? `
+        <div class="case-meta">
+          <div class="meta-line"><span>病例</span><strong>${escapeHtml(preview.case_id)}</strong></div>
+          <div class="meta-line"><span>图像</span><strong>${escapeHtml(preview.image_id)}</strong></div>
+          <div class="meta-line"><span>Mask</span><strong>${escapeHtml(preview.mask_id)}</strong></div>
+          <div class="meta-line"><span>模型</span><strong>${escapeHtml(preview.model_id)}</strong></div>
+          <div class="meta-line"><span>版本</span><strong>${escapeHtml(preview.version)}</strong></div>
+        </div>
+      ` : `<div class="placeholder compact">尚未推理。Person B 可配置 SPLEEN_NNUNET_PREDICT_COMMAND + checkpoint_best.pth；未配置时使用内置 baseline。</div>`}
+    </section>
   `;
+}
+
+async function hydrateInference() {
+  const hadModels = state.models.length > 0;
+  await loadModels();
+  const item = activeCase();
+  if (item) {
+    await loadCaseDetail(item.case_id);
+    const image = activeImage();
+    if (image) {
+      await loadImageMasks(image.image_id);
+      await loadVolumeMeta(image.image_id).catch(() => null);
+      const aiMask = latestMaskByVersion(state.masksByImage[image.image_id] || [], "v2_ai");
+      if (aiMask && !state.inferencePreview) {
+        state.inferencePreview = {
+          case_id: item.case_id,
+          image_id: image.image_id,
+          mask_id: aiMask.mask_id,
+          model_id: selectedModel()?.model_id || "",
+          version: "v2_ai",
+        };
+      }
+    }
+  }
+  if (!hadModels && state.models.length) {
+    render();
+    return;
+  }
+  await paintInferencePreview();
+}
+
+async function paintInferencePreview() {
+  const preview = state.inferencePreview;
+  const image = activeImage();
+  const maskId = preview?.mask_id || latestMaskByVersion(masksForActiveImage(), "v2_ai")?.mask_id;
+  const imageId = preview?.image_id || image?.image_id;
+  if (!maskId || !imageId) return;
+  const sliceIndex = currentSliceIndex("axial");
+  try {
+    const data = await apiGet(`/api/mask/${maskId}/slice/axial/${sliceIndex}`);
+    const maskCanvas = $("#inferenceMaskCanvas");
+    const overlayCanvas = $("#inferenceOverlayCanvas");
+    const paint = (canvas, withImage) => {
+      if (!canvas) return;
+      canvas.width = data.width;
+      canvas.height = data.height;
+      const ctx = canvas.getContext("2d");
+      const imageData = ctx.createImageData(data.width, data.height);
+      const decoded = decodeMaskRle(data.mask, data.width, data.height);
+      for (let i = 0; i < decoded.length; i += 1) {
+        const offset = i * 4;
+        if (decoded[i] > 0) {
+          imageData.data[offset] = 0;
+          imageData.data[offset + 1] = 229;
+          imageData.data[offset + 2] = 176;
+          imageData.data[offset + 3] = withImage ? 140 : 220;
+        }
+      }
+      ctx.putImageData(imageData, 0, 0);
+    };
+    paint(maskCanvas, false);
+    paint(overlayCanvas, true);
+  } catch (error) {
+    console.warn("推理预览绘制失败：", error);
+  }
 }
 
 function renderVersions() {
   const item = activeCase();
   const versions = versionsForActiveCase();
+  const queue = state.reviewQueue || [];
+  const masks = item ? niftiMasksForCase(item.case_id) : [];
+  const maskOptionHtml = (selectedId) => masks.length
+    ? masks.map((mask) => `<option value="${escapeHtml(mask.mask_id)}" ${selectedId === mask.mask_id ? "selected" : ""}>${escapeHtml(mask.mask_id)} · ${escapeHtml(mask.version)} · ${escapeHtml(mask.label)}</option>`).join("")
+    : `<option value="">暂无 3D Mask</option>`;
+  const diff = state.versionDiff;
+  const caseOptions = state.cases.map((caseItem) => `
+    <option value="${escapeHtml(caseItem.case_id)}" ${item?.case_id === caseItem.case_id ? "selected" : ""}>
+      ${escapeHtml(caseItem.case_id)} · ${escapeHtml(statusText[caseItem.status] || caseItem.status)}
+    </option>
+  `).join("");
+
   return `
     <section class="panel">
-      <h2>${item ? item.case_id : "暂无病例"} 版本时间线</h2>
-      <div class="timeline">${["v1_manual", "v2_ai", "v3_preview", "v3_fusion", "final"].map((version) => `<span class="chip ${versions.some((entry) => entry.version === version) ? "active-chip" : ""}">${version}</span>`).join("")}</div>
-      <div class="toolbar-row" style="margin-top:14px">
+      <h2>审核队列（pending）</h2>
+      <p class="panel-lead">审核员无需打开标注台即可通过/驳回。通过将自动 promote 最新 v3_preview/v3_fusion → final。</p>
+      ${canReview() ? `
+        <section class="table-wrap" style="margin-top:12px">
+          <table>
+            <thead><tr><th>病例</th><th>患者</th><th>可 promote</th><th>Mask 数</th><th>操作</th></tr></thead>
+            <tbody>
+              ${queue.length ? queue.map((entry) => `
+                <tr>
+                  <td>${escapeHtml(entry.case_id)}</td>
+                  <td>${escapeHtml(entry.patient_id)}</td>
+                  <td>${entry.promotable_mask_id ? `${escapeHtml(entry.promotable_version)} / ${escapeHtml(entry.promotable_mask_id)}` : "<span class='muted'>无</span>"}</td>
+                  <td>${escapeHtml(entry.mask_count)}</td>
+                  <td class="review-actions">
+                    <button class="ghost-button" data-focus-case="${escapeHtml(entry.case_id)}">查看版本</button>
+                    <button class="primary-button" data-queue-approve="${escapeHtml(entry.case_id)}" ${entry.promotable_mask_id ? "" : "disabled"}>通过→final</button>
+                    <button class="danger-button" data-queue-reject="${escapeHtml(entry.case_id)}">驳回</button>
+                  </td>
+                </tr>
+              `).join("") : `<tr><td colspan="5">当前没有 pending 病例</td></tr>`}
+            </tbody>
+          </table>
+        </section>
+      ` : `<div class="placeholder compact">请使用 reviewer / admin 账号查看审核队列。</div>`}
+    </section>
+
+    <section class="panel" style="margin-top:18px">
+      <h2>版本管理</h2>
+      <div class="toolbar-row" style="margin-top:12px">
+        <div class="field"><label>病例</label><select id="versionCaseSelect">${caseOptions || "<option value=''>暂无病例</option>"}</select></div>
         <button class="ghost-button" data-submit-case ${item && (currentRole() === "annotator" || currentRole() === "admin") ? "" : "disabled"}>提交审核</button>
-        <button class="primary-button" data-approve-case ${item && canReview() ? "" : "disabled"}>审核通过</button>
+        <button class="primary-button" data-approve-case ${item && canReview() ? "" : "disabled"}>审核通过→final</button>
         <button class="danger-button" data-reject-case ${item && canReview() ? "" : "disabled"}>驳回</button>
       </div>
+      <div class="timeline" style="margin-top:14px">${["v1_manual", "v2_ai", "v3_preview", "v3_fusion", "final"].map((version) => `<span class="chip ${versions.some((entry) => entry.version === version) ? "active-chip" : ""}">${version}</span>`).join("")}</div>
+      ${item?.reject_note ? `<div class="reject-note-box" style="margin-top:12px"><span>最近驳回意见</span><strong>${escapeHtml(item.reject_note)}</strong></div>` : ""}
       ${renderVersionList(versions)}
     </section>
-    <div class="grid cols-2" style="margin-top:18px"><section class="viewer"><h2>人工 / AI 版本</h2><div class="ct-frame" style="min-height:330px"><div class="mask-overlay"></div></div></section><section class="viewer"><h2>final 审核版本</h2><div class="ct-frame" style="min-height:330px"><div class="roi-box"></div></div></section></div>
-    <div class="grid cols-4" style="margin-top:18px">${metricCard("当前状态", item ? (statusText[item.status] || item.status) : "-", "病例状态机")}${metricCard("角色", state.currentUser ? (roleText[state.currentUser.role] || state.currentUser.role) : "未登录", "决定审核权限")}${metricCard("任务数", state.tasks.length, "当前可见任务")}${metricCard("版本数", versions.length, "已写入版本")}</div>
+
+    <section class="panel" style="margin-top:18px">
+      <h2>版本 Diff / 回滚</h2>
+      <div class="toolbar-row" style="margin-top:12px">
+        <div class="field"><label>Mask A</label><select id="versionCompareA">${maskOptionHtml(state.versionCompareA)}</select></div>
+        <div class="field"><label>Mask B</label><select id="versionCompareB">${maskOptionHtml(state.versionCompareB)}</select></div>
+        <button class="primary-button" data-run-version-diff ${masks.length ? "" : "disabled"}>计算 Diff</button>
+      </div>
+      <div class="grid cols-4" style="margin-top:14px">
+        ${metricCard("Dice", diff ? Number(diff.dice).toFixed(4) : "-", diff ? `${diff.pred_version} vs ${diff.ref_version}` : "GET /api/mask/{a}/compare/{b}")}
+        ${metricCard("IoU", diff ? Number(diff.iou).toFixed(4) : "-", "重叠")}
+        ${metricCard("体积差 ml", diff ? Number(diff.volume_diff_ml).toFixed(3) : "-", "A − B")}
+        ${metricCard("HD95 mm", diff?.hd95_mm != null ? Number(diff.hd95_mm).toFixed(3) : "-", "表面距离")}
+      </div>
+      <section class="table-wrap" style="margin-top:14px">
+        <table>
+          <thead><tr><th>Mask</th><th>版本</th><th>标签</th><th>路径</th><th>操作</th></tr></thead>
+          <tbody>
+            ${masks.length ? masks.map((mask) => `
+              <tr>
+                <td>${escapeHtml(mask.mask_id)}</td>
+                <td>${escapeHtml(mask.version)}</td>
+                <td>${escapeHtml(mask.label)}</td>
+                <td><code>${escapeHtml(mask.path)}</code></td>
+                <td><button class="ghost-button" data-rollback-mask="${escapeHtml(mask.mask_id)}">回滚为 v3_preview</button></td>
+              </tr>
+            `).join("") : `<tr><td colspan="5">当前病例暂无 3D NIfTI Mask</td></tr>`}
+          </tbody>
+        </table>
+      </section>
+    </section>
+
+    <div class="grid cols-4" style="margin-top:18px">
+      ${metricCard("当前状态", item ? (statusText[item.status] || item.status) : "-", "病例状态机")}
+      ${metricCard("角色", state.currentUser ? (roleText[state.currentUser.role] || state.currentUser.role) : "未登录", "决定审核权限")}
+      ${metricCard("待审数", queue.length, "pending 队列")}
+      ${metricCard("版本数", versions.length, "已写入版本")}
+    </div>
   `;
 }
 
 function renderQuality() {
-  return `<div class="grid cols-4">${metricCard("Dice", "0.86", "整体")}${metricCard("IoU", "0.75", "整体")}${metricCard("Precision", "0.88", "阳性预测")}${metricCard("Recall", "0.84", "敏感性")}</div><div class="grid cols-2" style="margin-top:18px"><section class="panel"><h2>质量雷达图</h2><div class="placeholder">Dice / IoU / Precision / Recall / HD95 / ASSD</div></section><section class="viewer"><h2>错误区域</h2><div class="ct-frame" style="min-height:300px"><div class="mask-overlay"></div><div class="roi-box"></div></div></section></div>`;
+  const caseId = state.qualityCaseId || activeCase()?.case_id || "";
+  const masks = state.qualityMasks.length ? state.qualityMasks : (caseId ? niftiMasksForCase(caseId) : []);
+  const report = state.qualityReport;
+  const geometric = report?.geometric;
+  const overlap = report?.overlap;
+  const errorSlices = report?.error_slices || [];
+  const caseOptions = state.cases.map((caseItem) => `
+    <option value="${escapeHtml(caseItem.case_id)}" ${caseId === caseItem.case_id ? "selected" : ""}>
+      ${escapeHtml(caseItem.case_id)} · ${escapeHtml(statusText[caseItem.status] || caseItem.status)}
+    </option>
+  `).join("");
+  const maskOptions = masks.length
+    ? masks.map((mask) => `
+        <option value="${escapeHtml(mask.mask_id)}" ${state.qualityMaskId === mask.mask_id ? "selected" : ""}>
+          ${escapeHtml(mask.version)} · ${escapeHtml(mask.mask_id)} · ${escapeHtml(mask.label)}
+        </option>
+      `).join("")
+    : `<option value="">暂无 3D Mask</option>`;
+  const refOptions = [`<option value="">无 GT（仅几何质量）</option>`].concat(
+    masks.filter((mask) => mask.mask_id !== state.qualityMaskId).map((mask) => `
+      <option value="${escapeHtml(mask.mask_id)}" ${state.qualityRefMaskId === mask.mask_id ? "selected" : ""}>
+        ${escapeHtml(mask.version)} · ${escapeHtml(mask.mask_id)}
+      </option>
+    `)
+  ).join("");
+
+  return `
+    <section class="panel">
+      <h2>质量报告</h2>
+      <p class="panel-lead">无 GT 时展示体积/连通域；有 GT 时请求 <code>/api/mask/{id}/metrics?ref=...</code> 返回 Dice / IoU / HD95 与错误切片。</p>
+      <div class="toolbar-row" style="margin-top:12px">
+        <div class="field"><label>病例</label><select id="qualityCaseSelect">${caseOptions || "<option value=''>暂无病例</option>"}</select></div>
+        <div class="field"><label>评价 Mask</label><select id="qualityMaskSelect">${maskOptions}</select></div>
+        <div class="field"><label>参考 GT</label><select id="qualityRefSelect">${refOptions}</select></div>
+        <button class="primary-button" data-load-quality ${masks.length ? "" : "disabled"}>拉取指标</button>
+      </div>
+    </section>
+
+    <div class="grid cols-4" style="margin-top:18px">
+      ${metricCard("Dice", overlap ? Number(overlap.dice).toFixed(4) : "-", overlap ? "相对 GT" : "需选择 ref")}
+      ${metricCard("IoU", overlap ? Number(overlap.iou).toFixed(4) : "-", "重叠")}
+      ${metricCard("HD95 mm", overlap?.hd95_mm != null ? Number(overlap.hd95_mm).toFixed(3) : "-", "有 GT")}
+      ${metricCard("体积 ml", geometric ? Number(geometric.volume_ml).toFixed(3) : "-", "几何质量")}
+    </div>
+
+    <div class="grid cols-2" style="margin-top:18px">
+      <section class="panel">
+        <h2>几何质量（无 GT 也可用）</h2>
+        ${geometric ? `
+          <div class="case-meta">
+            <div class="meta-line"><span>体素数</span><strong>${formatInteger(geometric.voxel_count)}</strong></div>
+            <div class="meta-line"><span>体积 ml</span><strong>${formatNumber(geometric.volume_ml, 3)}</strong></div>
+            <div class="meta-line"><span>连通域</span><strong>${formatInteger(geometric.connected_component_count)}</strong></div>
+            <div class="meta-line"><span>最大连通域占比</span><strong>${formatPercent(geometric.largest_component_ratio)}</strong></div>
+            <div class="meta-line"><span>切片范围</span><strong>${formatSliceRange(geometric.slice_range)}</strong></div>
+          </div>
+        ` : `<div class="placeholder compact">选择 Mask 后点击「拉取指标」。</div>`}
+      </section>
+      <section class="panel">
+        <h2>重叠指标（有 GT）</h2>
+        ${overlap ? `
+          <div class="case-meta">
+            <div class="meta-line"><span>Precision</span><strong>${Number(overlap.precision).toFixed(4)}</strong></div>
+            <div class="meta-line"><span>Recall</span><strong>${Number(overlap.recall).toFixed(4)}</strong></div>
+            <div class="meta-line"><span>体积差 ml</span><strong>${Number(overlap.volume_diff_ml).toFixed(3)}</strong></div>
+            <div class="meta-line"><span>Pred / Ref</span><strong>${escapeHtml(report.mask_id)} / ${escapeHtml(report.ref_mask_id || "-")}</strong></div>
+          </div>
+        ` : `<div class="placeholder compact">未选择参考 GT 时仅显示几何质量。</div>`}
+      </section>
+    </div>
+
+    <section class="panel" style="margin-top:18px">
+      <h2>错误切片列表（可选）</h2>
+      <section class="table-wrap" style="margin-top:12px">
+        <table>
+          <thead><tr><th>平面</th><th>切片</th><th>错误体素</th><th>Pred</th><th>Ref</th></tr></thead>
+          <tbody>
+            ${errorSlices.length ? errorSlices.map((slice) => `
+              <tr>
+                <td>${escapeHtml(slice.axis)}</td>
+                <td>${Number(slice.slice_index) + 1}</td>
+                <td>${formatInteger(slice.error_voxels)}</td>
+                <td>${formatInteger(slice.pred_voxels)}</td>
+                <td>${formatInteger(slice.ref_voxels)}</td>
+              </tr>
+            `).join("") : `<tr><td colspan="5">${overlap ? "无显著差异切片" : "选择 GT 后可列出错误切片"}</td></tr>`}
+          </tbody>
+        </table>
+      </section>
+    </section>
+  `;
+}
+
+async function hydrateQuality() {
+  if (state._hydratingQuality) return;
+  state._hydratingQuality = true;
+  try {
+    const caseId = state.qualityCaseId || activeCase()?.case_id || state.cases[0]?.case_id || "";
+    if (!caseId) return;
+    const needsCaseSwitch = state.qualityCaseId !== caseId || !state.qualityMasks.length;
+    state.qualityCaseId = caseId;
+    state.activeCaseId = caseId;
+    await loadCaseDetail(caseId);
+    if (needsCaseSwitch) {
+      state.qualityMasks = await ensureCaseMasksLoaded(caseId);
+      if (!state.qualityMaskId || !state.qualityMasks.some((mask) => mask.mask_id === state.qualityMaskId)) {
+        state.qualityMaskId = state.qualityMasks[0]?.mask_id || "";
+      }
+      state.qualityReport = null;
+      render();
+      return;
+    }
+    if (!state.qualityReport && state.qualityMaskId) {
+      await loadQualityReport();
+    }
+  } catch (error) {
+    showToast(error.message || "质量页加载失败");
+  } finally {
+    state._hydratingQuality = false;
+  }
 }
 
 function renderExport() {
@@ -3058,6 +3702,89 @@ function render() {
   if (rejectCaseButton) {
     rejectCaseButton.addEventListener("click", rejectCaseReview);
   }
+  document.querySelectorAll("[data-queue-approve]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.activeCaseId = button.dataset.queueApprove;
+      await approveCaseReview({ currentTarget: button });
+    });
+  });
+  document.querySelectorAll("[data-queue-reject]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.activeCaseId = button.dataset.queueReject;
+      await rejectCaseReview({ currentTarget: button });
+    });
+  });
+  document.querySelectorAll("[data-focus-case]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.activeCaseId = button.dataset.focusCase;
+      state.activeImageId = null;
+      state.versionDiff = null;
+      delete state.caseDetails[state.activeCaseId];
+      await loadCaseDetail(state.activeCaseId);
+      render();
+    });
+  });
+  const versionCaseSelect = $("#versionCaseSelect");
+  if (versionCaseSelect) {
+    versionCaseSelect.addEventListener("change", async () => {
+      state.activeCaseId = versionCaseSelect.value || null;
+      state.activeImageId = null;
+      state.versionDiff = null;
+      state.versionCompareA = "";
+      state.versionCompareB = "";
+      if (state.activeCaseId) delete state.caseDetails[state.activeCaseId];
+      render();
+    });
+  }
+  const versionCompareA = $("#versionCompareA");
+  if (versionCompareA) {
+    versionCompareA.addEventListener("change", () => {
+      state.versionCompareA = versionCompareA.value;
+    });
+  }
+  const versionCompareB = $("#versionCompareB");
+  if (versionCompareB) {
+    versionCompareB.addEventListener("change", () => {
+      state.versionCompareB = versionCompareB.value;
+    });
+  }
+  const runVersionDiffButton = $("[data-run-version-diff]");
+  if (runVersionDiffButton) {
+    runVersionDiffButton.addEventListener("click", runVersionDiff);
+  }
+  document.querySelectorAll("[data-rollback-mask]").forEach((button) => {
+    button.addEventListener("click", () => rollbackMaskVersion(button.dataset.rollbackMask));
+  });
+  const qualityCaseSelect = $("#qualityCaseSelect");
+  if (qualityCaseSelect) {
+    qualityCaseSelect.addEventListener("change", async () => {
+      state.qualityCaseId = qualityCaseSelect.value || "";
+      state.activeCaseId = state.qualityCaseId;
+      state.qualityMaskId = "";
+      state.qualityRefMaskId = "";
+      state.qualityReport = null;
+      state.qualityMasks = [];
+      render();
+    });
+  }
+  const qualityMaskSelect = $("#qualityMaskSelect");
+  if (qualityMaskSelect) {
+    qualityMaskSelect.addEventListener("change", () => {
+      state.qualityMaskId = qualityMaskSelect.value;
+      state.qualityReport = null;
+    });
+  }
+  const qualityRefSelect = $("#qualityRefSelect");
+  if (qualityRefSelect) {
+    qualityRefSelect.addEventListener("change", () => {
+      state.qualityRefMaskId = qualityRefSelect.value;
+      state.qualityReport = null;
+    });
+  }
+  const loadQualityButton = $("[data-load-quality]");
+  if (loadQualityButton) {
+    loadQualityButton.addEventListener("click", loadQualityReport);
+  }
   const finalMaskButton = $("[data-final-mask]");
   if (finalMaskButton) {
     finalMaskButton.addEventListener("click", approveFinalMask);
@@ -3070,6 +3797,70 @@ function render() {
   if (aiPredictButton) {
     aiPredictButton.addEventListener("click", runAIPredict);
   }
+  const loadV2AiButton = $("[data-load-v2-ai]");
+  if (loadV2AiButton) {
+    loadV2AiButton.addEventListener("click", loadV2AiTo2D);
+  }
+  const compareMasksButton = $("[data-compare-masks]");
+  if (compareMasksButton) {
+    compareMasksButton.addEventListener("click", compareActiveMasks);
+  }
+  const openAnnotationFromInference = $("[data-open-annotation-from-inference]");
+  if (openAnnotationFromInference) {
+    openAnnotationFromInference.addEventListener("click", () => setView("annotation"));
+  }
+  const inferenceCaseSelect = $("#inferenceCaseSelect");
+  if (inferenceCaseSelect) {
+    inferenceCaseSelect.addEventListener("change", async () => {
+      state.activeCaseId = inferenceCaseSelect.value || null;
+      state.activeImageId = null;
+      state.inferencePreview = null;
+      delete state.caseDetails[state.activeCaseId];
+      await loadCaseDetail(state.activeCaseId);
+      render();
+    });
+  }
+  const inferenceModelSelect = $("#inferenceModelSelect");
+  if (inferenceModelSelect) {
+    inferenceModelSelect.addEventListener("change", () => {
+      state.selectedModelId = inferenceModelSelect.value;
+      const model = selectedModel();
+      if (model?.label) state.annotationLabel = model.label;
+      render();
+    });
+  }
+  const active3DMaskSelect = $("#active3DMaskSelect");
+  if (active3DMaskSelect) {
+    active3DMaskSelect.addEventListener("change", () => {
+      state.active3DMaskId = active3DMaskSelect.value || null;
+      state.volumeLoadingKey = null;
+      state.propagatedSliceLoads = {};
+      render();
+    });
+  }
+  document.querySelectorAll("[data-jump-2d-axis]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const axis = sliceAxes[button.dataset.jump2dAxis] ? button.dataset.jump2dAxis : "axial";
+      const sliceIndex = Number(button.dataset.jump2dSlice || 0);
+      state.activeAxis = axis;
+      setCurrentSliceIndex(sliceIndex, axis);
+      state.volumeViewMode = "2d";
+      state.propagatedSliceLoads = {};
+      render();
+    });
+  });
+  const bindMprSlider = (id, axis) => {
+    const slider = $(id);
+    if (!slider) return;
+    const refresh = () => {
+      setCurrentSliceIndex(Number(slider.value), axis);
+      render();
+    };
+    slider.addEventListener("change", refresh);
+  };
+  bindMprSlider("#mprAxialSlider", "axial");
+  bindMprSlider("#mprCoronalSlider", "coronal");
+  bindMprSlider("#mprSagittalSlider", "sagittal");
   const exportMaskNiftiButton = $("[data-export-mask-nifti]");
   if (exportMaskNiftiButton) {
     exportMaskNiftiButton.addEventListener("click", exportMaskNifti);
@@ -3154,19 +3945,22 @@ function render() {
   }
   if (state.view === "annotation") hydrateAnnotation();
   if (state.view === "versions") hydrateVersions();
+  if (state.view === "inference") hydrateInference();
+  if (state.view === "quality") hydrateQuality();
 }
 
 async function startVolumeViewer(image) {
   const container = $("#volumeContainer");
   if (!container || !image) return;
   const maskId = container.dataset.maskId || "";
-  const loadingKey = `${image.image_id}:volume-hu-v3:${maskId || "no-mask"}`;
+  const highlightMask = container.dataset.highlightMask === "true";
+  const loadingKey = `${image.image_id}:volume-hu-v3:${maskId || "no-mask"}:hl-${highlightMask ? "1" : "0"}`;
   if (state.volumeLoadingKey === loadingKey && container.dataset.ready === "true") return;
   state.volumeLoadingKey = loadingKey;
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/volume_viewer.js?v=vtk-organ-color-ui-20260710`);
+    const module = await import(`/frontend/volume_viewer.js?v=vtk-organ-color-ui-20260710-p2`);
     if (maskId) {
       loadMaskQuality(maskId)
         .then(() => updateMaskQualitySummary(maskId))
@@ -3182,6 +3976,7 @@ async function startVolumeViewer(image) {
       windowName: "volume",
       maxDim: 176,
       isotropic: false,
+      highlightMask,
     });
     container.dataset.ready = "true";
   } catch (error) {
@@ -3214,6 +4009,7 @@ async function init() {
   window.addEventListener("resize", () => resizeAnnotationCanvas());
   await restoreSession();
   await refreshCases();
+  await loadModels();
   render();
   updateAuthChrome();
 }

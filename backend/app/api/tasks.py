@@ -76,6 +76,37 @@ def submit_case(
     )
 
 
+@router.get("/review/queue")
+def read_review_queue(user: dict = Depends(get_current_user)) -> dict:
+    role = str(user.get("role") or "")
+    if role not in {"reviewer", "admin"}:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=403, detail="Only reviewer or admin can view the review queue")
+    from backend.app.services.case_service import list_cases
+    from backend.app.services.mask_service import find_promotable_mask_for_case
+
+    pending = [item for item in list_cases() if str(item.status) == "pending"]
+    items = []
+    for case in pending:
+        promotable = find_promotable_mask_for_case(case.case_id)
+        items.append(
+            {
+                "case_id": case.case_id,
+                "patient_id": case.patient_id,
+                "modality": case.modality,
+                "status": case.status,
+                "create_time": case.create_time,
+                "image_count": case.image_count,
+                "mask_count": case.mask_count,
+                "reject_note": case.reject_note,
+                "promotable_mask_id": None if promotable is None else promotable.get("mask_id"),
+                "promotable_version": None if promotable is None else promotable.get("version"),
+            }
+        )
+    return {"success": True, "count": len(items), "items": items}
+
+
 @router.post("/case/{case_id}/approve", response_model=CaseWorkflowResponse)
 def approve_case(
     case_id: str,
@@ -87,7 +118,7 @@ def approve_case(
     return CaseWorkflowResponse(
         case_id=case_id,
         status=str(case.get("status")),
-        message="approved",
+        message=f"approved → final ({case.get('final_mask_id') or 'ok'})",
     )
 
 

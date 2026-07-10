@@ -168,9 +168,70 @@ def approve_case(case_id: str, user: dict[str, Any], note: str | None = None) ->
     current = str(case.get("status") or "unannotated")
     if current != "pending":
         raise HTTPException(status_code=400, detail=f"Case status must be pending before approve, got {current}")
-    updated = set_case_status(case_id, "reviewed", user=user, action="approve", detail={"note": note})
+
+    from backend.app.services.mask_service import find_promotable_mask_for_case, promote_mask
+    from backend.app.services.version_service import save_version
+    from backend.app.schemas.version import SaveVersionRequest
+
+    # Reviewer can approve without opening the annotation canvas:
+    # promote latest v3_preview/v3_fusion → final, then case becomes final.
+    promotable = find_promotable_mask_for_case(case_id)
+    if promotable is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No promotable 3D mask (v3_preview/v3_fusion). Ask annotator to generate preview before approve.",
+        )
+    promoted = promote_mask(str(promotable.get("mask_id")), target_version="final", user=user)
+    save_version(
+        SaveVersionRequest(
+            case_id=case_id,
+            version="final",
+            annotation=promoted.mask_id,
+            model=f"approved_from:{promotable.get('mask_id')}",
+            dataset=None,
+        )
+    )
+    # promote_mask(final) already finalizes case status when user is provided.
+    updated = get_case_record(case_id)
     _sync_tasks_for_case(case_id, "approved", user=user, note=note)
-    return updated
+    append_audit_log(
+        action="approve",
+        user=user,
+        entity_type="case",
+        entity_id=case_id,
+        case_id=case_id,
+        detail={
+            "note": note,
+            "promoted_from": promotable.get("mask_id"),
+            "final_mask_id": promoted.mask_id,
+            "from_status": current,
+            "to_status": updated.get("status"),
+        },
+    )
+    return {
+        **updated,
+        "final_mask_id": promoted.mask_id,
+        "promoted_from": promotable.get("mask_id"),
+        "approve_note": note,
+    }
+
+
+def latest_reject_note(case_id: str) -> str | None:
+    logs = list_audit_logs(case_id=case_id, limit=50)
+    for entry in logs:
+        if str(entry.get("action") or "") != "reject":
+            continue
+        detail = entry.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            try:
+                detail = json.loads(detail)
+            except json.JSONDecodeError:
+                return detail.strip()
+        if isinstance(detail, dict):
+            note = detail.get("note")
+            if note:
+                return str(note)
+    return None
 
 
 def reject_case(case_id: str, user: dict[str, Any], note: str | None = None) -> dict[str, Any]:
@@ -181,15 +242,22 @@ def reject_case(case_id: str, user: dict[str, Any], note: str | None = None) -> 
     current = str(case.get("status") or "unannotated")
     if current not in {"pending", "reviewed", "final"}:
         raise HTTPException(status_code=400, detail=f"Case status cannot be rejected from {current}")
+    # Reject writes review opinion and returns case to annotated.
+    # Existing v3_preview / v2_ai masks stay; reject never promotes to final.
     updated = set_case_status(
         case_id,
         "annotated",
         user=user,
         action="reject",
-        detail={"note": note or "rejected"},
+        detail={
+            "note": note or "rejected",
+            "keep_versions": ["v2_ai", "v3_preview", "v3_fusion"],
+            "promote_to_final": False,
+        },
         force=True,
     )
     _sync_tasks_for_case(case_id, "rejected", user=user, note=note)
+    updated["reject_note"] = note or "rejected"
     return updated
 
 

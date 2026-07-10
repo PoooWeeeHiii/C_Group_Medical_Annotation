@@ -50,6 +50,9 @@
 | 保存版本 | POST | `/api/version` | Vue、AI |
 | 查询版本列表 | GET | `/api/case/{case_id}/versions` | Vue、F 组 |
 | 运行 AI 自动标注 | POST | `/api/ai/predict` | Vue、F 组 |
+| 列出可用模型 | GET | `/api/models` | Vue、F 组 |
+| 注册模型 | POST | `/api/models` | Vue、F 组 |
+| 对比 Mask Dice/IoU | POST | `/api/masks/compare` | Vue、AI |
 | 导出 Dataset | POST | `/api/export` | Vue、AI、F 组 |
 
 ## 2.1 认证、任务与审核工作流
@@ -952,6 +955,35 @@ uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 
 ## 10. AI 自动标注
 
+### GET `/api/models`
+
+用途：列出模型注册表中的可用 `model_id`，供前端下拉选择（不要写死脾脏）。
+
+响应示例：
+
+```json
+{
+  "success": true,
+  "count": 4,
+  "items": [
+    {
+      "model_id": "spleen_nnunetv2_task506",
+      "version": "task506_2d",
+      "label": "spleen",
+      "display_name": "脾脏 nnU-Net v2 (Task506)",
+      "backend": "external_command_or_baseline",
+      "description": "优先使用 SPLEEN_NNUNET_PREDICT_COMMAND；未配置时回退脾脏 CT baseline。",
+      "builtin": true,
+      "external_ready": false
+    }
+  ]
+}
+```
+
+### POST `/api/models`
+
+用途：注册自定义模型元数据（`model_id` / `label` / `path` / `dice` 等）。
+
 ### POST `/api/ai/predict`
 
 用途：对某个病例或图像运行 AI 自动标注，生成真实 `v2_ai` NIfTI mask。
@@ -972,23 +1004,71 @@ uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 ```json
 {
   "success": true,
-  "annotation_id": "Annotation0002",
+  "annotation_id": "AnnotationAI_Image0001_spleen_nnunetv2_task506",
   "mask_id": "Mask0002",
   "version": "v2_ai",
-  "model_id": "Model0001",
-  "dice": 0.86,
-  "mask_path": "dataset/labels/Case0001/v2_ai/Case0001_Image0001_Mask0002_v2_ai_lung_nodule.nii.gz"
+  "model_id": "spleen_nnunetv2_task506",
+  "dice": null,
+  "mask_path": "dataset/labels/Case0001/v2_ai/...."
 }
 ```
 
 说明：
 
-- 当前实现会调用 `ai/predict.py` 的 `predict_mask_array()`，生成真实 3D mask，并保存为 `.nii.gz`。
-- 写入 `masks.version=v2_ai`、`versions.version=v2_ai`，并登记 `models.model_id`。
-- 生成的 mask 必须与原 CT 保持同一 `shape / spacing / origin / direction`。
-- 目前内置 `builtin_ct_threshold` 作为 CT 阈值/连通域 baseline。Person B 后续可替换 `ai/predict.py` 内部实现为 nnU-Net / MONAI / MedSAM 推理，但必须保持输入 CT volume、输出 3D mask array 的契约。
-- 脾脏自动标注使用 `model_id=spleen_nnunetv2_task506`、`label=spleen`。若本地配置了 `SPLEEN_NNUNET_PREDICT_COMMAND`，后端会调用真实 nnU-Net v2 推理；否则使用内置脾脏 CT baseline，仅用于平台流程演示。
-- 该脾脏模型参考仓库 `PoooWeeeHiii/spleen_segmentation_experiment`，仓库记录了 MSD Task09 Spleen 的 nnU-Net v2 训练流程和指标，但未包含 checkpoint。真实部署时 Person B 需要提供 `checkpoint_best.pth`、nnU-Net 环境和命令模板。
+- 前端应从 `GET /api/models` 选择 `model_id`，不要写死脾脏。
+- 若配置了 `SPLEEN_NNUNET_PREDICT_COMMAND`（Person B 提供 `checkpoint_best.pth`），脾脏模型走外部 nnU-Net；否则回退内置 baseline。
+- 推理中心页流程：选 case → 选模型 → predict → 预览 `v2_ai` → 可一键加载到 2D 修正。
+
+### POST `/api/masks/compare`
+
+用途：对比两个 3D NIfTI Mask 的 Dice / IoU（例如 `v2_ai` vs 本地 test/`final`）。
+
+请求：
+
+```json
+{
+  "pred_mask_id": "Mask0002",
+  "ref_mask_id": "Mask0005"
+}
+```
+
+响应：
+
+```json
+{
+  "success": true,
+  "pred_mask_id": "Mask0002",
+  "ref_mask_id": "Mask0005",
+  "dice": 0.86,
+  "iou": 0.75,
+  "precision": 0.88,
+  "recall": 0.84
+}
+```
+
+## 10.1 人工修正与驳回
+
+- 修正 UI 显示正/负点数量；支持「从 v2_ai 加载到 2D」。
+- DeepEdit：优先 `DEEPEDIT_SERVICE_URL`，否则 Random Walker fallback。
+- 驳回 `POST /api/case/{case_id}/reject` 写回意见；病例回到 `annotated`；**版本停留在 `v3_preview`/`v2_ai`，不进入 final**。
+
+## 10.2 版本 Diff / 回滚 / 质量指标 / 审核队列
+
+### GET `/api/mask/{a}/compare/{b}`
+
+用途：版本 diff，返回 Dice / IoU / 体积差 / HD95。
+
+### POST `/api/mask/{mask_id}/rollback`
+
+用途：将指定 3D Mask 复制为新的 `v3_preview`（回滚/恢复）。
+
+### GET `/api/mask/{mask_id}/metrics?ref=MaskXXXX`
+
+用途：质量评价。无 `ref` 时仅返回几何质量；有 `ref` 时额外返回 Dice / IoU / HD95 与错误切片列表。
+
+### GET `/api/review/queue`
+
+用途：审核员查看 `pending` 病例队列。`POST /api/case/{id}/approve` 会自动 promote 最新 `v3_preview`/`v3_fusion` → `final`。
 
 ## 11. 导出 Dataset
 
@@ -1048,11 +1128,13 @@ sequenceDiagram
     Vue->>API: GET /api/image/{image_id}/slice/{slice_index}
     Vue->>API: POST /api/annotation
     Vue->>API: POST /api/save_mask
+    Vue->>API: GET /api/models
     Vue->>API: POST /api/ai/predict
     API->>AI: 调用 predict.py
     AI->>Data: 读取标准图像
     AI-->>API: 返回 AI mask
     API->>Data: 保存 v2_ai mask
+    Vue->>API: POST /api/masks/compare
     Vue->>API: POST /api/export
     API->>Data: 生成 Dataset release
 ```

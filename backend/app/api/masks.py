@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends
 
 from backend.app.deps import get_optional_user
 from backend.app.schemas.mask import (
+    CompareMasksRequest,
+    CompareMasksResponse,
     DeepEditRefineRequest,
     DeepEditRefineResponse,
     DeleteMaskResponse,
@@ -11,17 +13,21 @@ from backend.app.schemas.mask import (
     LabelPropagationResponse,
     MaskDetailResponse,
     MaskListResponse,
+    MaskMetricsResponse,
     PromoteMaskRequest,
+    RollbackMaskResponse,
     SaveMaskRequest,
     SaveMaskResponse,
     UpdateMaskRequest,
 )
 from backend.app.services.mask_service import (
+    compare_masks,
     deepedit_refine,
     delete_mask,
     export_mask_nifti,
     get_mask,
     get_mask_content,
+    get_mask_metrics,
     get_mask_quality_summary,
     get_mask_slice_data,
     get_mask_surface_mesh,
@@ -29,6 +35,7 @@ from backend.app.services.mask_service import (
     label_propagate,
     list_masks_for_image,
     promote_mask,
+    rollback_mask,
     save_mask,
     update_mask,
 )
@@ -85,6 +92,38 @@ def promote_image_mask(
     user: dict | None = Depends(get_optional_user),
 ) -> SaveMaskResponse:
     return promote_mask(mask_id=mask_id, target_version=request.target_version, user=user)
+
+
+@router.post("/masks/compare", response_model=CompareMasksResponse)
+def compare_image_masks(request: CompareMasksRequest) -> CompareMasksResponse:
+    return CompareMasksResponse(**compare_masks(request.pred_mask_id, request.ref_mask_id))
+
+
+@router.get("/mask/{mask_a}/compare/{mask_b}", response_model=CompareMasksResponse)
+def compare_masks_by_path(mask_a: str, mask_b: str) -> CompareMasksResponse:
+    return CompareMasksResponse(**compare_masks(mask_a, mask_b))
+
+
+@router.get("/mask/{mask_id}/metrics", response_model=MaskMetricsResponse)
+def read_mask_metrics(mask_id: str, ref: str | None = None) -> MaskMetricsResponse:
+    return MaskMetricsResponse(**get_mask_metrics(mask_id, ref_mask_id=ref))
+
+
+@router.post("/mask/{mask_id}/rollback", response_model=RollbackMaskResponse)
+def rollback_image_mask(
+    mask_id: str,
+    user: dict | None = Depends(get_optional_user),
+) -> RollbackMaskResponse:
+    result = rollback_mask(mask_id, user=user)
+    return RollbackMaskResponse(
+        success=True,
+        mask_id=result["mask_id"],
+        path=result["path"],
+        source_mask_id=result["source_mask_id"],
+        version=result["version"],
+        mask=result["mask"],
+        message=result["message"],
+    )
 
 
 @router.get("/mask/{mask_id}", response_model=MaskDetailResponse)

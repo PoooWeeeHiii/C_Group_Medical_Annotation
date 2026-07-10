@@ -109,7 +109,9 @@ def _run_external_spleen_command(image_path: Path, case_id: str) -> np.ndarray |
 
 
 def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
-    model_id = request.model_id or "builtin_ct_threshold"
+    from backend.app.services.model_service import get_model, resolve_predict_label
+
+    model_id, label = resolve_predict_label(request.model_id, request.label)
     image_record, volume = load_volume(request.image_id)
     if image_record.get("case_id") != request.case_id:
         raise HTTPException(
@@ -120,10 +122,10 @@ def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
     try:
         image_path = (PROJECT_ROOT / str(image_record.get("path", ""))).resolve()
         mask_stack = None
-        if _is_spleen_request(request.label, model_id) and image_path.exists():
+        if _is_spleen_request(label, model_id) and image_path.exists():
             mask_stack = _run_external_spleen_command(image_path, request.case_id)
         if mask_stack is None:
-            mask_stack = predict_mask_array(volume.array, label=request.label, model_id=model_id)
+            mask_stack = predict_mask_array(volume.array, label=label, model_id=model_id)
     except HTTPException:
         raise
     except Exception as exc:
@@ -139,23 +141,42 @@ def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
         raise HTTPException(status_code=422, detail="AI inference produced an empty mask")
 
     annotation_id = f"AnnotationAI_{request.image_id}_{_safe_id(model_id)}"
-    upsert_record(
-        "models",
-        {
-            "model_id": model_id,
-            "version": model_id,
-            "dice": None,
-            "path": None,
-            "metrics_json": None,
-        },
-    )
+    try:
+        existing_model = get_model(model_id)
+        upsert_record(
+            "models",
+            {
+                "model_id": model_id,
+                "version": existing_model.get("version") or model_id,
+                "dice": existing_model.get("dice"),
+                "path": existing_model.get("path"),
+                "metrics_json": existing_model.get("metrics")
+                or {
+                    "label": label,
+                    "display_name": existing_model.get("display_name") or model_id,
+                    "backend": existing_model.get("backend") or "registered",
+                    "description": existing_model.get("description") or "",
+                },
+            },
+        )
+    except HTTPException:
+        upsert_record(
+            "models",
+            {
+                "model_id": model_id,
+                "version": model_id,
+                "dice": None,
+                "path": None,
+                "metrics_json": {"label": label, "display_name": model_id},
+            },
+        )
 
     mask, mask_path = _append_3d_mask_record(
         masks=[],
         request_case_id=request.case_id,
         image_id=request.image_id,
         version="v2_ai",
-        label=request.label,
+        label=label,
         encoding=f"ai_inference:{model_id}",
         source_mask_ids=[],
         mask_stack=mask_stack,

@@ -10,6 +10,12 @@ from backend.app.services.sqlite_service import ensure_sqlite_ready
 
 ensure_project_dirs()
 ensure_sqlite_ready()
+try:
+    from backend.app.services.model_service import ensure_builtin_models
+
+    ensure_builtin_models()
+except Exception:
+    pass
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 FRONTEND_INDEX = FRONTEND_DIR / "index.html"
 
@@ -69,6 +75,7 @@ def frontend_page(page_name: str) -> FileResponse:
         "annotation",
         "train",
         "inference",
+        "versions",
         "quality",
         "export",
         "settings",

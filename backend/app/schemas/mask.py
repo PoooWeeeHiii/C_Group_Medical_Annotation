@@ -68,6 +68,54 @@ class PromoteMaskRequest(BaseModel):
     target_version: str = "v3_fusion"
 
 
+class CompareMasksRequest(BaseModel):
+    pred_mask_id: str = Field(min_length=1)
+    ref_mask_id: str = Field(min_length=1)
+
+
+class CompareMasksResponse(BaseModel):
+    success: bool = True
+    pred_mask_id: str
+    ref_mask_id: str
+    pred_version: str | None = None
+    ref_version: str | None = None
+    shape: list[int]
+    pred_voxels: int
+    ref_voxels: int
+    intersection: int
+    dice: float
+    iou: float
+    precision: float
+    recall: float
+    volume_diff_voxels: int = 0
+    volume_diff_ml: float = 0.0
+    pred_volume_ml: float | None = None
+    ref_volume_ml: float | None = None
+    hd95_mm: float | None = None
+    spacing: list[float] | None = None
+
+
+class MaskMetricsResponse(BaseModel):
+    success: bool = True
+    mask_id: str
+    ref_mask_id: str | None = None
+    version: str | None = None
+    label: str | None = None
+    geometric: dict[str, Any] | None = None
+    overlap: dict[str, Any] | None = None
+    error_slices: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RollbackMaskResponse(BaseModel):
+    success: bool = True
+    mask_id: str
+    path: str
+    source_mask_id: str
+    version: str = "v3_preview"
+    mask: MaskRecord
+    message: str = "rolled back to v3_preview"
+
+
 class MaskDetailResponse(BaseModel):
     success: bool
     mask: MaskRecord

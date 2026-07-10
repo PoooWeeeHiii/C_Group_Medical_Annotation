@@ -2297,3 +2297,259 @@ def deepedit_refine(request: DeepEditRefineRequest) -> DeepEditRefineResponse:
             "with positive/negative prompts saved in the request contract."
         ),
     )
+
+
+def compare_masks(pred_mask_id: str, ref_mask_id: str, *, include_hd95: bool = True) -> dict[str, Any]:
+    """Compute Dice / IoU / volume diff (and optional HD95) between two 3D NIfTI masks."""
+    pred_record, pred_image, pred = _read_nifti_mask_array(pred_mask_id)
+    ref_record, ref_image, ref = _read_nifti_mask_array(ref_mask_id)
+    if pred.shape != ref.shape:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Mask shape mismatch: pred={pred.shape}, ref={ref.shape}",
+        )
+    spacing = [float(value) for value in pred_image.GetSpacing()[:3]]
+    voxel_ml = float(spacing[0] * spacing[1] * spacing[2]) / 1000.0
+    pred_bin = pred > 0
+    ref_bin = ref > 0
+    intersection = int(np.count_nonzero(pred_bin & ref_bin))
+    pred_count = int(np.count_nonzero(pred_bin))
+    ref_count = int(np.count_nonzero(ref_bin))
+    union = pred_count + ref_count - intersection
+    dice = (2.0 * intersection / (pred_count + ref_count)) if (pred_count + ref_count) else 1.0
+    iou = (intersection / union) if union else 1.0
+    precision = (intersection / pred_count) if pred_count else 0.0
+    recall = (intersection / ref_count) if ref_count else 0.0
+    volume_diff_voxels = pred_count - ref_count
+    hd95 = _hausdorff_distance_95(pred_bin, ref_bin, spacing) if include_hd95 else None
+    return {
+        "success": True,
+        "pred_mask_id": pred_mask_id,
+        "ref_mask_id": ref_mask_id,
+        "pred_version": pred_record.get("version"),
+        "ref_version": ref_record.get("version"),
+        "shape": [int(value) for value in pred.shape],
+        "pred_voxels": pred_count,
+        "ref_voxels": ref_count,
+        "intersection": intersection,
+        "dice": round(float(dice), 6),
+        "iou": round(float(iou), 6),
+        "precision": round(float(precision), 6),
+        "recall": round(float(recall), 6),
+        "volume_diff_voxels": int(volume_diff_voxels),
+        "volume_diff_ml": round(float(volume_diff_voxels) * voxel_ml, 6),
+        "pred_volume_ml": round(float(pred_count) * voxel_ml, 6),
+        "ref_volume_ml": round(float(ref_count) * voxel_ml, 6),
+        "hd95_mm": None if hd95 is None else round(float(hd95), 6),
+        "spacing": spacing,
+    }
+
+
+def _hausdorff_distance_95(pred: np.ndarray, ref: np.ndarray, spacing: list[float]) -> float | None:
+    """Approximate bidirectional HD95 (mm) using surface distance transforms."""
+    if not np.any(pred) and not np.any(ref):
+        return 0.0
+    if not np.any(pred) or not np.any(ref):
+        return None
+    try:
+        from scipy import ndimage as ndi
+    except ModuleNotFoundError:
+        return None
+
+    spacing_zyx = np.asarray([spacing[2], spacing[1], spacing[0]], dtype=np.float64)
+
+    def surface(mask: np.ndarray) -> np.ndarray:
+        eroded = ndi.binary_erosion(mask, structure=np.ones((3, 3, 3), dtype=bool), border_value=0)
+        return mask & ~eroded
+
+    pred_surface = surface(pred)
+    ref_surface = surface(ref)
+    if not np.any(pred_surface):
+        pred_surface = pred
+    if not np.any(ref_surface):
+        ref_surface = ref
+
+    dt_ref = ndi.distance_transform_edt(~ref_surface, sampling=spacing_zyx)
+    dt_pred = ndi.distance_transform_edt(~pred_surface, sampling=spacing_zyx)
+    d_pred_to_ref = dt_ref[pred_surface]
+    d_ref_to_pred = dt_pred[ref_surface]
+    if d_pred_to_ref.size == 0 and d_ref_to_pred.size == 0:
+        return 0.0
+    distances = np.concatenate([d_pred_to_ref.ravel(), d_ref_to_pred.ravel()])
+    return float(np.percentile(distances, 95))
+
+
+def _error_slices(pred: np.ndarray, ref: np.ndarray, *, top_k: int = 8) -> list[dict[str, Any]]:
+    pred_bin = pred > 0
+    ref_bin = ref > 0
+    xor = np.logical_xor(pred_bin, ref_bin)
+    if not np.any(xor):
+        return []
+    per_slice = np.count_nonzero(xor, axis=(1, 2))
+    ranked = np.argsort(per_slice)[::-1]
+    results: list[dict[str, Any]] = []
+    for index in ranked:
+        error_voxels = int(per_slice[index])
+        if error_voxels <= 0:
+            break
+        results.append(
+            {
+                "axis": "axial",
+                "slice_index": int(index),
+                "error_voxels": error_voxels,
+                "pred_voxels": int(np.count_nonzero(pred_bin[index])),
+                "ref_voxels": int(np.count_nonzero(ref_bin[index])),
+            }
+        )
+        if len(results) >= top_k:
+            break
+    return results
+
+
+def get_mask_metrics(mask_id: str, ref_mask_id: str | None = None, *, error_slice_top_k: int = 8) -> dict[str, Any]:
+    geometric = get_mask_quality_summary(mask_id)
+    payload: dict[str, Any] = {
+        "success": True,
+        "mask_id": mask_id,
+        "ref_mask_id": ref_mask_id,
+        "version": geometric.get("version"),
+        "label": geometric.get("label"),
+        "geometric": {
+            "voxel_count": geometric.get("voxel_count"),
+            "volume_ml": geometric.get("volume_ml"),
+            "connected_component_count": geometric.get("connected_component_count"),
+            "largest_component_voxels": geometric.get("largest_component_voxels"),
+            "largest_component_ratio": geometric.get("largest_component_ratio"),
+            "slice_range": geometric.get("slice_range"),
+            "dimensions": geometric.get("dimensions"),
+            "spacing": geometric.get("spacing"),
+        },
+        "overlap": None,
+        "error_slices": [],
+    }
+    if not ref_mask_id:
+        return payload
+
+    overlap = compare_masks(mask_id, ref_mask_id, include_hd95=True)
+    pred_record, _, pred = _read_nifti_mask_array(mask_id)
+    _, _, ref = _read_nifti_mask_array(ref_mask_id)
+    payload["overlap"] = {
+        "dice": overlap["dice"],
+        "iou": overlap["iou"],
+        "precision": overlap["precision"],
+        "recall": overlap["recall"],
+        "hd95_mm": overlap.get("hd95_mm"),
+        "volume_diff_voxels": overlap.get("volume_diff_voxels"),
+        "volume_diff_ml": overlap.get("volume_diff_ml"),
+        "pred_voxels": overlap.get("pred_voxels"),
+        "ref_voxels": overlap.get("ref_voxels"),
+        "pred_version": pred_record.get("version"),
+        "ref_version": overlap.get("ref_version"),
+    }
+    payload["error_slices"] = _error_slices(pred, ref, top_k=error_slice_top_k)
+    return payload
+
+
+def rollback_mask(mask_id: str, user: dict | None = None) -> dict[str, Any]:
+    """Copy an existing 3D NIfTI mask as a new v3_preview version (rollback / restore)."""
+    ensure_project_dirs()
+    masks = _load_masks()
+    source = next((item for item in masks if item.get("mask_id") == mask_id), None)
+    if source is None:
+        raise HTTPException(status_code=404, detail=f"Mask not found: {mask_id}")
+    if not (source.get("mask_format") == "nii.gz" or str(source.get("path") or "").endswith(".nii.gz")):
+        raise HTTPException(status_code=400, detail="Only 3D NIfTI masks can be rolled back to v3_preview")
+
+    source_path = PROJECT_ROOT / str(source.get("path") or "")
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail=f"Source mask file not found: {source.get('path')}")
+
+    target_version = "v3_preview"
+    new_mask_id = next_sqlite_entity_id("Mask", "masks", "mask_id")
+    label = _normalize_label(str(source.get("label") or "label"))
+    new_path = _mask_path(
+        case_id=str(source.get("case_id")),
+        image_id=str(source.get("image_id")),
+        mask_id=new_mask_id,
+        version=target_version,
+        label=label,
+        mask_format="nii.gz",
+    )
+    target_path = PROJECT_ROOT / new_path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_path, target_path)
+
+    record = {
+        "mask_id": new_mask_id,
+        "annotation_id": source.get("annotation_id"),
+        "case_id": source.get("case_id"),
+        "image_id": source.get("image_id"),
+        "path": new_path,
+        "version": target_version,
+        "label": label,
+        "mask_format": "nii.gz",
+        "slice_index": None,
+        "width": source.get("width"),
+        "height": source.get("height"),
+        "encoding": f"rollback_from_{mask_id}",
+        "create_time": _now_iso(),
+        "source_mask_ids": [mask_id],
+        "shape": source.get("shape"),
+        "spacing": source.get("spacing"),
+        "origin": source.get("origin"),
+        "direction": source.get("direction"),
+    }
+    upsert_record("masks", record)
+
+    from backend.app.services.version_service import save_version
+    from backend.app.schemas.version import SaveVersionRequest
+    from backend.app.services.workflow_service import append_audit_log
+
+    save_version(
+        SaveVersionRequest(
+            case_id=str(source.get("case_id")),
+            version=target_version,
+            annotation=new_mask_id,
+            model=f"rollback_from:{mask_id}",
+            dataset=None,
+        )
+    )
+    append_audit_log(
+        action="rollback_mask",
+        user=user,
+        entity_type="mask",
+        entity_id=new_mask_id,
+        case_id=str(source.get("case_id")),
+        detail={"from_mask": mask_id, "from_version": source.get("version"), "to_version": target_version},
+    )
+    mask = MaskRecord(**record)
+    return {
+        "success": True,
+        "mask_id": new_mask_id,
+        "path": new_path,
+        "source_mask_id": mask_id,
+        "version": target_version,
+        "mask": mask,
+        "message": f"rolled back {mask_id} ({source.get('version')}) → {new_mask_id} (v3_preview)",
+    }
+
+
+def find_promotable_mask_for_case(case_id: str) -> dict[str, Any] | None:
+    priority = {"v3_fusion": 3, "v3_preview": 2}
+    candidates = [
+        item
+        for item in _load_masks()
+        if item.get("case_id") == case_id
+        and item.get("version") in priority
+        and (item.get("mask_format") == "nii.gz" or str(item.get("path") or "").endswith(".nii.gz"))
+    ]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: (
+            priority.get(str(item.get("version")), 0),
+            str(item.get("create_time") or ""),
+        ),
+        reverse=True,
+    )
+    return candidates[0]

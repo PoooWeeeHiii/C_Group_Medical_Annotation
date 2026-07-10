@@ -279,6 +279,7 @@ export async function renderVolume3D({
   windowName = "volume",
   maxDim = 176,
   isotropic = true,
+  highlightMask = false,
 }) {
   if (!container || !imageId) return;
   clearContainer(container);
@@ -334,7 +335,7 @@ export async function renderVolume3D({
   }
 
   status.textContent = "正在初始化 VTK 综合 3D 渲染...";
-  renderWithWebGL({ container, volumeData, values, ctMeshes, maskData, maskValues, maskMesh });
+  renderWithWebGL({ container, volumeData, values, ctMeshes, maskData, maskValues, maskMesh, highlightMask });
 }
 
 async function fetchVolumeData({ imageId, maxDim, windowName, isotropic }) {
@@ -381,7 +382,7 @@ function createProgram(gl, vertexSource, fragmentSource) {
   return program;
 }
 
-function renderWithWebGL({ container, volumeData, values, ctMeshes = [], maskData = null, maskValues = null, maskMesh = null }) {
+function renderWithWebGL({ container, volumeData, values, ctMeshes = [], maskData = null, maskValues = null, maskMesh = null, highlightMask = false }) {
   clearContainer(container);
 
   const canvas = document.createElement("canvas");
@@ -998,8 +999,8 @@ function renderWithWebGL({ container, volumeData, values, ctMeshes = [], maskDat
     brightness: initialPreset.brightness,
     threshold: initialPreset.threshold,
     steps: initialPreset.steps,
-    maskColor: "#00e5b0",
-    maskAlpha: 0.58,
+    maskColor: highlightMask ? "#ffb020" : "#00e5b0",
+    maskAlpha: highlightMask ? 0.82 : 0.58,
     outerMeshAlpha: 0.12,
     lungMeshAlpha: 0.42,
     innerMeshAlpha: 0.32,
