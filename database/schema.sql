@@ -11,6 +11,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL CHECK (role IN ('annotator', 'reviewer', 'admin', 'ai_service')),
     create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -23,6 +24,35 @@ CREATE TABLE IF NOT EXISTS cases (
     status TEXT NOT NULL DEFAULT 'unannotated'
         CHECK (status IN ('unannotated', 'annotated', 'pending', 'reviewed', 'final')),
     create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL,
+    assignee_id INTEGER NOT NULL,
+    assigner_id INTEGER,
+    deadline TEXT,
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'in_progress', 'submitted', 'approved', 'rejected', 'cancelled')),
+    note TEXT,
+    create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time TEXT,
+    FOREIGN KEY (case_id) REFERENCES cases(case_id) ON DELETE CASCADE,
+    FOREIGN KEY (assignee_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (assigner_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    username TEXT,
+    action TEXT NOT NULL,
+    entity_type TEXT,
+    entity_id TEXT,
+    case_id TEXT,
+    detail TEXT,
+    create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS images (
@@ -67,6 +97,7 @@ CREATE TABLE IF NOT EXISTS masks (
     label TEXT NOT NULL DEFAULT 'label',
     label_id INTEGER,
     mask_format TEXT NOT NULL DEFAULT 'nii.gz' CHECK (mask_format IN ('json', 'nii.gz', 'nrrd')),
+    axis TEXT CHECK (axis IS NULL OR axis IN ('axial', 'coronal', 'sagittal')),
     slice_index INTEGER CHECK (slice_index IS NULL OR slice_index >= 0),
     width INTEGER CHECK (width IS NULL OR width >= 0),
     height INTEGER CHECK (height IS NULL OR height >= 0),
@@ -140,3 +171,8 @@ CREATE INDEX IF NOT EXISTS idx_masks_annotation_id ON masks(annotation_id);
 CREATE INDEX IF NOT EXISTS idx_masks_version ON masks(version);
 CREATE INDEX IF NOT EXISTS idx_versions_case_id ON versions(case_id);
 CREATE INDEX IF NOT EXISTS idx_versions_version ON versions(version);
+CREATE INDEX IF NOT EXISTS idx_tasks_case_id ON tasks(case_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_assignee_id ON tasks(assignee_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_case_id ON audit_logs(case_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);

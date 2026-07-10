@@ -29,12 +29,13 @@ from backend.app.schemas.mask import (
     MaskRecord,
     SaveMaskRequest,
     SaveMaskResponse,
+    UpdateMaskRequest,
 )
 from backend.app.services.file_service import (
     path_for_api,
 )
 from backend.app.services.medical_image_service import load_volume
-from backend.app.services.sqlite_service import get_record, list_records, next_sqlite_entity_id, upsert_record
+from backend.app.services.sqlite_service import get_record, list_records, next_sqlite_entity_id, upsert_record, delete_record
 
 
 VALID_MASK_VERSIONS = {"v1_manual", "v2_ai", "v3_preview", "v3_fusion", "final"}
@@ -1019,7 +1020,42 @@ def get_mask_slice_data(mask_id: str, slice_index: int, axis: str = "axial") -> 
     }
 
 
-def save_mask(request: SaveMaskRequest) -> SaveMaskResponse:
+def _find_slice_json_mask(
+    *,
+    case_id: str,
+    image_id: str,
+    version: str,
+    label: str,
+    axis: str,
+    slice_index: int | None,
+) -> dict | None:
+    if slice_index is None:
+        return None
+    candidates = [
+        mask
+        for mask in _load_masks()
+        if mask.get("case_id") == case_id
+        and mask.get("image_id") == image_id
+        and mask.get("version") == version
+        and mask.get("label") == label
+        and (mask.get("mask_format") == "json" or str(mask.get("path") or "").endswith(".json"))
+        and int(mask.get("slice_index") if mask.get("slice_index") is not None else -1) == int(slice_index)
+    ]
+    matched: list[dict] = []
+    for mask in candidates:
+        mask_axis = mask.get("axis")
+        if not mask_axis:
+            content = _read_mask_json(str(mask.get("path") or ""))
+            mask_axis = (content or {}).get("axis") or "axial"
+        if str(mask_axis).strip().lower() == axis:
+            matched.append(mask)
+    if not matched:
+        return None
+    matched.sort(key=lambda item: str(item.get("create_time") or ""))
+    return matched[-1]
+
+
+def save_mask(request: SaveMaskRequest, user: dict | None = None) -> SaveMaskResponse:
     ensure_project_dirs()
 
     version = request.version.strip()
@@ -1040,42 +1076,198 @@ def save_mask(request: SaveMaskRequest) -> SaveMaskResponse:
             detail=f"Image {request.image_id} does not belong to case {request.case_id}",
         )
 
-    mask_id = next_sqlite_entity_id("Mask", "masks", "mask_id")
     label = _normalize_label(request.label)
-    mask_path = _mask_path(
-        case_id=request.case_id,
-        image_id=request.image_id,
-        mask_id=mask_id,
-        version=version,
-        label=label,
-        mask_format=mask_format,
-    )
+    axis = _normalize_axis(request.axis) if mask_format == "json" else None
+    existing = None
+    if mask_format == "json" and request.overwrite:
+        existing = _find_slice_json_mask(
+            case_id=request.case_id,
+            image_id=request.image_id,
+            version=version,
+            label=label,
+            axis=axis or "axial",
+            slice_index=request.slice_index,
+        )
+
+    updated = False
+    if existing:
+        mask_id = str(existing["mask_id"])
+        mask_path = str(existing.get("path") or "")
+        updated = True
+    else:
+        mask_id = next_sqlite_entity_id("Mask", "masks", "mask_id")
+        mask_path = _mask_path(
+            case_id=request.case_id,
+            image_id=request.image_id,
+            mask_id=mask_id,
+            version=version,
+            label=label,
+            mask_format=mask_format,
+        )
+
     if mask_format == "json":
         _write_mask_json(mask_path, request, mask_id, label)
 
     record = {
         "mask_id": mask_id,
-        "annotation_id": request.annotation_id,
+        "annotation_id": (
+            request.annotation_id
+            if request.annotation_id is not None
+            else (existing.get("annotation_id") if existing else None)
+        ),
         "case_id": request.case_id,
         "image_id": request.image_id,
         "path": mask_path,
         "version": version,
         "label": label,
+        "label_id": request.label_id,
         "mask_format": mask_format,
-        "axis": _normalize_axis(request.axis) if mask_format == "json" else None,
+        "axis": axis,
         "slice_index": request.slice_index,
         "width": request.width,
         "height": request.height,
         "encoding": request.encoding,
+        "create_time": _now_iso() if not existing else existing.get("create_time") or _now_iso(),
+    }
+    upsert_record("masks", record)
+
+    if version == "v1_manual":
+        from backend.app.services.workflow_service import append_audit_log, mark_case_annotated
+
+        mark_case_annotated(
+            request.case_id,
+            user=user,
+            detail={"mask_id": mask_id, "version": version, "label": label, "updated": updated, "axis": axis},
+        )
+        append_audit_log(
+            action="update_mask" if updated else "create_mask",
+            user=user,
+            entity_type="mask",
+            entity_id=mask_id,
+            case_id=request.case_id,
+            detail={"axis": axis, "slice_index": request.slice_index, "label": label},
+        )
+
+    mask = MaskRecord(**record)
+    return SaveMaskResponse(success=True, mask_id=mask_id, path=mask_path, mask=mask, updated=updated)
+
+
+def update_mask(mask_id: str, request: UpdateMaskRequest, user: dict | None = None) -> SaveMaskResponse:
+    ensure_project_dirs()
+    masks = _load_masks()
+    source = next((item for item in masks if item.get("mask_id") == mask_id), None)
+    if source is None:
+        raise HTTPException(status_code=404, detail=f"Mask not found: {mask_id}")
+    if not (source.get("mask_format") == "json" or str(source.get("path") or "").endswith(".json")):
+        raise HTTPException(status_code=400, detail="Only JSON slice masks can be updated in place")
+
+    label = _normalize_label(request.label) if request.label else _normalize_label(str(source.get("label") or "label"))
+    axis = _normalize_axis(request.axis) if request.axis else _normalize_axis(str(source.get("axis") or "axial"))
+    slice_index = request.slice_index if request.slice_index is not None else source.get("slice_index")
+    width = request.width if request.width is not None else source.get("width")
+    height = request.height if request.height is not None else source.get("height")
+    encoding = request.encoding if request.encoding is not None else source.get("encoding") or "rle"
+    if slice_index is None or width is None or height is None:
+        raise HTTPException(status_code=400, detail="JSON mask update requires slice_index, width and height")
+    if request.mask is None:
+        content = _read_mask_json(str(source.get("path") or ""))
+        if not content or content.get("mask") is None:
+            raise HTTPException(status_code=400, detail="Mask update requires mask data")
+        mask_runs = content.get("mask")
+        points = request.points if request.points is not None else content.get("points") or []
+    else:
+        mask_runs = request.mask
+        points = request.points or []
+
+    save_request = SaveMaskRequest(
+        case_id=str(source.get("case_id")),
+        image_id=str(source.get("image_id")),
+        annotation_id=source.get("annotation_id"),
+        version=str(source.get("version") or "v1_manual"),
+        label=label,
+        mask_format="json",
+        axis=axis,
+        slice_index=int(slice_index),
+        width=int(width),
+        height=int(height),
+        label_id=request.label_id if request.label_id is not None else source.get("label_id"),
+        encoding=str(encoding),
+        mask=mask_runs,
+        points=points,
+        overwrite=False,
+    )
+    mask_path = str(source.get("path") or "")
+    _write_mask_json(mask_path, save_request, mask_id, label)
+    record = {
+        **source,
+        "label": label,
+        "label_id": save_request.label_id,
+        "axis": axis,
+        "slice_index": int(slice_index),
+        "width": int(width),
+        "height": int(height),
+        "encoding": str(encoding),
         "create_time": _now_iso(),
     }
     upsert_record("masks", record)
 
-    mask = MaskRecord(**record)
-    return SaveMaskResponse(success=True, mask_id=mask_id, path=mask_path, mask=mask)
+    from backend.app.services.workflow_service import append_audit_log, mark_case_annotated
+
+    mark_case_annotated(
+        str(source.get("case_id")),
+        user=user,
+        detail={"mask_id": mask_id, "updated": True, "axis": axis},
+    )
+    append_audit_log(
+        action="update_mask",
+        user=user,
+        entity_type="mask",
+        entity_id=mask_id,
+        case_id=str(source.get("case_id")),
+        detail={"axis": axis, "slice_index": slice_index, "label": label},
+    )
+    return SaveMaskResponse(
+        success=True,
+        mask_id=mask_id,
+        path=mask_path,
+        mask=MaskRecord(**record),
+        updated=True,
+    )
 
 
-def promote_mask(mask_id: str, target_version: str) -> SaveMaskResponse:
+def delete_mask(mask_id: str, user: dict | None = None) -> dict:
+    ensure_project_dirs()
+    masks = _load_masks()
+    source = next((item for item in masks if item.get("mask_id") == mask_id), None)
+    if source is None:
+        raise HTTPException(status_code=404, detail=f"Mask not found: {mask_id}")
+
+    path = PROJECT_ROOT / str(source.get("path") or "")
+    try:
+        path.relative_to(PROJECT_ROOT.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid mask path") from exc
+    if path.exists() and path.is_file():
+        path.unlink()
+
+    deleted = delete_record("masks", "mask_id", mask_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Mask not found: {mask_id}")
+
+    from backend.app.services.workflow_service import append_audit_log
+
+    append_audit_log(
+        action="delete_mask",
+        user=user,
+        entity_type="mask",
+        entity_id=mask_id,
+        case_id=str(source.get("case_id") or ""),
+        detail={"path": source.get("path"), "version": source.get("version"), "label": source.get("label")},
+    )
+    return {"success": True, "mask_id": mask_id, "message": "deleted"}
+
+
+def promote_mask(mask_id: str, target_version: str, user: dict | None = None) -> SaveMaskResponse:
     ensure_project_dirs()
     target_version = target_version.strip()
     if target_version not in PROMOTABLE_TARGET_VERSIONS:
@@ -1083,6 +1275,9 @@ def promote_mask(mask_id: str, target_version: str) -> SaveMaskResponse:
             status_code=400,
             detail=f"Unsupported target_version: {target_version}. Use one of {sorted(PROMOTABLE_TARGET_VERSIONS)}",
         )
+
+    if target_version == "final" and user and str(user.get("role")) == "annotator":
+        raise HTTPException(status_code=403, detail="Annotators cannot confirm final")
 
     masks = _load_masks()
     source = next((item for item in masks if item.get("mask_id") == mask_id), None)
@@ -1151,6 +1346,24 @@ def promote_mask(mask_id: str, target_version: str) -> SaveMaskResponse:
         "direction": source.get("direction"),
     }
     upsert_record("masks", record)
+
+    from backend.app.services.workflow_service import append_audit_log, finalize_case
+
+    append_audit_log(
+        action="promote_mask",
+        user=user,
+        entity_type="mask",
+        entity_id=new_mask_id,
+        case_id=str(source.get("case_id")),
+        detail={"from_mask": mask_id, "target_version": target_version},
+    )
+    if target_version == "final" and user:
+        finalize_case(
+            str(source.get("case_id")),
+            user,
+            detail={"mask_id": new_mask_id, "promoted_from": mask_id},
+        )
+
     mask = MaskRecord(**record)
     return SaveMaskResponse(success=True, mask_id=new_mask_id, path=new_path, mask=mask)
 
@@ -1176,11 +1389,19 @@ def get_mask_content(mask_id: str) -> dict[str, Any] | None:
 def list_masks_for_image(image_id: str) -> list[MaskRecord]:
     _image_record(image_id)
     masks = _load_masks()
-    return [
-        MaskRecord(**mask)
-        for mask in masks
-        if mask.get("image_id") == image_id or mask.get("image") == image_id
-    ]
+    result: list[MaskRecord] = []
+    for mask in masks:
+        if mask.get("image_id") != image_id and mask.get("image") != image_id:
+            continue
+        record = dict(mask)
+        if (record.get("mask_format") == "json" or str(record.get("path") or "").endswith(".json")) and not record.get("axis"):
+            content = _read_mask_json(str(record.get("path") or ""))
+            if content:
+                record["axis"] = content.get("axis") or "axial"
+                if record.get("slice_index") is None and content.get("slice_index") is not None:
+                    record["slice_index"] = content.get("slice_index")
+        result.append(MaskRecord(**{key: record.get(key) for key in MaskRecord.model_fields}))
+    return result
 
 
 def export_mask_nifti(request: ExportMaskNiftiRequest) -> ExportMaskNiftiResponse:
@@ -1606,6 +1827,31 @@ def _point_prompt_slices(
     return slices
 
 
+def _scribble_prompt_points(scribbles: list[dict[str, Any]], prompt_type: str) -> list[list[float]]:
+    output: list[list[float]] = []
+    target_type = prompt_type.strip().lower()
+    for scribble in scribbles or []:
+        if not isinstance(scribble, dict):
+            continue
+        if str(scribble.get("prompt_type") or "positive").strip().lower() != target_type:
+            continue
+        axis = _normalize_axis(str(scribble.get("axis") or "axial"))
+        slice_index = int(scribble.get("slice_index", 0))
+        for point in scribble.get("points") or []:
+            if not isinstance(point, dict):
+                continue
+            x = float(point.get("x", 0))
+            y = float(point.get("y", 0))
+            z = float(point.get("z", slice_index))
+            if axis == "axial":
+                output.append([x, y, z])
+            elif axis == "coronal":
+                output.append([x, z, y])
+            elif axis == "sagittal":
+                output.append([z, x, y])
+    return output
+
+
 def _connected_component_filter_volume(
     mask_volume: np.ndarray,
     seed_volume: np.ndarray | None,
@@ -2016,6 +2262,11 @@ def deepedit_refine(request: DeepEditRefineRequest) -> DeepEditRefineResponse:
     if response is not None:
         return response
 
+    positive_points = list(request.positive_points or [])
+    negative_points = list(request.negative_points or [])
+    positive_points.extend(_scribble_prompt_points(request.scribbles, "positive"))
+    negative_points.extend(_scribble_prompt_points(request.scribbles, "negative"))
+
     propagation = label_propagate(
         LabelPropagationRequest(
             case_id=request.case_id,
@@ -2033,8 +2284,8 @@ def deepedit_refine(request: DeepEditRefineRequest) -> DeepEditRefineResponse:
             connected_component_mode="seeded",
             connected_component_min_voxels=request.connected_component_min_voxels,
             connected_component_max_components=8,
-            positive_points=request.positive_points,
-            negative_points=request.negative_points,
+            positive_points=positive_points,
+            negative_points=negative_points,
         )
     )
     return DeepEditRefineResponse(

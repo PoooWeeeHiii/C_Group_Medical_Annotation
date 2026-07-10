@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.api import ai, cases, datasets, images, masks, upload, versions
+from backend.app.api import ai, auth, cases, datasets, images, masks, tasks, upload, versions
 from backend.app.core.config import PROJECT_ROOT, ensure_project_dirs
 from backend.app.services.sqlite_service import ensure_sqlite_ready
 
@@ -31,6 +31,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
+app.include_router(tasks.router)
 app.include_router(upload.router)
 app.include_router(cases.router)
 app.include_router(images.router)

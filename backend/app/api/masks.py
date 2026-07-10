@@ -1,8 +1,10 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from backend.app.deps import get_optional_user
 from backend.app.schemas.mask import (
     DeepEditRefineRequest,
     DeepEditRefineResponse,
+    DeleteMaskResponse,
     ExportMaskNiftiRequest,
     ExportMaskNiftiResponse,
     LabelPropagationRequest,
@@ -12,9 +14,11 @@ from backend.app.schemas.mask import (
     PromoteMaskRequest,
     SaveMaskRequest,
     SaveMaskResponse,
+    UpdateMaskRequest,
 )
 from backend.app.services.mask_service import (
     deepedit_refine,
+    delete_mask,
     export_mask_nifti,
     get_mask,
     get_mask_content,
@@ -26,6 +30,7 @@ from backend.app.services.mask_service import (
     list_masks_for_image,
     promote_mask,
     save_mask,
+    update_mask,
 )
 
 
@@ -33,8 +38,29 @@ router = APIRouter(prefix="/api", tags=["masks"])
 
 
 @router.post("/save_mask", response_model=SaveMaskResponse)
-def save_image_mask(request: SaveMaskRequest) -> SaveMaskResponse:
-    return save_mask(request)
+def save_image_mask(
+    request: SaveMaskRequest,
+    user: dict | None = Depends(get_optional_user),
+) -> SaveMaskResponse:
+    return save_mask(request, user=user)
+
+
+@router.put("/mask/{mask_id}", response_model=SaveMaskResponse)
+def update_image_mask(
+    mask_id: str,
+    request: UpdateMaskRequest,
+    user: dict | None = Depends(get_optional_user),
+) -> SaveMaskResponse:
+    return update_mask(mask_id, request, user=user)
+
+
+@router.delete("/mask/{mask_id}", response_model=DeleteMaskResponse)
+def remove_image_mask(
+    mask_id: str,
+    user: dict | None = Depends(get_optional_user),
+) -> DeleteMaskResponse:
+    result = delete_mask(mask_id, user=user)
+    return DeleteMaskResponse(**result)
 
 
 @router.post("/export_mask_nifti", response_model=ExportMaskNiftiResponse)
@@ -53,8 +79,12 @@ def refine_image_mask_deepedit(request: DeepEditRefineRequest) -> DeepEditRefine
 
 
 @router.post("/mask/{mask_id}/promote", response_model=SaveMaskResponse)
-def promote_image_mask(mask_id: str, request: PromoteMaskRequest) -> SaveMaskResponse:
-    return promote_mask(mask_id=mask_id, target_version=request.target_version)
+def promote_image_mask(
+    mask_id: str,
+    request: PromoteMaskRequest,
+    user: dict | None = Depends(get_optional_user),
+) -> SaveMaskResponse:
+    return promote_mask(mask_id=mask_id, target_version=request.target_version, user=user)
 
 
 @router.get("/mask/{mask_id}", response_model=MaskDetailResponse)

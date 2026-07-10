@@ -1,5 +1,9 @@
 const state = {
   view: "dashboard",
+  authToken: localStorage.getItem("label_platform_token") || "",
+  currentUser: null,
+  users: [],
+  tasks: [],
   cases: [],
   caseDetails: {},
   masksByImage: {},
@@ -28,7 +32,6 @@ const state = {
   annotationPolygonPreviewPoint: null,
   annotationIgnoreNextClickUntil: 0,
   annotationPreviewRect: null,
-  deepEditPromptMode: "positive",
   refineParams: {
     randomWalkerBeta: 90,
     roiMargin: 24,
@@ -39,6 +42,7 @@ const state = {
   magicWandMaxPixels: 180000,
   sliceMasks: {},
   pointAnnotations: {},
+  negativeScribbles: {},
   undoStack: [],
   redoStack: [],
   volumeViewMode: "2d",
@@ -60,12 +64,20 @@ const titles = {
   settings: "系统设置",
 };
 
+const roleText = {
+  annotator: "标注员",
+  reviewer: "审核员",
+  admin: "管理员",
+  ai_service: "AI服务",
+};
+
 const labels = [
   ["#1c2938", "0 背景"],
   ["#00e5b0", "1 肝脏"],
   ["#38a3ff", "2 肾脏"],
   ["#ffb020", "3 肺部"],
   ["#ff4d4f", "4 肿瘤"],
+  ["#b66dff", "5 脾脏"],
 ];
 
 const statusText = {
@@ -79,6 +91,7 @@ const statusText = {
 const annotationTools = [
   ["brush", "画笔"],
   ["erase", "橡皮擦"],
+  ["smartErase", "智能橡皮擦"],
   ["polygon", "多边形"],
   ["rectangle", "矩形ROI"],
   ["point", "点标注"],
@@ -182,10 +195,66 @@ function setView(view) {
   render();
 }
 
+function authHeaders(extra = {}) {
+  const headers = { ...extra };
+  if (state.authToken) headers.Authorization = `Bearer ${state.authToken}`;
+  return headers;
+}
+
+function currentRole() {
+  return state.currentUser?.role || null;
+}
+
+function canReview() {
+  return currentRole() === "reviewer" || currentRole() === "admin";
+}
+
+function canAnnotate() {
+  return currentRole() === "annotator" || currentRole() === "admin" || currentRole() === "reviewer";
+}
+
+function canConfirmFinal() {
+  return canReview();
+}
+
+function canManageTasks() {
+  return canReview();
+}
+
+function setAuthSession(token, user) {
+  state.authToken = token || "";
+  state.currentUser = user || null;
+  if (token) localStorage.setItem("label_platform_token", token);
+  else localStorage.removeItem("label_platform_token");
+  updateAuthChrome();
+}
+
+function clearAuthSession() {
+  setAuthSession("", null);
+  state.users = [];
+  state.tasks = [];
+}
+
+function updateAuthChrome() {
+  const userPill = $("#userPill");
+  const loginButton = $("#loginButton");
+  const logoutButton = $("#logoutButton");
+  if (userPill) {
+    userPill.textContent = state.currentUser
+      ? `${state.currentUser.username} · ${roleText[state.currentUser.role] || state.currentUser.role}`
+      : "未登录";
+  }
+  if (loginButton) loginButton.classList.toggle("hidden", Boolean(state.currentUser));
+  if (logoutButton) logoutButton.classList.toggle("hidden", !state.currentUser);
+  const overlay = $("#loginOverlay");
+  if (overlay) overlay.classList.toggle("hidden", Boolean(state.currentUser));
+}
+
 async function apiGet(path) {
-  const response = await fetch(apiUrl(path));
+  const response = await fetch(apiUrl(path), { headers: authHeaders() });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401) clearAuthSession();
     const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || {});
     throw new Error(detail || `${path} 请求失败：${response.status}`);
   }
@@ -195,11 +264,41 @@ async function apiGet(path) {
 async function apiPost(path, payload) {
   const response = await fetch(apiUrl(path), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload ?? {}),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401) clearAuthSession();
+    const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || {});
+    throw new Error(detail || `${path} 请求失败：${response.status}`);
+  }
+  return data;
+}
+
+async function apiDelete(path) {
+  const response = await fetch(apiUrl(path), {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401) clearAuthSession();
+    const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || {});
+    throw new Error(detail || `${path} 请求失败：${response.status}`);
+  }
+  return data;
+}
+
+async function apiPut(path, payload) {
+  const response = await fetch(apiUrl(path), {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload ?? {}),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401) clearAuthSession();
     const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || {});
     throw new Error(detail || `${path} 请求失败：${response.status}`);
   }
@@ -235,11 +334,12 @@ async function loadVolumeMeta(imageId) {
   if (!imageId) return null;
   if (!state.volumeMeta[imageId]) {
     state.volumeMeta[imageId] = await apiGet(`/api/image/${imageId}/volume`);
-    state.activeAxis = "axial";
+    if (!sliceAxes[state.activeAxis]) state.activeAxis = "axial";
     const restoredSlice = state.restoredMaskSlices[imageId];
-    const axis = "axial";
+    const axis = sliceAxes[restoredSlice?.axis] ? restoredSlice.axis : state.activeAxis || "axial";
+    state.activeAxis = axis;
     const maxSlice = Math.max(axisSliceCount(state.volumeMeta[imageId], axis) - 1, 0);
-    if (restoredSlice && (!restoredSlice.axis || restoredSlice.axis === "axial")) {
+    if (restoredSlice && (!restoredSlice.axis || restoredSlice.axis === axis)) {
       setCurrentSliceIndex(Math.min(restoredSlice.sliceIndex ?? Math.floor(maxSlice / 2), maxSlice), axis);
     } else {
       setCurrentSliceIndex(Math.min(Math.floor(maxSlice / 2), maxSlice), axis);
@@ -296,6 +396,184 @@ async function refreshCases() {
   }
 }
 
+async function restoreSession() {
+  if (!state.authToken) {
+    updateAuthChrome();
+    return false;
+  }
+  try {
+    const data = await apiGet("/api/me");
+    state.currentUser = data.user;
+    updateAuthChrome();
+    if (canManageTasks()) {
+      try {
+        const users = await apiGet("/api/users");
+        state.users = users.items || [];
+      } catch {
+        state.users = [];
+      }
+    }
+    await refreshTasks();
+    return true;
+  } catch {
+    clearAuthSession();
+    updateAuthChrome();
+    return false;
+  }
+}
+
+async function refreshTasks() {
+  if (!state.currentUser) {
+    state.tasks = [];
+    return [];
+  }
+  try {
+    const data = await apiGet("/api/tasks");
+    state.tasks = data.items || [];
+  } catch {
+    state.tasks = [];
+  }
+  return state.tasks;
+}
+
+async function handleLogin(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const username = form.username.value.trim();
+  const password = form.password.value;
+  const button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  try {
+    const data = await apiPost("/api/auth/login", { username, password });
+    setAuthSession(data.access_token, data.user);
+    if (canManageTasks()) {
+      const users = await apiGet("/api/users");
+      state.users = users.items || [];
+    }
+    await refreshTasks();
+    showToast(`已登录：${data.user.username}（${roleText[data.user.role] || data.user.role}）`);
+    render();
+  } catch (error) {
+    showToast(error.message || "登录失败");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function handleLogout() {
+  clearAuthSession();
+  showToast("已退出登录");
+  render();
+}
+
+async function submitCaseForReview(event) {
+  const button = event.currentTarget;
+  const item = activeCase();
+  if (!item) {
+    showToast("请先选择病例");
+    return;
+  }
+  if (!state.currentUser) {
+    showToast("请先登录");
+    return;
+  }
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "提交中...";
+  try {
+    const data = await apiPost(`/api/case/${item.case_id}/submit`, { note: "submitted from annotation workbench" });
+    await refreshCases();
+    await refreshTasks();
+    showToast(`已提交审核：${data.case_id} → ${data.status}`);
+    render();
+  } catch (error) {
+    showToast(error.message || "提交审核失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+async function approveCaseReview(event) {
+  const button = event.currentTarget;
+  const item = activeCase();
+  if (!item) {
+    showToast("请先选择病例");
+    return;
+  }
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "通过中...";
+  try {
+    const data = await apiPost(`/api/case/${item.case_id}/approve`, { note: "approved" });
+    await refreshCases();
+    await refreshTasks();
+    showToast(`审核通过：${data.case_id} → ${data.status}`);
+    render();
+  } catch (error) {
+    showToast(error.message || "审核通过失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+async function rejectCaseReview(event) {
+  const button = event.currentTarget;
+  const item = activeCase();
+  if (!item) {
+    showToast("请先选择病例");
+    return;
+  }
+  const note = window.prompt("请输入驳回原因", "需要继续修正标注") || "rejected";
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "驳回中...";
+  try {
+    const data = await apiPost(`/api/case/${item.case_id}/reject`, { note });
+    await refreshCases();
+    await refreshTasks();
+    showToast(`已驳回：${data.case_id} → ${data.status}`);
+    render();
+  } catch (error) {
+    showToast(error.message || "驳回失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+async function createTaskAssignment(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  if (!canManageTasks()) {
+    showToast("仅审核员/管理员可分配任务");
+    return;
+  }
+  const caseId = form.case_id.value;
+  const assigneeId = Number(form.assignee_id.value);
+  const deadline = form.deadline.value || null;
+  const note = form.note.value.trim() || null;
+  const button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  try {
+    await apiPost("/api/tasks", {
+      case_id: caseId,
+      assignee_id: assigneeId,
+      deadline,
+      note,
+    });
+    await refreshTasks();
+    showToast("任务已分配");
+    form.reset();
+    render();
+  } catch (error) {
+    showToast(error.message || "任务分配失败");
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function uploadCase(event) {
   event.preventDefault();
   const form = event.currentTarget;
@@ -315,7 +593,7 @@ async function uploadCase(event) {
   button.disabled = true;
   button.textContent = "上传中...";
   try {
-    const response = await fetch(apiUrl("/api/upload"), { method: "POST", body });
+    const response = await fetch(apiUrl("/api/upload"), { method: "POST", body, headers: authHeaders() });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "上传失败");
     showToast(`导入成功：${data.case_id} / ${data.image_id}`);
@@ -349,13 +627,74 @@ async function saveCurrentMask(event) {
     await loadImageMasks(image.image_id, { force: true });
     await loadCaseVersions(item.case_id, { force: true });
     await refreshCases();
-    showToast(`已保存 ${saved.length} 个切片 Mask`);
+    const updatedCount = saved.filter((item) => item.updated).length;
+    const createdCount = saved.length - updatedCount;
+    showToast(`已保存 ${saved.length} 个切片 Mask（新建 ${createdCount} / 覆盖 ${updatedCount}）`);
     render();
   } catch (error) {
     showToast(error.message || "Mask 保存失败");
   } finally {
     button.disabled = false;
     button.textContent = previousText;
+  }
+}
+
+async function loadMaskForEditing(maskId) {
+  const image = activeImage();
+  if (!image || !maskId) return;
+  try {
+    const detail = await apiGet(`/api/mask/${maskId}`);
+    const content = detail.content;
+    const mask = detail.mask;
+    if (!content || content.encoding !== "rle") {
+      throw new Error("仅支持加载 JSON RLE 切片 Mask");
+    }
+    const width = Number(content.width || 0);
+    const height = Number(content.height || 0);
+    const sliceIndex = Number(content.slice_index ?? mask.slice_index ?? 0);
+    const axis = sliceAxes[content.axis || mask.axis] ? (content.axis || mask.axis) : "axial";
+    if (!width || !height) throw new Error("Mask 尺寸无效");
+
+    state.volumeViewMode = "2d";
+    state.activeAxis = axis;
+    setCurrentSliceIndex(sliceIndex, axis);
+    if (!state.sliceMasks[image.image_id]) state.sliceMasks[image.image_id] = {};
+    const sliceKey = sliceStorageKey(axis, sliceIndex);
+    state.sliceMasks[image.image_id][sliceKey] = {
+      width,
+      height,
+      data: decodeMaskRle(content.mask, width, height),
+      source: "loaded_mask",
+      maskId,
+    };
+    if (Array.isArray(content.points)) {
+      if (!state.pointAnnotations[image.image_id]) state.pointAnnotations[image.image_id] = {};
+      state.pointAnnotations[image.image_id][sliceKey] = content.points.map((point) => ({ ...point }));
+    }
+    state.loadedMaskContents[maskId] = true;
+    state.restoredMaskSlices[image.image_id] = { axis, sliceIndex };
+    showToast(`已加载 ${maskId} 到 ${axisLabel(axis)} 第 ${sliceIndex + 1} 层`);
+    render();
+  } catch (error) {
+    showToast(error.message || "加载 Mask 失败");
+  }
+}
+
+async function deleteMaskRecord(maskId) {
+  const image = activeImage();
+  const item = activeCase();
+  if (!maskId) return;
+  if (!window.confirm(`确认删除 ${maskId}？此操作不可恢复。`)) return;
+  try {
+    await apiDelete(`/api/mask/${maskId}`);
+    delete state.loadedMaskContents[maskId];
+    if (image) await loadImageMasks(image.image_id, { force: true });
+    if (item) await loadCaseVersions(item.case_id, { force: true });
+    await refreshCases();
+    showToast(`已删除 ${maskId}`);
+    render();
+  } catch (error) {
+    showToast(error.message || "删除 Mask 失败");
   }
 }
 
@@ -457,13 +796,17 @@ async function runAIPredict(event) {
     const data = await apiPost("/api/ai/predict", {
       case_id: item.case_id,
       image_id: image.image_id,
-      model_id: "ModelPlaceholder",
-      label: "label",
+      model_id: "spleen_nnunetv2_task506",
+      label: "spleen",
     });
     await loadImageMasks(image.image_id, { force: true });
     await loadCaseVersions(item.case_id, { force: true });
     await refreshCases();
-    showToast(`AI 预测完成：${data.mask_id}`);
+    state.active3DMaskId = data.mask_id;
+    state.volumeViewMode = "3d";
+    state.volumeLoadingKey = null;
+    state.propagatedSliceLoads = {};
+    showToast(`脾脏 AI 预测完成：${data.mask_id}`);
     render();
   } catch (error) {
     showToast(error.message || "AI 预测失败");
@@ -517,16 +860,36 @@ async function saveCurrentSliceIfAnnotated(item, image) {
 function deepEditPromptPayload(image) {
   const positive = [];
   const negative = [];
+  const seenNegative = new Set();
+  const pushNegative = (x, y, z) => {
+    const key = `${Math.round(x)}:${Math.round(y)}:${Math.round(z)}`;
+    if (seenNegative.has(key)) return;
+    seenNegative.add(key);
+    negative.push([Number(x) || 0, Number(y) || 0, Number(z) || 0]);
+  };
   const imagePoints = state.pointAnnotations[image.image_id] || {};
   for (const [sliceKey, points] of Object.entries(imagePoints)) {
     const { axis, sliceIndex } = parseSliceStorageKey(sliceKey);
     if (axis !== "axial") continue;
     for (const point of points || []) {
-      const target = (point.promptType || "positive") === "negative" ? negative : positive;
-      target.push([Number(point.x) || 0, Number(point.y) || 0, Number(point.sliceIndex ?? sliceIndex) || 0]);
+      if ((point.promptType || "positive") === "negative") {
+        pushNegative(point.x, point.y, point.sliceIndex ?? sliceIndex);
+      } else {
+        positive.push([Number(point.x) || 0, Number(point.y) || 0, Number(point.sliceIndex ?? sliceIndex) || 0]);
+      }
     }
   }
-  return { positive, negative };
+  // Smart eraser regions are also treated as DeepEdit negative clicks.
+  const imageNegativeScribbles = state.negativeScribbles?.[image.image_id] || {};
+  for (const [sliceKey, points] of Object.entries(imageNegativeScribbles)) {
+    const { axis, sliceIndex } = parseSliceStorageKey(sliceKey);
+    if (axis !== "axial" || !Array.isArray(points)) continue;
+    for (const point of points) {
+      if (point?.asNegativePoint === false) continue;
+      pushNegative(point.x, point.y, point.z ?? point.sliceIndex ?? sliceIndex);
+    }
+  }
+  return { positive, negative: negative.slice(-300) };
 }
 
 function deepEditScribblePayload(image) {
@@ -545,6 +908,21 @@ function deepEditScribblePayload(image) {
       label_id: state.annotationLabelId,
       foreground_pixels: foregroundPixels,
       encoding: "saved_v1_manual_rle",
+      prompt_type: "positive",
+    });
+  }
+  const imageNegativeScribbles = state.negativeScribbles?.[image.image_id] || {};
+  for (const [sliceKey, points] of Object.entries(imageNegativeScribbles)) {
+    const { axis, sliceIndex } = parseSliceStorageKey(sliceKey);
+    if (axis !== "axial" || !Array.isArray(points) || !points.length) continue;
+    scribbles.push({
+      axis,
+      slice_index: sliceIndex,
+      label_id: 0,
+      point_count: points.length,
+      points: points.slice(-600),
+      prompt_type: "negative",
+      encoding: "smart_eraser_points",
     });
   }
   return scribbles;
@@ -554,7 +932,8 @@ function confirmedSliceIndices(image) {
   const values = new Set([currentSliceIndex()]);
   const imageMasks = state.sliceMasks[image.image_id] || {};
   const imagePoints = state.pointAnnotations[image.image_id] || {};
-  for (const key of [...Object.keys(imageMasks), ...Object.keys(imagePoints)]) {
+  const imageNegativeScribbles = state.negativeScribbles?.[image.image_id] || {};
+  for (const key of [...Object.keys(imageMasks), ...Object.keys(imagePoints), ...Object.keys(imageNegativeScribbles)]) {
     const { axis, sliceIndex } = parseSliceStorageKey(key);
     if (axis === "axial") values.add(sliceIndex);
   }
@@ -599,7 +978,7 @@ async function runSmart3DRefine(event) {
         type: "deepedit",
         prompt_source: "2d_axial_canvas",
         current_tool: state.annotationTool,
-        prompt_mode: state.deepEditPromptMode,
+        prompt_mode: "brush_positive_smart_eraser_negative",
       },
       confirmed_slices: confirmedSliceIndices(image),
     });
@@ -850,6 +1229,25 @@ function renderCaseRows() {
 }
 
 function renderCases() {
+  const userOptions = (state.users || [])
+    .filter((user) => user.role === "annotator" || user.role === "admin")
+    .map((user) => `<option value="${user.id}">${escapeHtml(user.username)}（${roleText[user.role] || user.role}）</option>`)
+    .join("");
+  const caseOptions = state.cases
+    .map((item) => `<option value="${escapeHtml(item.case_id)}">${escapeHtml(item.case_id)} · ${escapeHtml(statusText[item.status] || item.status)}</option>`)
+    .join("");
+  const taskRows = state.tasks.length
+    ? state.tasks.map((task) => `
+      <tr>
+        <td><strong>${escapeHtml(task.task_id)}</strong></td>
+        <td>${escapeHtml(task.case_id)}</td>
+        <td>${escapeHtml(task.assignee_username || task.assignee_id)}</td>
+        <td>${escapeHtml(task.status)}</td>
+        <td>${escapeHtml(task.deadline || "-")}</td>
+        <td>${escapeHtml(task.note || "-")}</td>
+      </tr>
+    `).join("")
+    : `<tr><td colspan="6"><div class="placeholder">暂无任务。审核员/管理员可在下方分配。</div></td></tr>`;
   return `
     <section class="panel">
       <form id="uploadForm" class="toolbar-row">
@@ -865,6 +1263,24 @@ function renderCases() {
         <thead><tr><th>病例ID</th><th>患者编号</th><th>影像类型</th><th>图像数</th><th>状态</th><th>操作</th></tr></thead>
         <tbody>${renderCaseRows()}</tbody>
       </table>
+    </section>
+    <section class="panel" style="margin-top:18px">
+      <h2>标注任务</h2>
+      ${canManageTasks() ? `
+        <form id="taskForm" class="toolbar-row" style="margin-bottom:14px">
+          <div class="field"><label>病例</label><select name="case_id">${caseOptions || "<option value=''>暂无病例</option>"}</select></div>
+          <div class="field"><label>指派给</label><select name="assignee_id">${userOptions || "<option value=''>暂无用户</option>"}</select></div>
+          <div class="field"><label>截止日期</label><input name="deadline" type="date" /></div>
+          <div class="field"><label>备注</label><input name="note" placeholder="请完成脾脏标注" /></div>
+          <button class="primary-button" type="submit">分配任务</button>
+        </form>
+      ` : `<div class="placeholder compact" style="margin-bottom:12px">当前角色仅可查看分配给自己的任务。</div>`}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>任务ID</th><th>病例</th><th>执行人</th><th>状态</th><th>截止</th><th>备注</th></tr></thead>
+          <tbody>${taskRows}</tbody>
+        </table>
+      </div>
     </section>
   `;
 }
@@ -906,12 +1322,13 @@ function latestMaskByVersion(masks, version) {
 
 function latest3DMask(masks) {
   const priority = { final: 5, v3_fusion: 4, v3_preview: 3, v2_ai: 2, v1_manual: 1 };
-  const propagated = latestPropagatedMask(masks);
+  // Always honor the explicitly selected mask (e.g. after AI predict -> v2_ai).
   const preferred = [...(masks || [])].find((mask) => (
     mask.mask_id === state.active3DMaskId &&
     (mask.mask_format === "nii.gz" || String(mask.path || "").endsWith(".nii.gz"))
   ));
-  if (preferred && (priority[preferred.version] || 0) >= 3) return preferred;
+  if (preferred) return preferred;
+  const propagated = latestPropagatedMask(masks);
   if (propagated) return propagated;
   return [...(masks || [])]
     .filter((mask) => mask.mask_format === "nii.gz" || String(mask.path || "").endsWith(".nii.gz"))
@@ -934,6 +1351,15 @@ function latestPropagatedMask(masks) {
       if (versionScore !== 0) return versionScore;
       return String(b.create_time || "").localeCompare(String(a.create_time || ""));
     })[0] || null;
+}
+
+function latestOverlay3DMask(masks) {
+  const preferred = [...(masks || [])].find((mask) => (
+    mask.mask_id === state.active3DMaskId &&
+    (mask.mask_format === "nii.gz" || String(mask.path || "").endsWith(".nii.gz"))
+  ));
+  if (preferred) return preferred;
+  return latestPropagatedMask(masks) || latest3DMask(masks);
 }
 
 function formatInteger(value) {
@@ -1014,15 +1440,26 @@ function renderMaskList(masks) {
   if (!masks.length) {
     return `<div class="placeholder compact">暂无 Mask。点击“保存 Mask”生成 v1_manual 记录。</div>`;
   }
+  const sorted = [...masks].sort((a, b) => String(b.create_time || "").localeCompare(String(a.create_time || "")));
   return `
     <div class="mask-record-list">
-      ${masks.map((mask) => `
+      ${sorted.map((mask) => {
+        const isJson = mask.mask_format === "json" || String(mask.path || "").endsWith(".json");
+        const axis = mask.axis || "axial";
+        const sliceText = mask.slice_index == null ? "-" : `${Number(mask.slice_index) + 1}`;
+        return `
         <article class="mask-record">
           <div><strong>${escapeHtml(mask.mask_id)}</strong><span>${escapeHtml(mask.version)}</span></div>
           <div><span>标签</span><b>${escapeHtml(mask.label)}</b></div>
+          <div><span>平面</span><b>${escapeHtml(axis)} / ${escapeHtml(sliceText)}</b></div>
           <code>${escapeHtml(mask.path)}</code>
+          <div class="mask-record-actions">
+            ${isJson ? `<button class="ghost-button" data-load-mask="${escapeHtml(mask.mask_id)}">加载编辑</button>` : ""}
+            <button class="danger-button" data-delete-mask="${escapeHtml(mask.mask_id)}">删除</button>
+          </div>
         </article>
-      `).join("")}
+      `;
+      }).join("")}
     </div>
   `;
 }
@@ -1075,15 +1512,11 @@ function renderMagicWandControls() {
   `;
 }
 
-function renderDeepEditControls() {
+function renderSmartRefineHint() {
   return `
     <div class="deepedit-controls">
-      <span>DeepEdit提示</span>
-      <div class="segmented-control">
-        <button class="${state.deepEditPromptMode === "positive" ? "active" : ""}" data-deepedit-prompt="positive" type="button">正点</button>
-        <button class="${state.deepEditPromptMode === "negative" ? "active" : ""}" data-deepedit-prompt="negative" type="button">负点</button>
-      </div>
-      <small>点标注会作为神经网络交互提示；画笔/多边形作为 scribble mask。</small>
+      <span>智能修正提示</span>
+      <small>画笔/多边形/矩形 = 正向标注；智能橡皮擦点击相似区域自动擦除，并同时记为 DeepEdit 负点。点击“智能3D传播修正”后会一起更新 3D Mask。</small>
     </div>
   `;
 }
@@ -1133,7 +1566,15 @@ function render2DViewer(item, image, volume, activeSlice, sliceCount, maxSlice, 
         ${image ? `<canvas id="annotationCanvas" class="annotation-canvas" aria-label="标注画布"></canvas>` : ""}
         <div class="coordinate" id="sliceCoordinate">${axisCoordinateName(axis)}: ${activeSlice + 1} / ${sliceCount}</div>
       </div>
-      <div class="slider-row fixed-axis-row"><span>标注平面</span><div class="fixed-axis-pill">轴位 Axial</div><strong>Z</strong></div>
+      <div class="slider-row">
+        <span>标注平面</span>
+        <select id="axisSelect" aria-label="选择标注平面">
+          <option value="axial" ${axis === "axial" ? "selected" : ""}>轴位 Axial</option>
+          <option value="coronal" ${axis === "coronal" ? "selected" : ""}>冠状位 Coronal</option>
+          <option value="sagittal" ${axis === "sagittal" ? "selected" : ""}>矢状位 Sagittal</option>
+        </select>
+        <strong id="axisValue">${axisCoordinateName(axis).toUpperCase()}</strong>
+      </div>
       <div class="slider-row"><span>切片</span><input id="sliceSlider" type="range" min="0" max="${maxSlice}" value="${activeSlice}" /><strong id="sliceValue">${activeSlice + 1}</strong></div>
       <div class="slider-row"><span>透明度</span><input type="range" min="0" max="100" value="54" /><strong>54%</strong></div>
       <div class="slider-row"><span>窗宽窗位</span><select id="windowSelect" aria-label="选择CT窗宽窗位"><option value="auto">自动</option><option value="lung">肺窗</option><option value="soft">软组织</option><option value="bone">骨窗</option></select><strong id="windowValue">自动</strong></div>
@@ -1209,7 +1650,6 @@ function render3DViewer(item, image, volume, masks = []) {
 }
 
 function renderAnnotation() {
-  state.activeAxis = "axial";
   const item = activeCase();
   const image = activeImage();
   const volume = image ? state.volumeMeta[image.image_id] : null;
@@ -1250,16 +1690,18 @@ function renderAnnotation() {
         <div class="tool-grid">${renderToolButtons()}</div>
         <div class="annotation-state-line"><span>当前工具：<strong id="annotationToolLabel">${annotationToolLabel()}</strong></span><span>当前 label：<strong>${escapeHtml(state.annotationLabel)} #${state.annotationLabelId}</strong></span><span>智能阈值：<strong>HU ± ${state.magicWandThreshold}</strong></span><span>当前切片：<strong id="annotationMaskStats">0 像素</strong></span></div>
         ${renderMagicWandControls()}
-        ${renderDeepEditControls()}
+        ${renderSmartRefineHint()}
         ${renderRefineParamControls()}
         <div class="grid action-stack" style="margin-top:18px">
-          <button class="primary-button" data-save-mask ${image ? "" : "disabled"}>保存 Mask</button>
-          <button class="ghost-button" data-smart-3d-refine ${image ? "" : "disabled"}>智能3D传播修正</button>
-          <button class="ghost-button" data-confirm-fusion ${previewMask ? "" : "disabled"}>确认 v3_fusion</button>
-          <button class="ghost-button" data-final-mask ${previewMask || fusionMask ? "" : "disabled"}>确认 final</button>
-          <button class="ghost-button" data-export-mask-nifti ${image ? "" : "disabled"}>导出 3D Mask</button>
+          <button class="primary-button" data-save-mask ${image && canAnnotate() ? "" : "disabled"}>保存 Mask</button>
+          <button class="ghost-button" data-submit-case ${image && (currentRole() === "annotator" || currentRole() === "admin") ? "" : "disabled"}>提交审核</button>
+          <button class="ghost-button" data-smart-3d-refine ${image && canAnnotate() ? "" : "disabled"}>智能3D传播修正</button>
+          <button class="ghost-button" data-confirm-fusion ${previewMask && canAnnotate() ? "" : "disabled"}>确认 v3_fusion</button>
+          <button class="ghost-button" data-final-mask ${(previewMask || fusionMask) && canConfirmFinal() ? "" : "disabled"}>确认 final</button>
+          <button class="ghost-button" data-approve-case ${item && canReview() ? "" : "disabled"}>审核通过</button>
+          <button class="danger-button" data-reject-case ${item && canReview() ? "" : "disabled"}>驳回</button>
+          <button class="ghost-button" data-export-mask-nifti ${image && canAnnotate() ? "" : "disabled"}>导出 3D Mask</button>
           <button class="ghost-button" data-start-3d-render ${image ? "" : "disabled"}>导出 3D 图像</button>
-          <button class="danger-button">驳回</button>
         </div>
         <h3 style="margin-top:22px">当前 Mask</h3>
         ${renderMaskList(masks)}
@@ -1366,9 +1808,9 @@ function updateSliceViewer(image, meta) {
   $("#sliceValue").textContent = String(sliceNumber);
   $("#sliceCoordinate").textContent = `${axisCoordinateName(axis)}: ${sliceNumber} / ${sliceCount}`;
   $("#sliceSource").textContent = `切片接口：/api/image/${image.image_id}/slice/${axis}/${sliceIndex}.png`;
-  const propagatedMask = latestPropagatedMask(state.masksByImage[image.image_id] || []);
-  if (propagatedMask) {
-    $("#sliceSource").textContent += ` · 传播Mask：${propagatedMask.mask_id} / ${propagatedMask.version}`;
+  const overlayMask = latestOverlay3DMask(state.masksByImage[image.image_id] || []);
+  if (overlayMask) {
+    $("#sliceSource").textContent += ` · 叠加Mask：${overlayMask.mask_id} / ${overlayMask.version}`;
   }
   $("#viewerInfo").textContent = `${image.image_id} | ${meta.width} × ${meta.height} × ${meta.slice_count}`;
   $("#volumeSize").textContent = `${meta.width} × ${meta.height} × ${meta.slice_count}`;
@@ -1500,16 +1942,23 @@ function updateAnnotationMaskStats() {
   for (const value of mask.data) {
     if (value) count += 1;
   }
-  const sourceText = mask.source === "label_propagation" ? ` / ${mask.maskId}` : "";
+  const sourceText = mask.source === "label_propagation" || mask.source === "ai_predict"
+    ? ` / ${mask.maskId}`
+    : "";
   stats.textContent = `${count} 像素 / ${points.length} 点${sourceText}`;
 }
 
 function clearAnnotationCanvas() {
   pushUndoSnapshot();
+  const image = activeImage();
+  const sliceKey = sliceStorageKey(activeAxis(), currentSliceIndex());
   const mask = currentSliceMask({ create: false });
   if (mask) mask.data.fill(0);
   const points = currentSlicePoints({ create: false });
   if (points) points.length = 0;
+  if (image && state.negativeScribbles[image.image_id]) {
+    state.negativeScribbles[image.image_id][sliceKey] = [];
+  }
   renderCurrentSliceMask();
   state.annotationDrawing = false;
   state.annotationLastPoint = null;
@@ -1814,35 +2263,35 @@ async function restorePropagatedSliceMask(imageId) {
   const image = activeImage();
   const canvas = $("#annotationCanvas");
   if (!image || image.image_id !== imageId || !canvas || !canvas.width || !canvas.height) return;
-  const propagatedMask = latestPropagatedMask(state.masksByImage[imageId] || []);
-  if (!propagatedMask) return;
+  const overlayMask = latestOverlay3DMask(state.masksByImage[imageId] || []);
+  if (!overlayMask) return;
 
   const axis = activeAxis();
   const sliceIndex = currentSliceIndex(axis);
   const sliceKey = sliceStorageKey(axis, sliceIndex);
-  const loadKey = `${imageId}:${propagatedMask.mask_id}:${axis}:${sliceIndex}`;
+  const loadKey = `${imageId}:${overlayMask.mask_id}:${axis}:${sliceIndex}`;
   if (state.propagatedSliceLoads[loadKey]) {
     renderCurrentSliceMask();
     return;
   }
 
   try {
-    const data = await apiGet(`/api/mask/${propagatedMask.mask_id}/slice/${axis}/${sliceIndex}`);
+    const data = await apiGet(`/api/mask/${overlayMask.mask_id}/slice/${axis}/${sliceIndex}`);
     if (data.width !== canvas.width || data.height !== canvas.height) {
-      throw new Error(`传播结果尺寸不匹配：${data.width}×${data.height} / ${canvas.width}×${canvas.height}`);
+      throw new Error(`叠加结果尺寸不匹配：${data.width}×${data.height} / ${canvas.width}×${canvas.height}`);
     }
     if (!state.sliceMasks[imageId]) state.sliceMasks[imageId] = {};
     state.sliceMasks[imageId][sliceKey] = {
       width: data.width,
       height: data.height,
       data: decodeMaskRle(data.mask, data.width, data.height),
-      source: "label_propagation",
-      maskId: propagatedMask.mask_id,
+      source: overlayMask.version === "v2_ai" ? "ai_predict" : "label_propagation",
+      maskId: overlayMask.mask_id,
     };
     state.propagatedSliceLoads[loadKey] = true;
     renderCurrentSliceMask();
   } catch (error) {
-    console.warn(`传播结果切片加载失败：${propagatedMask.mask_id} / ${sliceIndex}`, error);
+    console.warn(`叠加结果切片加载失败：${overlayMask.mask_id} / ${sliceIndex}`, error);
   }
 }
 
@@ -1852,6 +2301,7 @@ function currentSliceSnapshot() {
   if (!image || !canvas || !canvas.width || !canvas.height) return null;
   const mask = currentSliceMask({ create: false });
   const points = currentSlicePoints({ create: false }) || [];
+  const negativePoints = state.negativeScribbles[image.image_id]?.[sliceStorageKey(activeAxis(), currentSliceIndex())] || [];
   return {
     imageId: image.image_id,
     axis: activeAxis(),
@@ -1860,6 +2310,7 @@ function currentSliceSnapshot() {
     height: canvas.height,
     data: mask ? new Uint8Array(mask.data) : new Uint8Array(canvas.width * canvas.height),
     points: points.map((point) => ({ ...point })),
+    negativePoints: negativePoints.map((point) => ({ ...point })),
   };
 }
 
@@ -1875,6 +2326,8 @@ function applySliceSnapshot(snapshot) {
   };
   if (!state.pointAnnotations[snapshot.imageId]) state.pointAnnotations[snapshot.imageId] = {};
   state.pointAnnotations[snapshot.imageId][sliceKey] = (snapshot.points || []).map((point) => ({ ...point }));
+  if (!state.negativeScribbles[snapshot.imageId]) state.negativeScribbles[snapshot.imageId] = {};
+  state.negativeScribbles[snapshot.imageId][sliceKey] = (snapshot.negativePoints || []).map((point) => ({ ...point }));
   state.annotationDrawing = false;
   state.annotationLastPoint = null;
   state.annotationShapeStart = null;
@@ -2043,22 +2496,69 @@ function paintMaskCircle(point, radius, labelId) {
   }
 }
 
+function recordSmartErasePoint(point, { asNegativePoint = true } = {}) {
+  const image = activeImage();
+  if (!image || !point) return;
+  if (!state.negativeScribbles[image.image_id]) state.negativeScribbles[image.image_id] = {};
+  const sliceKey = sliceStorageKey(activeAxis(), currentSliceIndex());
+  if (!state.negativeScribbles[image.image_id][sliceKey]) {
+    state.negativeScribbles[image.image_id][sliceKey] = [];
+  }
+  const points = state.negativeScribbles[image.image_id][sliceKey];
+  const rounded = {
+    x: Math.round(point.x),
+    y: Math.round(point.y),
+    z: currentSliceIndex(),
+    axis: activeAxis(),
+    asNegativePoint,
+  };
+  const last = points[points.length - 1];
+  if (!last || Math.hypot(last.x - rounded.x, last.y - rounded.y) >= 3) {
+    points.push(rounded);
+    if (points.length > 1200) points.splice(0, points.length - 1200);
+  }
+}
+
+function recordSmartEraseRegion(selectedIndices, width, seedPoint) {
+  if (!selectedIndices?.length) return;
+  const stride = Math.max(1, Math.floor(Math.sqrt(selectedIndices.length / 80)));
+  recordSmartErasePoint(seedPoint, { asNegativePoint: true });
+  for (let offset = 0; offset < selectedIndices.length; offset += stride) {
+    const index = selectedIndices[offset];
+    recordSmartErasePoint(
+      { x: index % width, y: Math.floor(index / width) },
+      { asNegativePoint: offset % (stride * 4) === 0 },
+    );
+  }
+
+  const points = currentSlicePoints({ create: true });
+  if (!points || !seedPoint) return;
+  points.push({
+    id: `Neg${String(points.length + 1).padStart(4, "0")}`,
+    x: Math.round(seedPoint.x),
+    y: Math.round(seedPoint.y),
+    axis: activeAxis(),
+    sliceIndex: currentSliceIndex(),
+    promptType: "negative",
+    labelId: 0,
+    label: "negative",
+  });
+}
+
 function paintMaskLine(from, to, tool = state.annotationTool) {
   if (!from || !to) return;
-  const radius = tool === "erase" ? 10 : 4;
-  const labelId = tool === "erase" ? 0 : state.annotationLabelId;
+  const isEraser = tool === "erase";
+  const radius = isEraser ? 10 : 4;
+  const labelId = isEraser ? 0 : state.annotationLabelId;
   const distance = Math.hypot(to.x - from.x, to.y - from.y);
   const steps = Math.max(1, Math.ceil(distance / Math.max(1, radius * 0.6)));
   for (let step = 0; step <= steps; step += 1) {
     const ratio = step / steps;
-    paintMaskCircle(
-      {
-        x: from.x + (to.x - from.x) * ratio,
-        y: from.y + (to.y - from.y) * ratio,
-      },
-      radius,
-      labelId,
-    );
+    const point = {
+      x: from.x + (to.x - from.x) * ratio,
+      y: from.y + (to.y - from.y) * ratio,
+    };
+    paintMaskCircle(point, radius, labelId);
   }
   renderCurrentSliceMask();
 }
@@ -2076,7 +2576,7 @@ function drawAnnotationPoint(point) {
     y: Math.round(point.y),
     axis: activeAxis(),
     sliceIndex: currentSliceIndex(),
-    promptType: state.deepEditPromptMode,
+    promptType: "positive",
     labelId: state.annotationLabelId,
     label: state.annotationLabel,
   });
@@ -2103,6 +2603,51 @@ function drawAnnotationRectangle(from, to) {
   renderCurrentSliceMask();
 }
 
+function floodFillRegion({
+  width,
+  height,
+  startX,
+  startY,
+  maxPixels,
+  acceptIndex,
+}) {
+  const seedIndex = startY * width + startX;
+  if (!acceptIndex(seedIndex)) return [];
+  const visited = new Uint8Array(width * height);
+  const queue = new Int32Array(width * height);
+  const selected = [];
+  let head = 0;
+  let tail = 0;
+  queue[tail] = seedIndex;
+  tail += 1;
+  visited[seedIndex] = 1;
+
+  while (head < tail) {
+    const index = queue[head];
+    head += 1;
+    if (!acceptIndex(index)) continue;
+    selected.push(index);
+    if (selected.length >= maxPixels) break;
+
+    const x = index % width;
+    const y = Math.floor(index / width);
+    const neighbors = [
+      x > 0 ? index - 1 : -1,
+      x < width - 1 ? index + 1 : -1,
+      y > 0 ? index - width : -1,
+      y < height - 1 ? index + width : -1,
+    ];
+    for (const next of neighbors) {
+      if (next >= 0 && !visited[next]) {
+        visited[next] = 1;
+        queue[tail] = next;
+        tail += 1;
+      }
+    }
+  }
+  return selected;
+}
+
 async function runMagicWandSelection(point) {
   const image = activeImage();
   if (!image || !point) return;
@@ -2122,41 +2667,14 @@ async function runMagicWandSelection(point) {
     const seedIndex = startY * width + startX;
     const seedValue = slice.values[seedIndex];
     const threshold = state.magicWandThreshold;
-    const maxPixels = state.magicWandMaxPixels;
-    const visited = new Uint8Array(width * height);
-    const queue = new Int32Array(width * height);
-    const selected = [];
-    let head = 0;
-    let tail = 0;
-
-    queue[tail] = seedIndex;
-    tail += 1;
-    visited[seedIndex] = 1;
-
-    while (head < tail) {
-      const index = queue[head];
-      head += 1;
-      if (Math.abs(slice.values[index] - seedValue) > threshold) continue;
-
-      selected.push(index);
-      if (selected.length >= maxPixels) break;
-
-      const x = index % width;
-      const y = Math.floor(index / width);
-      const neighbors = [
-        x > 0 ? index - 1 : -1,
-        x < width - 1 ? index + 1 : -1,
-        y > 0 ? index - width : -1,
-        y < height - 1 ? index + width : -1,
-      ];
-      for (const next of neighbors) {
-        if (next >= 0 && !visited[next]) {
-          visited[next] = 1;
-          queue[tail] = next;
-          tail += 1;
-        }
-      }
-    }
+    const selected = floodFillRegion({
+      width,
+      height,
+      startX,
+      startY,
+      maxPixels: state.magicWandMaxPixels,
+      acceptIndex: (index) => Math.abs(slice.values[index] - seedValue) <= threshold,
+    });
 
     if (!selected.length) {
       showToast("智能选择没有找到相近区域");
@@ -2171,6 +2689,76 @@ async function runMagicWandSelection(point) {
     showToast(`智能选择完成：${selected.length} 像素，HU ${Math.round(seedValue)} ± ${threshold}`);
   } catch (error) {
     showToast(error.message || "智能选择失败");
+  }
+}
+
+async function runSmartEraseSelection(point) {
+  const image = activeImage();
+  if (!image || !point) return;
+  const mask = currentSliceMask({ create: true });
+  if (!mask) return;
+
+  try {
+    const width = mask.width;
+    const height = mask.height;
+    const startX = clamp(Math.round(point.x), 0, width - 1);
+    const startY = clamp(Math.round(point.y), 0, height - 1);
+    const seedIndex = startY * width + startX;
+    const seedLabel = mask.data[seedIndex];
+    const threshold = state.magicWandThreshold;
+    let selected = [];
+    let mode = "hu";
+
+    // Prefer erasing the connected annotated blob under the cursor.
+    if (seedLabel > 0) {
+      selected = floodFillRegion({
+        width,
+        height,
+        startX,
+        startY,
+        maxPixels: state.magicWandMaxPixels,
+        acceptIndex: (index) => mask.data[index] === seedLabel,
+      });
+      mode = "mask";
+    }
+
+    // Otherwise grow a HU-similar region and clear any mask inside it.
+    if (!selected.length) {
+      const slice = await loadSliceValues(image.image_id, currentSliceIndex(), activeAxis());
+      if (slice.width !== width || slice.height !== height) {
+        throw new Error(`智能橡皮擦尺寸不匹配：切片 ${slice.width}×${slice.height}，画布 ${width}×${height}`);
+      }
+      const seedValue = slice.values[seedIndex];
+      selected = floodFillRegion({
+        width,
+        height,
+        startX,
+        startY,
+        maxPixels: state.magicWandMaxPixels,
+        acceptIndex: (index) => Math.abs(slice.values[index] - seedValue) <= threshold,
+      });
+      mode = "hu";
+    }
+
+    if (!selected.length) {
+      showToast("智能橡皮擦没有识别到可擦除区域");
+      return;
+    }
+
+    pushUndoSnapshot();
+    let erased = 0;
+    for (const index of selected) {
+      if (mask.data[index]) {
+        mask.data[index] = 0;
+        erased += 1;
+      }
+    }
+    recordSmartEraseRegion(selected, width, { x: startX, y: startY });
+    renderCurrentSliceMask();
+    const modeText = mode === "mask" ? "连通标注区域" : `HU ± ${threshold}`;
+    showToast(`智能擦除完成：识别 ${selected.length} 像素，清除 ${erased} 标注，已记为 DeepEdit 负点（${modeText}）`);
+  } catch (error) {
+    showToast(error.message || "智能橡皮擦失败");
   }
 }
 
@@ -2247,6 +2835,10 @@ function handleAnnotationPointerDown(event) {
   }
   if (state.annotationTool === "magic") {
     runMagicWandSelection(point);
+    return;
+  }
+  if (state.annotationTool === "smartErase") {
+    runSmartEraseSelection(point);
     return;
   }
   if (state.annotationTool === "polygon") {
@@ -2372,10 +2964,15 @@ function renderVersions() {
     <section class="panel">
       <h2>${item ? item.case_id : "暂无病例"} 版本时间线</h2>
       <div class="timeline">${["v1_manual", "v2_ai", "v3_preview", "v3_fusion", "final"].map((version) => `<span class="chip ${versions.some((entry) => entry.version === version) ? "active-chip" : ""}">${version}</span>`).join("")}</div>
+      <div class="toolbar-row" style="margin-top:14px">
+        <button class="ghost-button" data-submit-case ${item && (currentRole() === "annotator" || currentRole() === "admin") ? "" : "disabled"}>提交审核</button>
+        <button class="primary-button" data-approve-case ${item && canReview() ? "" : "disabled"}>审核通过</button>
+        <button class="danger-button" data-reject-case ${item && canReview() ? "" : "disabled"}>驳回</button>
+      </div>
       ${renderVersionList(versions)}
     </section>
     <div class="grid cols-2" style="margin-top:18px"><section class="viewer"><h2>人工 / AI 版本</h2><div class="ct-frame" style="min-height:330px"><div class="mask-overlay"></div></div></section><section class="viewer"><h2>final 审核版本</h2><div class="ct-frame" style="min-height:330px"><div class="roi-box"></div></div></section></div>
-    <div class="grid cols-4" style="margin-top:18px">${metricCard("Dice", "0.86", "重叠度")}${metricCard("IoU", "0.75", "交并比")}${metricCard("HD95", "4.2", "边界距离")}${metricCard("体积差异", "12%", "差异比例")}</div>
+    <div class="grid cols-4" style="margin-top:18px">${metricCard("当前状态", item ? (statusText[item.status] || item.status) : "-", "病例状态机")}${metricCard("角色", state.currentUser ? (roleText[state.currentUser.role] || state.currentUser.role) : "未登录", "决定审核权限")}${metricCard("任务数", state.tasks.length, "当前可见任务")}${metricCard("版本数", versions.length, "已写入版本")}</div>
   `;
 }
 
@@ -2413,7 +3010,7 @@ function renderExport() {
 }
 
 function renderSettings() {
-  return `<div class="grid cols-2"><section class="panel"><h2>标签管理</h2><div class="label-list">${labelList()}</div></section><section class="panel"><h2>系统路径</h2><div class="case-meta"><div class="meta-line"><span>原始数据</span><strong>dataset/raw</strong></div><div class="meta-line"><span>训练图像</span><strong>dataset/images</strong></div><div class="meta-line"><span>标签数据</span><strong>dataset/labels</strong></div><div class="meta-line"><span>数据划分</span><strong>dataset/splits</strong></div></div></section></div>`;
+  return `<div class="grid cols-2"><section class="panel"><h2>标签管理</h2><div class="label-list">${labelList()}</div></section><section class="panel"><h2>账号与权限</h2><div class="case-meta"><div class="meta-line"><span>当前用户</span><strong>${state.currentUser ? escapeHtml(state.currentUser.username) : "未登录"}</strong></div><div class="meta-line"><span>角色</span><strong>${state.currentUser ? escapeHtml(roleText[state.currentUser.role] || state.currentUser.role) : "-"}</strong></div><div class="meta-line"><span>演示账号</span><strong>admin/admin123 · reviewer/reviewer123 · annotator/annotator123</strong></div><div class="meta-line"><span>状态机</span><strong>unannotated → annotated → pending → reviewed → final</strong></div></div></section></div>`;
 }
 
 function render() {
@@ -2421,6 +3018,10 @@ function render() {
   $("#viewRoot").innerHTML = (views[state.view] || renderDashboard)();
   const uploadForm = $("#uploadForm");
   if (uploadForm) uploadForm.addEventListener("submit", uploadCase);
+  const taskForm = $("#taskForm");
+  if (taskForm) taskForm.addEventListener("submit", createTaskAssignment);
+  const loginForm = $("#loginForm");
+  if (loginForm) loginForm.addEventListener("submit", handleLogin);
   document.querySelectorAll("[data-view-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       state.volumeViewMode = button.dataset.viewMode;
@@ -2440,16 +3041,22 @@ function render() {
   });
   bindMagicWandControls();
   bindRefineParamControls();
-  document.querySelectorAll("[data-deepedit-prompt]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.deepEditPromptMode = button.dataset.deepeditPrompt === "negative" ? "negative" : "positive";
-      render();
-    });
-  });
   bindAnnotationCanvas();
   const saveMaskButton = $("[data-save-mask]");
   if (saveMaskButton) {
     saveMaskButton.addEventListener("click", saveCurrentMask);
+  }
+  const submitCaseButton = $("[data-submit-case]");
+  if (submitCaseButton) {
+    submitCaseButton.addEventListener("click", submitCaseForReview);
+  }
+  const approveCaseButton = $("[data-approve-case]");
+  if (approveCaseButton) {
+    approveCaseButton.addEventListener("click", approveCaseReview);
+  }
+  const rejectCaseButton = $("[data-reject-case]");
+  if (rejectCaseButton) {
+    rejectCaseButton.addEventListener("click", rejectCaseReview);
   }
   const finalMaskButton = $("[data-final-mask]");
   if (finalMaskButton) {
@@ -2506,7 +3113,34 @@ function render() {
     sliceSlider.addEventListener("input", refreshSlice);
     sliceSlider.addEventListener("change", refreshSlice);
   }
-  state.activeAxis = "axial";
+  const axisSelect = $("#axisSelect");
+  if (axisSelect) {
+    axisSelect.value = activeAxis();
+    axisSelect.addEventListener("change", () => {
+      const nextAxis = sliceAxes[axisSelect.value] ? axisSelect.value : "axial";
+      state.activeAxis = nextAxis;
+      state.undoStack = [];
+      state.redoStack = [];
+      state.annotationPolygonPoints = [];
+      state.annotationPolygonPreviewPoint = null;
+      state.annotationPreviewRect = null;
+      const image = activeImage();
+      const meta = image ? state.volumeMeta[image.image_id] : null;
+      if (image && meta) {
+        const maxSlice = Math.max(axisSliceCount(meta, nextAxis) - 1, 0);
+        setCurrentSliceIndex(Math.min(currentSliceIndex(nextAxis), maxSlice), nextAxis);
+        updateSliceViewer(image, meta);
+      } else {
+        render();
+      }
+    });
+  }
+  document.querySelectorAll("[data-load-mask]").forEach((button) => {
+    button.addEventListener("click", () => loadMaskForEditing(button.dataset.loadMask));
+  });
+  document.querySelectorAll("[data-delete-mask]").forEach((button) => {
+    button.addEventListener("click", () => deleteMaskRecord(button.dataset.deleteMask));
+  });
   const windowSelect = $("#windowSelect");
   if (windowSelect) {
     windowSelect.value = state.activeWindow;
@@ -2560,8 +3194,17 @@ function bindNavigation() {
   document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
   $("#refreshButton").addEventListener("click", async () => {
     await refreshCases();
+    await refreshTasks();
     render();
     showToast("数据已刷新");
+  });
+  $("#loginButton")?.addEventListener("click", () => {
+    $("#loginOverlay")?.classList.remove("hidden");
+    $("#loginUsername")?.focus();
+  });
+  $("#logoutButton")?.addEventListener("click", handleLogout);
+  $("#loginDismiss")?.addEventListener("click", () => {
+    if (state.currentUser) $("#loginOverlay")?.classList.add("hidden");
   });
 }
 
@@ -2569,8 +3212,10 @@ async function init() {
   $("#currentDate").textContent = new Date().toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
   bindNavigation();
   window.addEventListener("resize", () => resizeAnnotationCanvas());
+  await restoreSession();
   await refreshCases();
   render();
+  updateAuthChrome();
 }
 
 init();

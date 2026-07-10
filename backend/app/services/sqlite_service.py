@@ -66,6 +66,7 @@ def init_sqlite_database() -> None:
     with connect() as connection:
         connection.executescript(SCHEMA_SQL_PATH.read_text(encoding="utf-8"))
         _ensure_preview_version_supported(connection)
+        _ensure_auth_schema(connection)
 
 
 def _table_sql(connection: sqlite3.Connection, table: str) -> str:
@@ -95,6 +96,7 @@ def _ensure_preview_version_supported(connection: sqlite3.Connection) -> None:
                 label TEXT NOT NULL DEFAULT 'label',
                 label_id INTEGER,
                 mask_format TEXT NOT NULL DEFAULT 'nii.gz' CHECK (mask_format IN ('json', 'nii.gz', 'nrrd')),
+                axis TEXT CHECK (axis IS NULL OR axis IN ('axial', 'coronal', 'sagittal')),
                 slice_index INTEGER CHECK (slice_index IS NULL OR slice_index >= 0),
                 width INTEGER CHECK (width IS NULL OR width >= 0),
                 height INTEGER CHECK (height IS NULL OR height >= 0),
@@ -184,6 +186,104 @@ def _ensure_preview_version_supported(connection: sqlite3.Connection) -> None:
         changed = True
     if changed:
         connection.executescript(schema_sql)
+
+
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(row["name"]) for row in rows}
+
+
+def _ensure_auth_schema(connection: sqlite3.Connection) -> None:
+    from backend.app.core.security import hash_password
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL CHECK (role IN ('annotator', 'reviewer', 'admin', 'ai_service')),
+            create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY,
+            case_id TEXT NOT NULL,
+            assignee_id INTEGER NOT NULL,
+            assigner_id INTEGER,
+            deadline TEXT,
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK (status IN ('open', 'in_progress', 'submitted', 'approved', 'rejected', 'cancelled')),
+            note TEXT,
+            create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            update_time TEXT,
+            FOREIGN KEY (case_id) REFERENCES cases(case_id) ON DELETE CASCADE,
+            FOREIGN KEY (assignee_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (assigner_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            action TEXT NOT NULL,
+            entity_type TEXT,
+            entity_id TEXT,
+            case_id TEXT,
+            detail TEXT,
+            create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tasks_case_id ON tasks(case_id);
+        CREATE INDEX IF NOT EXISTS idx_tasks_assignee_id ON tasks(assignee_id);
+        CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_case_id ON audit_logs(case_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+        """
+    )
+
+    if "users" in {
+        str(row["name"])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }:
+        columns = _table_columns(connection, "users")
+        if "password_hash" not in columns:
+            connection.execute("ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
+
+    if "masks" in {
+        str(row["name"])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }:
+        mask_columns = _table_columns(connection, "masks")
+        if "axis" not in mask_columns:
+            connection.execute(
+                "ALTER TABLE masks ADD COLUMN axis TEXT CHECK (axis IS NULL OR axis IN ('axial', 'coronal', 'sagittal'))"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_masks_axis_slice ON masks(image_id, version, label, axis, slice_index)"
+        )
+
+    seeds = [
+        ("admin", "admin123", "admin"),
+        ("reviewer", "reviewer123", "reviewer"),
+        ("annotator", "annotator123", "annotator"),
+    ]
+    for username, password, role in seeds:
+        existing = connection.execute(
+            "SELECT id, password_hash FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO users (username, password_hash, role, create_time)
+                VALUES (?, ?, ?, ?)
+                """,
+                (username, hash_password(password), role, _create_time({})),
+            )
+        elif not str(existing["password_hash"] or "").strip():
+            connection.execute(
+                "UPDATE users SET password_hash = ?, role = ? WHERE id = ?",
+                (hash_password(password), role, int(existing["id"])),
+            )
 
 
 def ensure_sqlite_ready() -> None:
@@ -285,10 +385,10 @@ def _upsert_mask(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
         """
         INSERT INTO masks (
             mask_id, annotation_id, case_id, image_id, path, version, label, label_id,
-            mask_format, slice_index, width, height, encoding, source_mask_ids,
+            mask_format, axis, slice_index, width, height, encoding, source_mask_ids,
             shape, spacing, origin, direction, create_time
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(mask_id) DO UPDATE SET
             annotation_id=excluded.annotation_id,
             case_id=excluded.case_id,
@@ -298,6 +398,7 @@ def _upsert_mask(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
             label=excluded.label,
             label_id=excluded.label_id,
             mask_format=excluded.mask_format,
+            axis=excluded.axis,
             slice_index=excluded.slice_index,
             width=excluded.width,
             height=excluded.height,
@@ -319,6 +420,7 @@ def _upsert_mask(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
             item.get("label") or "label",
             item.get("label_id"),
             item.get("mask_format") or "nii.gz",
+            item.get("axis"),
             item.get("slice_index"),
             item.get("width"),
             item.get("height"),
@@ -514,6 +616,15 @@ def upsert_records(table: str, items: list[dict[str, Any]]) -> None:
         upsert = UPSERT_BY_TABLE[table]
         for item in items:
             upsert(connection, item)
+
+
+def delete_record(table: str, key: str, value: str) -> bool:
+    if table not in UPSERT_BY_TABLE:
+        raise ValueError(f"Unsupported table: {table}")
+    ensure_sqlite_ready()
+    with connect() as connection:
+        cursor = connection.execute(f"DELETE FROM {table} WHERE {key} = ?", (value,))
+        return cursor.rowcount > 0
 
 
 def next_sqlite_entity_id(prefix: str, table: str, key: str) -> str:

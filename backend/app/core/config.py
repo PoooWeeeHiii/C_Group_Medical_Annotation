@@ -12,6 +12,8 @@ SCHEMA_SQL_PATH = DATABASE_DIR / "schema.sql"
 SQLITE_DB_PATH = DATABASE_DIR / "app.db"
 DEEPEDIT_SERVICE_URL = os.getenv("DEEPEDIT_SERVICE_URL", "").strip()
 DEEPEDIT_SERVICE_TIMEOUT_SECONDS = float(os.getenv("DEEPEDIT_SERVICE_TIMEOUT_SECONDS", "30"))
+JWT_SECRET = os.getenv("JWT_SECRET", "label-platform-dev-secret-change-me").strip() or "label-platform-dev-secret"
+JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
 
 CASES_DB_PATH = DATABASE_DIR / "dev_cases.json"
 IMAGES_DB_PATH = DATABASE_DIR / "dev_images.json"

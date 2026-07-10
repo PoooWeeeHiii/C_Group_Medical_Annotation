@@ -35,6 +35,19 @@ class SaveMaskRequest(BaseModel):
     encoding: str | None = None
     mask: list[Any] | None = None
     points: list[dict[str, Any]] | None = None
+    overwrite: bool = True
+
+
+class UpdateMaskRequest(BaseModel):
+    label: str | None = None
+    label_id: int | None = None
+    axis: str | None = None
+    slice_index: int | None = None
+    width: int | None = None
+    height: int | None = None
+    encoding: str | None = None
+    mask: list[Any] | None = None
+    points: list[dict[str, Any]] | None = None
 
 
 class SaveMaskResponse(BaseModel):
@@ -42,6 +55,13 @@ class SaveMaskResponse(BaseModel):
     mask_id: str
     path: str
     mask: MaskRecord
+    updated: bool = False
+
+
+class DeleteMaskResponse(BaseModel):
+    success: bool
+    mask_id: str
+    message: str = "deleted"
 
 
 class PromoteMaskRequest(BaseModel):

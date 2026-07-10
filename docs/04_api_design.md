@@ -22,6 +22,15 @@
 
 | 功能 | 方法 | 路径 | 调用方 |
 | --- | --- | --- | --- |
+| 登录 | POST | `/api/auth/login` | Vue |
+| 当前用户 | GET | `/api/me` | Vue |
+| 用户列表 | GET | `/api/users` | Vue（admin/reviewer） |
+| 创建任务 | POST | `/api/tasks` | Vue（admin/reviewer） |
+| 查询任务 | GET | `/api/tasks` | Vue |
+| 更新任务 | PATCH | `/api/tasks/{task_id}` | Vue |
+| 提交审核 | POST | `/api/case/{case_id}/submit` | Vue（annotator/admin） |
+| 审核通过 | POST | `/api/case/{case_id}/approve` | Vue（reviewer/admin） |
+| 驳回 | POST | `/api/case/{case_id}/reject` | Vue（reviewer/admin） |
 | 上传 CT/医学影像 | POST | `/api/upload` | Vue、A/B 组 |
 | 查询病例列表 | GET | `/api/cases` | Vue、F 组 |
 | 查询病例详情 | GET | `/api/case/{case_id}` | Vue、F 组 |
@@ -34,12 +43,74 @@
 | 导出 3D 原始图像 | GET | `/api/image/{image_id}/export-3d` | Vue、AI |
 | 创建标注记录 | POST | `/api/annotation` | Vue、AI |
 | 保存 Mask | POST | `/api/save_mask` | Vue、AI |
+| 更新 Mask | PUT | `/api/mask/{mask_id}` | Vue |
+| 删除 Mask | DELETE | `/api/mask/{mask_id}` | Vue |
 | 查询 Mask | GET | `/api/mask/{mask_id}` | Vue、AI、E 组 |
 | 查询某图像 Mask 列表 | GET | `/api/image/{image_id}/masks` | Vue |
 | 保存版本 | POST | `/api/version` | Vue、AI |
 | 查询版本列表 | GET | `/api/case/{case_id}/versions` | Vue、F 组 |
 | 运行 AI 自动标注 | POST | `/api/ai/predict` | Vue、F 组 |
 | 导出 Dataset | POST | `/api/export` | Vue、AI、F 组 |
+
+## 2.1 认证、任务与审核工作流
+
+### POST `/api/auth/login`
+
+用途：用户名密码登录，返回 JWT（HMAC 签名）与用户角色。
+
+演示账号（启动时自动种子写入）：
+
+| 用户名 | 密码 | 角色 |
+| --- | --- | --- |
+| `annotator` | `annotator123` | 标注员 |
+| `reviewer` | `reviewer123` | 审核员 |
+| `admin` | `admin123` | 管理员 |
+
+请求：
+
+```json
+{ "username": "annotator", "password": "annotator123" }
+```
+
+响应：
+
+```json
+{
+  "success": true,
+  "access_token": "<token>",
+  "token_type": "bearer",
+  "user": { "id": 3, "username": "annotator", "role": "annotator", "create_time": "..." }
+}
+```
+
+后续写操作请在 Header 携带：`Authorization: Bearer <token>`。
+
+### GET `/api/me`
+
+返回当前登录用户。
+
+### POST `/api/tasks` / GET `/api/tasks` / PATCH `/api/tasks/{task_id}`
+
+用途：病例任务分配。字段包含 `case_id`、`assignee_id`、`deadline`、`status`、`note`。
+
+- 创建任务：`admin` / `reviewer`
+- 标注员仅能查看/更新自己的任务
+
+### 病例状态机
+
+`unannotated → annotated → pending → reviewed → final`，驳回回到 `annotated`。
+
+| 接口 | 权限 | 状态变化 |
+| --- | --- | --- |
+| `POST /api/save_mask`（v1_manual） | 可选登录 | `unannotated/annotated → annotated`，并写审计 |
+| `POST /api/case/{id}/submit` | annotator/admin | `annotated/reviewed → pending` |
+| `POST /api/case/{id}/approve` | reviewer/admin | `pending → reviewed` |
+| `POST /api/case/{id}/reject` | reviewer/admin | `pending/reviewed/final → annotated` |
+| `POST /api/mask/{id}/promote` 到 `final` | reviewer/admin | `pending/reviewed → final` |
+
+审计日志写入 `audit_logs`：保存、提交、通过、驳回、晋升、任务变更。
+
+---
 
 ## 3. 上传 CT
 
@@ -695,7 +766,7 @@ application/octet-stream
 
 ### POST `/api/deepedit/refine`
 
-用途：DeepEdit 交互式修正接口。前端会传入当前 3D mask、正点、负点、scribble 摘要和确认切片；后端优先调用外部 DeepEdit / MONAI Label 服务。若未配置 `DEEPEDIT_SERVICE_URL`，当前 V2 会明确 fallback 到 `random_walker + seeded connected component`，形成“用户提示 → graph-based refinement → 全局 3D mask 更新”的闭环。
+用途：DeepEdit 交互式修正接口。前端会传入当前 3D mask、画笔/多边形/矩形产生的正向 scribble、智能橡皮擦产生的负向 scribble，以及确认切片；后端优先调用外部 DeepEdit / MONAI Label 服务。若未配置 `DEEPEDIT_SERVICE_URL`，当前 V2 会明确 fallback 到 `random_walker + seeded connected component`，形成“用户提示 → graph-based refinement → 全局 3D mask 更新”的闭环。
 
 前端按钮已统一为“智能3D传播修正”：它同时承担初始 2D→3D 传播和后续 DeepEdit 式修正，不再单独暴露 `Label Propagation` 与 `DeepEdit` 两个按钮。
 
@@ -714,8 +785,8 @@ application/octet-stream
   "random_walker_beta": 90,
   "random_walker_roi_margin": 24,
   "connected_component_min_voxels": 64,
-  "positive_points": [[230, 188, 42]],
-  "negative_points": [[280, 210, 42]],
+  "positive_points": [],
+  "negative_points": [],
   "scribbles": [
     {
       "axis": "axial",
@@ -724,12 +795,23 @@ application/octet-stream
       "height": 512,
       "label_id": 1,
       "foreground_pixels": 3192,
+      "prompt_type": "positive",
       "encoding": "saved_v1_manual_rle"
+    },
+    {
+      "axis": "axial",
+      "slice_index": 42,
+      "label_id": 0,
+      "point_count": 36,
+      "points": [{"x": 280, "y": 210, "z": 42}],
+      "prompt_type": "negative",
+      "encoding": "smart_eraser_points"
     }
   ],
   "interaction": {
     "type": "deepedit",
-    "prompt_source": "2d_axial_canvas"
+    "prompt_source": "2d_axial_canvas",
+    "prompt_mode": "brush_positive_smart_eraser_negative"
   },
   "confirmed_slices": [42]
 }
@@ -793,7 +875,7 @@ uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
   "path": "dataset/labels/Case0001/v3_fusion/Case0001_Image0001_Mask0004_v3_fusion_label.nii.gz"
 }
 ```
-- fallback 模式下，`positive_points` 会作为 Random Walker 前景 seed，`negative_points` 会作为强背景 seed；负点区域会在求解、形态学和连通域过滤后再次被强制清除，防止错误区域被重新填回。
+- fallback 模式下，画笔/多边形/矩形保存为正向 sparse mask；智能橡皮擦的 `prompt_type=negative` scribble 会被转换为 Random Walker 强背景 seed。负向区域会在求解、形态学和连通域过滤后再次被强制清除，防止错误区域被重新填回。
 - fallback 参数可由前端“修正参数”面板调整：`random_walker_beta` 控制灰度边界敏感度，`random_walker_roi_margin` 控制图模型 ROI 外扩范围，`connected_component_min_voxels` 控制小连通域清理阈值。
 - 神经网络模型版本应输入 `image_volume + current_mask + positive/negative clicks + scribbles + confirmed_slices`。
 - `confirmed_slices` 必须作为 hard constraint，防止模型覆盖医生已确认标注。
@@ -880,8 +962,8 @@ uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 {
   "case_id": "Case0001",
   "image_id": "Image0001",
-  "model_id": "Model0001",
-  "label": "lung_nodule"
+  "model_id": "spleen_nnunetv2_task506",
+  "label": "spleen"
 }
 ```
 
@@ -905,6 +987,8 @@ uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 - 写入 `masks.version=v2_ai`、`versions.version=v2_ai`，并登记 `models.model_id`。
 - 生成的 mask 必须与原 CT 保持同一 `shape / spacing / origin / direction`。
 - 目前内置 `builtin_ct_threshold` 作为 CT 阈值/连通域 baseline。Person B 后续可替换 `ai/predict.py` 内部实现为 nnU-Net / MONAI / MedSAM 推理，但必须保持输入 CT volume、输出 3D mask array 的契约。
+- 脾脏自动标注使用 `model_id=spleen_nnunetv2_task506`、`label=spleen`。若本地配置了 `SPLEEN_NNUNET_PREDICT_COMMAND`，后端会调用真实 nnU-Net v2 推理；否则使用内置脾脏 CT baseline，仅用于平台流程演示。
+- 该脾脏模型参考仓库 `PoooWeeeHiii/spleen_segmentation_experiment`，仓库记录了 MSD Task09 Spleen 的 nnU-Net v2 训练流程和指标，但未包含 checkpoint。真实部署时 Person B 需要提供 `checkpoint_best.pth`、nnU-Net 环境和命令模板。
 
 ## 11. 导出 Dataset
 
