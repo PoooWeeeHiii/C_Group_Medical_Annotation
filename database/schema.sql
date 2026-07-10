@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS masks (
     image_id TEXT NOT NULL,
     path TEXT NOT NULL,
     version TEXT NOT NULL DEFAULT 'v1_manual'
-        CHECK (version IN ('v1_manual', 'v2_ai', 'v3_fusion', 'final')),
+        CHECK (version IN ('v1_manual', 'v2_ai', 'v3_preview', 'v3_fusion', 'final')),
     label TEXT NOT NULL DEFAULT 'label',
     label_id INTEGER,
     mask_format TEXT NOT NULL DEFAULT 'nii.gz' CHECK (mask_format IN ('json', 'nii.gz', 'nrrd')),
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS datasets (
     dataset_id TEXT PRIMARY KEY,
     name TEXT NOT NULL DEFAULT 'medical_segmentation_dataset',
     version TEXT NOT NULL DEFAULT 'final'
-        CHECK (version IN ('v1_manual', 'v2_ai', 'v3_fusion', 'final')),
+        CHECK (version IN ('v1_manual', 'v2_ai', 'v3_preview', 'v3_fusion', 'final')),
     train TEXT NOT NULL DEFAULT '[]',
     val TEXT NOT NULL DEFAULT '[]',
     test TEXT NOT NULL DEFAULT '[]',
@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS datasets (
 CREATE TABLE IF NOT EXISTS versions (
     version_id INTEGER PRIMARY KEY AUTOINCREMENT,
     case_id TEXT NOT NULL,
-    version TEXT NOT NULL CHECK (version IN ('v1_manual', 'v2_ai', 'v3_fusion', 'final')),
+    version TEXT NOT NULL CHECK (version IN ('v1_manual', 'v2_ai', 'v3_preview', 'v3_fusion', 'final')),
 
     -- Keep column names aligned with the planning document and current API.
     -- In the final implementation, annotation should store annotation_id.

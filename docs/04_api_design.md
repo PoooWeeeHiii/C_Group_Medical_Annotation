@@ -293,8 +293,78 @@ image/png
 - `resampling` 表示体渲染数据是否经过各向同性重采样；如果环境缺少 SimpleITK 或原始 spacing 已接近各向同性，则 `applied=false`，前端仍使用原始体数据。
 - 这个接口用于真正体渲染，不是单张切片预览。
 - 后端按轴独立下采样，避免 Z 方向层数被过度压缩；前端 WebGL2 使用 3D texture ray casting、HU 分段 transfer function、gradient opacity、Phong 光照、阈值过滤和线性插值改善软组织层次和边界清晰度。
+- 3D Mask 高亮包含两层：`mask volume overlay` 用于半透明体叠加，`VTK marching-cubes surface mesh` 用于把 mask 提取成连续三角面实体。前端支持选择高亮颜色和透明度；如果本机未安装 `vtk`，前端会回退到旧的边界点云高亮。
 - 前端体渲染采用 CT Rendering Protocol Engine，目前收敛为三类：总览、软组织、骨窗。总览使用中性灰阶观察整体空间关系；软组织使用窄窗协议弱化骨遮挡、突出实质软组织；骨窗保留 150~400 HU 松质骨并延迟 Early Ray Termination。细小病灶仍应结合 2D 切片、MIP/MinIP 或 AI mask overlay 观察。
 - 当前高质量 3D 路线是浏览器端 GPU WebGL2 Ray Casting。vtk.js 不再通过 CDN 动态加载，后续如切换 vtk.js，应改为 npm/Vite 本地构建；如切换 WebGPU，需要新增 WGSL shader、3D texture pipeline 和浏览器兼容检测。
+
+### GET `/api/mask/{mask_id}/surface-mesh`
+
+用途：把 3D NIfTI Mask 通过 VTK Marching Cubes 提取为表面三角网格，给前端作为高亮实体层渲染。
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `min_component_voxels` | int | 否 | 小连通域过滤阈值，默认 `64`。 |
+| `max_components` | int | 否 | 最多保留的连通域数量，默认 `8`。 |
+| `max_triangles` | int | 否 | 前端渲染三角面上限，默认 `90000`。 |
+| `target_reduction` | float | 否 | `vtkQuadricDecimation` 简化比例，默认 `0.55`。 |
+| `smooth_iterations` | int | 否 | `vtkWindowedSincPolyDataFilter` 平滑次数，默认 `8`。 |
+| `remove_thin` | bool | 否 | 是否过滤单层/薄片伪影，默认 `true`。 |
+
+响应：
+
+```json
+{
+  "success": true,
+  "mask_id": "Mask0150",
+  "source": "vtk_marching_cubes",
+  "vertex_count": 12452,
+  "triangle_count": 24896,
+  "positions": [0.12, 0.42, 0.36],
+  "indices": [0, 1, 2],
+  "cleanup": {
+    "removed_thin_voxels": 2510,
+    "component_count_before": 14,
+    "component_count_after": 3
+  }
+}
+```
+
+说明：
+
+- `positions` 已归一化到前端 3D volume 坐标 `[0, 1]`，顺序为 `x, y, z`。
+- `indices` 是三角面索引，前端用 WebGL2 `drawElements(TRIANGLES)` 绘制。
+- 这一步依赖 Python `vtk` 包；没有安装时接口返回 `503`，前端自动回退为旧点云表面高亮。
+- 该接口只能修复明显离散点和薄片伪影。如果原始 mask 已经把身体外区域大面积连通进去，需要通过负点、DeepEdit 服务或重新传播从源头修正。
+
+### GET `/api/mask/{mask_id}/quality`
+
+用途：读取 3D Mask 质量摘要，用于前端确认 `v3_preview / v3_fusion / final` 的基本质量。
+
+响应：
+
+```json
+{
+  "success": true,
+  "mask_id": "Mask0003",
+  "version": "v3_preview",
+  "label": "label",
+  "voxel_count": 18452,
+  "volume_ml": 27.124,
+  "connected_component_count": 2,
+  "largest_component_voxels": 18100,
+  "largest_component_ratio": 0.9809,
+  "slice_range": {
+    "start": 42,
+    "end": 78,
+    "count": 37
+  },
+  "dimensions": [512, 512, 134],
+  "spacing": [0.7, 0.7, 3.0],
+  "physical_volume_mm3": 27124.44
+}
+```
 
 说明：
 
@@ -551,7 +621,7 @@ application/octet-stream
   "case_id": "Case0001",
   "image_id": "Image0001",
   "source_version": "v1_manual",
-  "output_version": "v3_fusion",
+  "output_version": "v3_preview",
   "label": "label",
   "method": "random_walker",
   "fill_holes": true,
@@ -574,7 +644,7 @@ application/octet-stream
 {
   "success": true,
   "mask_id": "Mask0003",
-  "path": "dataset/labels/Case0001/v3_fusion/Case0001_Image0001_Mask0003_v3_fusion_label.nii.gz",
+  "path": "dataset/labels/Case0001/v3_preview/Case0001_Image0001_Mask0003_v3_preview_label.nii.gz",
   "method": "random_walker",
   "source_mask_ids": ["Mask0001", "Mask0002"],
   "annotated_slices": [42, 61],
@@ -607,7 +677,7 @@ application/octet-stream
 {
   "success": true,
   "mask_id": "Mask0003",
-  "version": "v3_fusion",
+  "version": "v3_preview",
   "slice_index": 42,
   "width": 512,
   "height": 512,
@@ -638,9 +708,12 @@ application/octet-stream
   "source_version": "v1_manual",
   "current_mask_version": "v3_fusion",
   "current_mask_id": "Mask0123",
-  "output_version": "v3_fusion",
+  "output_version": "v3_preview",
   "label": "label",
   "model_id": "DeepEdit",
+  "random_walker_beta": 90,
+  "random_walker_roi_margin": 24,
+  "connected_component_min_voxels": 64,
   "positive_points": [[230, 188, 42]],
   "negative_points": [[280, 210, 42]],
   "scribbles": [
@@ -665,7 +738,63 @@ application/octet-stream
 说明：
 
 - 配置 `DEEPEDIT_SERVICE_URL` 后，后端会向 `{DEEPEDIT_SERVICE_URL}/infer` 发送 `image_path + current_mask_path + positive/negative clicks + scribbles + confirmed_slices`。
+- 真实 DeepEdit 服务位于 `ai/deepedit_service.py`，默认接收 4 通道输入：`CT image + positive point channel + negative point channel + current mask`。服务支持 `TorchScript` 权重和 `MONAI 3D UNet checkpoint`，优先使用 `DEEPEDIT_DEVICE=cuda/auto`。
+- DeepEdit 服务返回 `mask_base64` 时，主后端会把 NIfTI 文件保存为统一命名的 `v3_preview` mask，并写入数据库；模型服务不直接写平台数据库。
 - 未配置模型服务时，响应会返回 `model_status=fallback_no_deepedit_model` 和 `refinement_mode=deepedit_fallback_random_walker`，表示这不是神经网络 DeepEdit。
+- 修正结果默认保存为 `v3_preview`。前端确认后再调用 promote 接口写入 `v3_fusion` 或 `final`，避免未审核传播结果直接污染正式版本。
+
+启动真实 DeepEdit 服务：
+
+```bash
+export DEEPEDIT_MODEL_PATH=models/deepedit/model.ts
+export DEEPEDIT_MODEL_FORMAT=torchscript
+export DEEPEDIT_DEVICE=auto
+uvicorn ai.deepedit_service:app --host 127.0.0.1 --port 8010
+```
+
+如果 Person B 提供的是 MONAI UNet `.pth/.pt` checkpoint：
+
+```bash
+cp ai/deepedit_config.example.json models/deepedit/config.json
+# 修改 config.json 的 path/channels/strides/out_channels 等字段以匹配训练结构
+export DEEPEDIT_CONFIG_PATH=models/deepedit/config.json
+export DEEPEDIT_MODEL_PATH=models/deepedit/deepedit_unet.pth
+export DEEPEDIT_MODEL_FORMAT=monai_unet_checkpoint
+export DEEPEDIT_DEVICE=auto
+uvicorn ai.deepedit_service:app --host 127.0.0.1 --port 8010
+```
+
+启动主后端并接入模型服务：
+
+```bash
+export DEEPEDIT_SERVICE_URL=http://127.0.0.1:8010
+export DEEPEDIT_SERVICE_TIMEOUT_SECONDS=120
+uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+### POST `/api/mask/{mask_id}/promote`
+
+用途：确认 3D 预览 Mask，把 `v3_preview` 复制为正式 `v3_fusion` 或 `final`。该接口会复制真实 `.nii.gz` 文件并生成新的 mask 记录。
+
+请求：
+
+```json
+{
+  "target_version": "v3_fusion"
+}
+```
+
+响应：
+
+```json
+{
+  "success": true,
+  "mask_id": "Mask0004",
+  "path": "dataset/labels/Case0001/v3_fusion/Case0001_Image0001_Mask0004_v3_fusion_label.nii.gz"
+}
+```
+- fallback 模式下，`positive_points` 会作为 Random Walker 前景 seed，`negative_points` 会作为强背景 seed；负点区域会在求解、形态学和连通域过滤后再次被强制清除，防止错误区域被重新填回。
+- fallback 参数可由前端“修正参数”面板调整：`random_walker_beta` 控制灰度边界敏感度，`random_walker_roi_margin` 控制图模型 ROI 外扩范围，`connected_component_min_voxels` 控制小连通域清理阈值。
 - 神经网络模型版本应输入 `image_volume + current_mask + positive/negative clicks + scribbles + confirmed_slices`。
 - `confirmed_slices` 必须作为 hard constraint，防止模型覆盖医生已确认标注。
 - 前端 3D 视图已经预留 AI Mask Overlay 区块，Person B 生成的 `v2_ai` mask 写入该 JSON 或后续数据库后即可叠加显示。
@@ -707,7 +836,8 @@ application/octet-stream
 
 说明：
 
-- `version` 固定只能使用：`v1_manual`、`v2_ai`、`v3_fusion`、`final`。
+- `version` 固定只能使用：`v1_manual`、`v2_ai`、`v3_preview`、`v3_fusion`、`final`。
+- `v3_preview` 只表示待确认预览结果，不建议用于正式 Dataset 导出。
 - 同一病例同一版本重复保存时，后端会更新已有记录。
 
 ### GET `/api/case/{case_id}/versions`

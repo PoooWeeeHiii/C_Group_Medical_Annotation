@@ -44,6 +44,10 @@ class SaveMaskResponse(BaseModel):
     mask: MaskRecord
 
 
+class PromoteMaskRequest(BaseModel):
+    target_version: str = "v3_fusion"
+
+
 class MaskDetailResponse(BaseModel):
     success: bool
     mask: MaskRecord
@@ -81,7 +85,7 @@ class LabelPropagationRequest(BaseModel):
     case_id: str
     image_id: str
     source_version: str = "v1_manual"
-    output_version: str = "v3_fusion"
+    output_version: str = "v3_preview"
     label: str = "label"
     method: str = "image_guided_distance"
     fill_holes: bool = True
@@ -95,6 +99,8 @@ class LabelPropagationRequest(BaseModel):
     connected_component_mode: str = "seeded"
     connected_component_min_voxels: int = 64
     connected_component_max_components: int = 8
+    positive_points: list[list[float]] = []
+    negative_points: list[list[float]] = []
 
 
 class LabelPropagationResponse(BaseModel):
@@ -118,9 +124,12 @@ class DeepEditRefineRequest(BaseModel):
     source_version: str = "v1_manual"
     current_mask_version: str = "v3_fusion"
     current_mask_id: str | None = None
-    output_version: str = "v3_fusion"
+    output_version: str = "v3_preview"
     label: str = "label"
     model_id: str | None = "DeepEdit"
+    random_walker_beta: float = 90.0
+    random_walker_roi_margin: int = 24
+    connected_component_min_voxels: int = 64
     positive_points: list[list[float]] = []
     negative_points: list[list[float]] = []
     scribbles: list[dict[str, Any]] = []

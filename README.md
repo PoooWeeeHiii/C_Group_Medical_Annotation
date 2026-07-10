@@ -56,3 +56,23 @@ label_platform/
 大 CT、DICOM、NIfTI、NRRD、Mask、`.pth` 模型权重和 PDF 资料不要提交到 GitHub。仓库只保存代码、小样例说明、配置和文档。
 
 原始需求和规划文档已归档在 `docs/reference/`。
+
+## DeepEdit 真实模型服务
+
+真实 DeepEdit 推理以独立服务运行，主后端通过 `DEEPEDIT_SERVICE_URL` 调用它。
+
+```bash
+export DEEPEDIT_MODEL_PATH=models/deepedit/model.ts
+export DEEPEDIT_DEVICE=auto
+uvicorn ai.deepedit_service:app --host 127.0.0.1 --port 8010
+```
+
+另一个终端启动主后端：
+
+```bash
+export DEEPEDIT_SERVICE_URL=http://127.0.0.1:8010
+export DEEPEDIT_SERVICE_TIMEOUT_SECONDS=120
+uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+模型服务需要本地 TorchScript 权重和 PyTorch 环境；权重文件不要提交到 GitHub。

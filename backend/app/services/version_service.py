@@ -9,7 +9,7 @@ from backend.app.schemas.version import SaveVersionRequest, SaveVersionResponse,
 from backend.app.services.sqlite_service import get_record, list_records, upsert_record
 
 
-VALID_VERSIONS = {"v1_manual", "v2_ai", "v3_fusion", "final"}
+VALID_VERSIONS = {"v1_manual", "v2_ai", "v3_preview", "v3_fusion", "final"}
 
 
 def _now_iso() -> str:

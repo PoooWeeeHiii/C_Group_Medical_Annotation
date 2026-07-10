@@ -9,6 +9,7 @@ from backend.app.schemas.mask import (
     LabelPropagationResponse,
     MaskDetailResponse,
     MaskListResponse,
+    PromoteMaskRequest,
     SaveMaskRequest,
     SaveMaskResponse,
 )
@@ -17,10 +18,13 @@ from backend.app.services.mask_service import (
     export_mask_nifti,
     get_mask,
     get_mask_content,
+    get_mask_quality_summary,
     get_mask_slice_data,
+    get_mask_surface_mesh,
     get_mask_volume_data,
     label_propagate,
     list_masks_for_image,
+    promote_mask,
     save_mask,
 )
 
@@ -48,6 +52,11 @@ def refine_image_mask_deepedit(request: DeepEditRefineRequest) -> DeepEditRefine
     return deepedit_refine(request)
 
 
+@router.post("/mask/{mask_id}/promote", response_model=SaveMaskResponse)
+def promote_image_mask(mask_id: str, request: PromoteMaskRequest) -> SaveMaskResponse:
+    return promote_mask(mask_id=mask_id, target_version=request.target_version)
+
+
 @router.get("/mask/{mask_id}", response_model=MaskDetailResponse)
 def read_mask(mask_id: str) -> MaskDetailResponse:
     return MaskDetailResponse(success=True, mask=get_mask(mask_id), content=get_mask_content(mask_id))
@@ -56,6 +65,38 @@ def read_mask(mask_id: str) -> MaskDetailResponse:
 @router.get("/mask/{mask_id}/volume-data")
 def read_mask_volume_data(mask_id: str, max_dim: int = 176) -> dict:
     return get_mask_volume_data(mask_id=mask_id, max_dim=max_dim)
+
+
+@router.get("/mask/{mask_id}/surface-mesh")
+def read_mask_surface_mesh(
+    mask_id: str,
+    min_component_voxels: int = 64,
+    max_components: int = 8,
+    max_triangles: int = 90000,
+    target_reduction: float = 0.55,
+    smooth_iterations: int = 8,
+    remove_thin: bool = True,
+    constrain_to_body: bool = True,
+    constrain_to_source_roi: bool = True,
+    source_roi_margin_mm: float = 45.0,
+) -> dict:
+    return get_mask_surface_mesh(
+        mask_id=mask_id,
+        min_component_voxels=min_component_voxels,
+        max_components=max_components,
+        max_triangles=max_triangles,
+        target_reduction=target_reduction,
+        smooth_iterations=smooth_iterations,
+        remove_thin=remove_thin,
+        constrain_to_body=constrain_to_body,
+        constrain_to_source_roi=constrain_to_source_roi,
+        source_roi_margin_mm=source_roi_margin_mm,
+    )
+
+
+@router.get("/mask/{mask_id}/quality")
+def read_mask_quality(mask_id: str) -> dict:
+    return get_mask_quality_summary(mask_id=mask_id)
 
 
 @router.get("/mask/{mask_id}/slice/{slice_index}")

@@ -65,6 +65,125 @@ def init_sqlite_database() -> None:
         raise FileNotFoundError(f"schema.sql not found: {SCHEMA_SQL_PATH}")
     with connect() as connection:
         connection.executescript(SCHEMA_SQL_PATH.read_text(encoding="utf-8"))
+        _ensure_preview_version_supported(connection)
+
+
+def _table_sql(connection: sqlite3.Connection, table: str) -> str:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return str(row["sql"] if row and row["sql"] else "")
+
+
+def _ensure_preview_version_supported(connection: sqlite3.Connection) -> None:
+    schema_sql = SCHEMA_SQL_PATH.read_text(encoding="utf-8")
+    changed = False
+    if _table_sql(connection, "masks") and "v3_preview" not in _table_sql(connection, "masks"):
+        connection.executescript(
+            """
+            PRAGMA foreign_keys = OFF;
+            ALTER TABLE masks RENAME TO masks_old;
+            CREATE TABLE masks (
+                mask_id TEXT PRIMARY KEY,
+                annotation_id TEXT,
+                case_id TEXT NOT NULL,
+                image_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                version TEXT NOT NULL DEFAULT 'v1_manual'
+                    CHECK (version IN ('v1_manual', 'v2_ai', 'v3_preview', 'v3_fusion', 'final')),
+                label TEXT NOT NULL DEFAULT 'label',
+                label_id INTEGER,
+                mask_format TEXT NOT NULL DEFAULT 'nii.gz' CHECK (mask_format IN ('json', 'nii.gz', 'nrrd')),
+                slice_index INTEGER CHECK (slice_index IS NULL OR slice_index >= 0),
+                width INTEGER CHECK (width IS NULL OR width >= 0),
+                height INTEGER CHECK (height IS NULL OR height >= 0),
+                encoding TEXT,
+                source_mask_ids TEXT,
+                shape TEXT,
+                spacing TEXT,
+                origin TEXT,
+                direction TEXT,
+                create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (annotation_id) REFERENCES annotations(annotation_id) ON DELETE SET NULL,
+                FOREIGN KEY (case_id) REFERENCES cases(case_id) ON DELETE CASCADE,
+                FOREIGN KEY (image_id) REFERENCES images(image_id) ON DELETE CASCADE
+            );
+            INSERT INTO masks (
+                mask_id, annotation_id, case_id, image_id, path, version, label, label_id,
+                mask_format, slice_index, width, height, encoding, source_mask_ids,
+                shape, spacing, origin, direction, create_time
+            )
+            SELECT
+                mask_id, annotation_id, case_id, image_id, path, version, label, label_id,
+                mask_format, slice_index, width, height, encoding, source_mask_ids,
+                shape, spacing, origin, direction, create_time
+            FROM masks_old;
+            DROP TABLE masks_old;
+            PRAGMA foreign_keys = ON;
+            """
+        )
+        changed = True
+    if _table_sql(connection, "datasets") and "v3_preview" not in _table_sql(connection, "datasets"):
+        connection.executescript(
+            """
+            PRAGMA foreign_keys = OFF;
+            ALTER TABLE datasets RENAME TO datasets_old;
+            CREATE TABLE datasets (
+                dataset_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT 'medical_segmentation_dataset',
+                version TEXT NOT NULL DEFAULT 'final'
+                    CHECK (version IN ('v1_manual', 'v2_ai', 'v3_preview', 'v3_fusion', 'final')),
+                train TEXT NOT NULL DEFAULT '[]',
+                val TEXT NOT NULL DEFAULT '[]',
+                test TEXT NOT NULL DEFAULT '[]',
+                format TEXT NOT NULL DEFAULT 'nnunet',
+                manifest_path TEXT,
+                split_path TEXT,
+                label_map_path TEXT,
+                create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO datasets (
+                dataset_id, name, version, train, val, test, format,
+                manifest_path, split_path, label_map_path, create_time
+            )
+            SELECT
+                dataset_id, name, version, train, val, test, format,
+                manifest_path, split_path, label_map_path, create_time
+            FROM datasets_old;
+            DROP TABLE datasets_old;
+            PRAGMA foreign_keys = ON;
+            """
+        )
+        changed = True
+    if _table_sql(connection, "versions") and "v3_preview" not in _table_sql(connection, "versions"):
+        connection.executescript(
+            """
+            PRAGMA foreign_keys = OFF;
+            ALTER TABLE versions RENAME TO versions_old;
+            CREATE TABLE versions (
+                version_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id TEXT NOT NULL,
+                version TEXT NOT NULL CHECK (version IN ('v1_manual', 'v2_ai', 'v3_preview', 'v3_fusion', 'final')),
+                annotation TEXT,
+                model TEXT,
+                dataset TEXT,
+                create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (case_id, version),
+                FOREIGN KEY (case_id) REFERENCES cases(case_id) ON DELETE CASCADE,
+                FOREIGN KEY (model) REFERENCES models(model_id) ON DELETE SET NULL,
+                FOREIGN KEY (dataset) REFERENCES datasets(dataset_id) ON DELETE SET NULL
+            );
+            INSERT INTO versions (version_id, case_id, version, annotation, model, dataset, create_time)
+            SELECT version_id, case_id, version, annotation, model, dataset, create_time
+            FROM versions_old;
+            DROP TABLE versions_old;
+            PRAGMA foreign_keys = ON;
+            """
+        )
+        changed = True
+    if changed:
+        connection.executescript(schema_sql)
 
 
 def ensure_sqlite_ready() -> None:
@@ -159,7 +278,7 @@ def _ensure_annotation(connection: sqlite3.Connection, annotation_id: str | None
 
 def _upsert_mask(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
     source = "ai" if item.get("version") == "v2_ai" else "manual"
-    if item.get("version") == "v3_fusion":
+    if item.get("version") in {"v3_preview", "v3_fusion"}:
         source = "fusion"
     _ensure_annotation(connection, item.get("annotation_id"), item.get("image_id"), source)
     connection.execute(

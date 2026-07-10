@@ -8,6 +8,7 @@ const state = {
   restoredMaskSlices: {},
   sliceValueCache: {},
   propagatedSliceLoads: {},
+  maskQualityById: {},
   volumeMeta: {},
   volumeErrors: {},
   datasetExportResult: null,
@@ -28,6 +29,11 @@ const state = {
   annotationIgnoreNextClickUntil: 0,
   annotationPreviewRect: null,
   deepEditPromptMode: "positive",
+  refineParams: {
+    randomWalkerBeta: 90,
+    roiMargin: 24,
+    minVoxels: 64,
+  },
   magicWandPreset: "soft",
   magicWandThreshold: 45,
   magicWandMaxPixels: 180000,
@@ -359,7 +365,7 @@ async function create3DMaskPreview(item, image) {
       case_id: item.case_id,
       image_id: image.image_id,
       source_version: "v1_manual",
-      output_version: "v3_fusion",
+      output_version: "v3_preview",
       label: state.annotationLabel,
       method: "image_guided_distance",
       fill_holes: true,
@@ -369,7 +375,7 @@ async function create3DMaskPreview(item, image) {
     });
     await apiPost("/api/version", {
       case_id: item.case_id,
-      version: "v3_fusion",
+      version: "v3_preview",
       annotation: data.mask_id,
       model: "label_propagation_image_guided_distance",
       dataset: null,
@@ -382,7 +388,7 @@ async function create3DMaskPreview(item, image) {
   }
 }
 
-async function approveFinalMask(event) {
+async function promotePreviewMask(targetVersion, event) {
   const button = event.currentTarget;
   const item = activeCase();
   const image = activeImage();
@@ -396,36 +402,43 @@ async function approveFinalMask(event) {
   button.textContent = "确认中...";
   try {
     const masks = await loadImageMasks(image.image_id, { force: true });
-    const source = [...masks].reverse().find((mask) => mask.version === "v1_manual");
+    const source = latestMaskByVersion(masks, "v3_preview") ||
+      (targetVersion === "final" ? latestMaskByVersion(masks, "v3_fusion") : null);
     if (!source) {
-      throw new Error("当前图像还没有 v1_manual Mask，请先保存 Mask");
+      throw new Error(targetVersion === "final" ? "请先生成 v3_preview 或 v3_fusion 3D Mask" : "请先生成 v3_preview 预览结果");
     }
-    const data = await apiPost("/api/save_mask", {
-      case_id: item.case_id,
-      image_id: image.image_id,
-      annotation_id: source.annotation_id || null,
-      version: "final",
-      label: source.label || "label",
-      mask_format: "nii.gz",
+    const data = await apiPost(`/api/mask/${source.mask_id}/promote`, {
+      target_version: targetVersion,
     });
     await apiPost("/api/version", {
       case_id: item.case_id,
-      version: "final",
-      annotation: data.mask.annotation_id || source.annotation_id || null,
-      model: null,
+      version: targetVersion,
+      annotation: data.mask_id,
+      model: `promoted_from:${source.mask_id}`,
       dataset: null,
     });
     await loadImageMasks(image.image_id, { force: true });
     await loadCaseVersions(item.case_id, { force: true });
     await refreshCases();
-    showToast(`已设为 final：${data.mask_id}`);
+    state.active3DMaskId = data.mask_id;
+    state.volumeViewMode = "3d";
+    state.volumeLoadingKey = null;
+    showToast(`已确认 ${targetVersion}：${data.mask_id}`);
     render();
   } catch (error) {
-    showToast(error.message || "final 审核失败");
+    showToast(error.message || `${targetVersion} 确认失败`);
   } finally {
     button.disabled = false;
     button.textContent = previousText;
   }
+}
+
+async function approveFusionMask(event) {
+  return promotePreviewMask("v3_fusion", event);
+}
+
+async function approveFinalMask(event) {
+  return promotePreviewMask("final", event);
 }
 
 async function runAIPredict(event) {
@@ -573,9 +586,12 @@ async function runSmart3DRefine(event) {
       source_version: "v1_manual",
       current_mask_version: "v3_fusion",
       current_mask_id: current3DMask?.mask_id || null,
-      output_version: "v3_fusion",
+      output_version: "v3_preview",
       label: state.annotationLabel,
       model_id: "DeepEdit",
+      random_walker_beta: state.refineParams.randomWalkerBeta,
+      random_walker_roi_margin: state.refineParams.roiMargin,
+      connected_component_min_voxels: state.refineParams.minVoxels,
       positive_points: prompts.positive,
       negative_points: prompts.negative,
       scribbles,
@@ -589,7 +605,7 @@ async function runSmart3DRefine(event) {
     });
     await apiPost("/api/version", {
       case_id: item.case_id,
-      version: "v3_fusion",
+      version: "v3_preview",
       annotation: data.mask_id,
       model: data.refinement_mode,
       dataset: null,
@@ -601,7 +617,7 @@ async function runSmart3DRefine(event) {
     state.volumeViewMode = "3d";
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
-    showToast(`智能3D传播修正完成：${data.mask_id} · ${data.model_status || data.refinement_mode}`);
+    showToast(`已生成 v3_preview 预览：${data.mask_id} · ${data.model_status || data.refinement_mode}`);
     render();
   } catch (error) {
     showToast(error.message || "智能3D传播修正失败");
@@ -809,8 +825,8 @@ function renderDashboard() {
         <div class="log-box">上传 CT -> 生成 Case / Image
 人工 ROI -> 保存 Mask
 AI 预测 -> v2_ai
-人工修正 -> v3_fusion
-审核确认 -> final
+智能修正 -> v3_preview
+确认预览 -> v3_fusion / final
 导出数据集 -> Dataset0001</div>
       </section>
     </div>
@@ -882,13 +898,21 @@ function versionsForActiveCase() {
   return item ? state.versionsByCase[item.case_id] || [] : [];
 }
 
+function latestMaskByVersion(masks, version) {
+  return [...(masks || [])]
+    .filter((mask) => mask.version === version)
+    .sort((a, b) => String(b.create_time || "").localeCompare(String(a.create_time || "")))[0] || null;
+}
+
 function latest3DMask(masks) {
-  const priority = { final: 4, v3_fusion: 3, v2_ai: 2, v1_manual: 1 };
+  const priority = { final: 5, v3_fusion: 4, v3_preview: 3, v2_ai: 2, v1_manual: 1 };
+  const propagated = latestPropagatedMask(masks);
   const preferred = [...(masks || [])].find((mask) => (
     mask.mask_id === state.active3DMaskId &&
     (mask.mask_format === "nii.gz" || String(mask.path || "").endsWith(".nii.gz"))
   ));
-  if (preferred) return preferred;
+  if (preferred && (priority[preferred.version] || 0) >= 3) return preferred;
+  if (propagated) return propagated;
   return [...(masks || [])]
     .filter((mask) => mask.mask_format === "nii.gz" || String(mask.path || "").endsWith(".nii.gz"))
     .sort((a, b) => {
@@ -899,17 +923,91 @@ function latest3DMask(masks) {
 }
 
 function latestPropagatedMask(masks) {
-  const priority = { final: 3, v3_fusion: 2 };
+  const priority = { final: 4, v3_fusion: 3, v3_preview: 2 };
   return [...(masks || [])]
     .filter((mask) => (
       (mask.mask_format === "nii.gz" || String(mask.path || "").endsWith(".nii.gz")) &&
-      (mask.version === "v3_fusion" || mask.version === "final")
+      (mask.version === "v3_preview" || mask.version === "v3_fusion" || mask.version === "final")
     ))
     .sort((a, b) => {
       const versionScore = (priority[b.version] || 0) - (priority[a.version] || 0);
       if (versionScore !== 0) return versionScore;
       return String(b.create_time || "").localeCompare(String(a.create_time || ""));
     })[0] || null;
+}
+
+function formatInteger(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toLocaleString("zh-CN") : "-";
+}
+
+function formatNumber(value, digits = 2) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toLocaleString("zh-CN", { maximumFractionDigits: digits }) : "-";
+}
+
+function formatPercent(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${(number * 100).toFixed(1)}%` : "-";
+}
+
+function formatSliceRange(range) {
+  if (!range || range.start === null || range.end === null || range.start === undefined || range.end === undefined) {
+    return "无";
+  }
+  return `${Number(range.start) + 1}-${Number(range.end) + 1}（${formatInteger(range.count)}层）`;
+}
+
+async function loadMaskQuality(maskId, { force = false } = {}) {
+  if (!maskId) return null;
+  if (!force && state.maskQualityById[maskId]) return state.maskQualityById[maskId];
+  const data = await apiGet(`/api/mask/${maskId}/quality`);
+  state.maskQualityById[maskId] = data;
+  return data;
+}
+
+function renderMaskQualitySummary(mask) {
+  if (!mask) {
+    return `<div class="mask-quality-summary muted">暂无 3D Mask 质量摘要。</div>`;
+  }
+  const quality = state.maskQualityById[mask.mask_id];
+  if (!quality) {
+    return `
+      <div class="mask-quality-summary" id="maskQualitySummary" data-mask-id="${escapeHtml(mask.mask_id)}">
+        <span>质量摘要</span>
+        <div class="quality-grid"><strong>加载中...</strong></div>
+      </div>
+    `;
+  }
+  return `
+    <div class="mask-quality-summary" id="maskQualitySummary" data-mask-id="${escapeHtml(mask.mask_id)}">
+      ${maskQualitySummaryMarkup(quality)}
+    </div>
+  `;
+}
+
+function maskQualitySummaryMarkup(quality) {
+  return `
+    <span>质量摘要</span>
+    <div class="quality-grid">
+      <strong><em>体素数</em>${formatInteger(quality.voxel_count)}</strong>
+      <strong><em>体积</em>${formatNumber(quality.volume_ml, 3)} ml</strong>
+      <strong><em>连通域</em>${formatInteger(quality.connected_component_count)}</strong>
+      <strong><em>最大连通域</em>${formatPercent(quality.largest_component_ratio)}</strong>
+      <strong><em>切片范围</em>${formatSliceRange(quality.slice_range)}</strong>
+    </div>
+  `;
+}
+
+function updateMaskQualitySummary(maskId) {
+  const target = $("#maskQualitySummary");
+  if (!target || target.dataset.maskId !== maskId) return;
+  const quality = state.maskQualityById[maskId];
+  if (!quality) {
+    target.innerHTML = `<span>质量摘要</span><div class="quality-grid"><strong>加载失败</strong></div>`;
+    return;
+  }
+  target.innerHTML = maskQualitySummaryMarkup(quality);
 }
 
 function renderMaskList(masks) {
@@ -931,7 +1029,7 @@ function renderMaskList(masks) {
 
 function renderVersionList(versions) {
   if (!versions.length) {
-    return `<div class="placeholder compact">暂无版本记录。保存 Mask 后会写入 v1_manual，设为 final 后会写入 final。</div>`;
+    return `<div class="placeholder compact">暂无版本记录。保存 Mask 后会写入 v1_manual，智能修正后写入 v3_preview，确认后写入 v3_fusion 或 final。</div>`;
   }
   return `
     <div class="version-record-list">
@@ -986,6 +1084,31 @@ function renderDeepEditControls() {
         <button class="${state.deepEditPromptMode === "negative" ? "active" : ""}" data-deepedit-prompt="negative" type="button">负点</button>
       </div>
       <small>点标注会作为神经网络交互提示；画笔/多边形作为 scribble mask。</small>
+    </div>
+  `;
+}
+
+function renderRefineParamControls() {
+  const params = state.refineParams;
+  return `
+    <div class="refine-param-controls">
+      <div class="param-header"><span>修正参数</span><strong>Fallback 图模型</strong></div>
+      <label class="param-row" for="randomWalkerBeta">
+        <span>边界敏感度 beta</span>
+        <input id="randomWalkerBeta" type="range" min="20" max="180" step="5" value="${params.randomWalkerBeta}" />
+        <input id="randomWalkerBetaValue" type="number" min="20" max="180" step="5" value="${params.randomWalkerBeta}" />
+      </label>
+      <label class="param-row" for="roiMargin">
+        <span>ROI margin</span>
+        <input id="roiMargin" type="range" min="4" max="80" step="2" value="${params.roiMargin}" />
+        <input id="roiMarginValue" type="number" min="4" max="80" step="2" value="${params.roiMargin}" />
+      </label>
+      <label class="param-row" for="minVoxels">
+        <span>最小连通域体素</span>
+        <input id="minVoxels" type="range" min="0" max="1000" step="16" value="${params.minVoxels}" />
+        <input id="minVoxelsValue" type="number" min="0" max="1000" step="16" value="${params.minVoxels}" />
+      </label>
+      <small>beta 越高越贴灰度边界；ROI margin 越大搜索区域越宽；最小体素越大越容易清理小噪点。</small>
     </div>
   `;
 }
@@ -1064,6 +1187,7 @@ function render3DViewer(item, image, volume, masks = []) {
         <span>3D Mask 实体叠加</span>
         <strong>${active3DMask ? `${active3DMask.mask_id} · ${active3DMask.version}` : "暂无 3D Mask"}</strong>
         <code>${active3DMask ? active3DMask.path : "请先在 2D 中保存 Mask，再执行智能3D传播修正"}</code>
+        ${renderMaskQualitySummary(active3DMask)}
       </div>
       <button class="primary-button" data-render-annotation-3d ${canRender ? "" : "disabled"}>高亮显示当前标注</button>
     </div>
@@ -1073,13 +1197,13 @@ function render3DViewer(item, image, volume, masks = []) {
       <div class="viewer-toolbar"><span>${item ? item.case_id : "暂无病例"} | 3D体视图</span><span>${canRender ? `${width} × ${height} × ${depth}` : "等待体数据"}</span></div>
       ${renderViewerModeButtons()}
       <div id="volumeContainer" class="volume-container" data-image-id="${image?.image_id || ""}" data-mask-id="${active3DMask?.mask_id || ""}">
-        <div class="volume-status">${canRender ? "正在初始化 WebGL2 真实体渲染..." : "正在读取体数据..."}</div>
+        <div class="volume-status">${canRender ? "正在初始化 VTK 综合重建..." : "正在读取体数据..."}</div>
       </div>
       ${mprGrid}
       ${mipGrid}
       ${maskOverlayPanel}
-      <div class="image-source-line">三维体渲染用于总览、软组织和骨窗观察；细小病灶请结合 2D 切片、MIP 和 MinIP。</div>
-      <div class="image-source-line">3D来源：${canRender ? `浏览器 GPU WebGL2 3D Texture Ray Casting + /api/image/${image.image_id}/volume-data + ${active3DMask ? `/api/mask/${active3DMask.mask_id}/volume-data` : "无 Mask 叠加"}` : "等待加载"}</div>
+      <div class="image-source-line">三维视图默认使用 VTK 综合重建：外层、肺/低密度腔、软组织、骨性结构和 Mask 均使用 VTK mesh。</div>
+      <div class="image-source-line">3D来源：${canRender ? `/api/image/${image.image_id}/surface-mesh?protocol=body|lung|soft|bone${active3DMask ? ` + /api/mask/${active3DMask.mask_id}/surface-mesh` : ""}；WebGL2 体渲染保留为备用` : "等待加载"}</div>
     </section>
   `;
 }
@@ -1102,6 +1226,9 @@ function renderAnnotation() {
     meta.push(["图像", image.image_id]);
     meta.push(["格式", image.file_format]);
   }
+  const previewMask = latestMaskByVersion(masks, "v3_preview");
+  const fusionMask = latestMaskByVersion(masks, "v3_fusion");
+  const versionTimeline = ["v1_manual", "v2_ai", "v3_preview", "v3_fusion", "final"];
   return `
     <div class="workbench-layout">
       <aside class="case-sidebar">
@@ -1113,7 +1240,7 @@ function renderAnnotation() {
           <div class="meta-line"><span>读取器</span><strong id="volumeSource">${volume?.source || "-"}</strong></div>
         </div>
         <h3 style="margin-top:24px">版本</h3>
-        <div class="timeline">${["v1_manual", "v2_ai", "v3_fusion", "final"].map((version) => `<span class="chip ${versions.some((item) => item.version === version) ? "active-chip" : ""}">${version}</span>`).join("")}</div>
+        <div class="timeline">${versionTimeline.map((version) => `<span class="chip ${versions.some((item) => item.version === version) ? "active-chip" : ""}">${version}</span>`).join("")}</div>
         <h3 style="margin-top:24px">标签</h3>
         <div class="label-list">${labelList()}</div>
       </aside>
@@ -1124,10 +1251,12 @@ function renderAnnotation() {
         <div class="annotation-state-line"><span>当前工具：<strong id="annotationToolLabel">${annotationToolLabel()}</strong></span><span>当前 label：<strong>${escapeHtml(state.annotationLabel)} #${state.annotationLabelId}</strong></span><span>智能阈值：<strong>HU ± ${state.magicWandThreshold}</strong></span><span>当前切片：<strong id="annotationMaskStats">0 像素</strong></span></div>
         ${renderMagicWandControls()}
         ${renderDeepEditControls()}
+        ${renderRefineParamControls()}
         <div class="grid action-stack" style="margin-top:18px">
           <button class="primary-button" data-save-mask ${image ? "" : "disabled"}>保存 Mask</button>
-          <button class="ghost-button" data-final-mask ${masks.some((mask) => mask.version === "v1_manual") ? "" : "disabled"}>设为 final</button>
           <button class="ghost-button" data-smart-3d-refine ${image ? "" : "disabled"}>智能3D传播修正</button>
+          <button class="ghost-button" data-confirm-fusion ${previewMask ? "" : "disabled"}>确认 v3_fusion</button>
+          <button class="ghost-button" data-final-mask ${previewMask || fusionMask ? "" : "disabled"}>确认 final</button>
           <button class="ghost-button" data-export-mask-nifti ${image ? "" : "disabled"}>导出 3D Mask</button>
           <button class="ghost-button" data-start-3d-render ${image ? "" : "disabled"}>导出 3D 图像</button>
           <button class="danger-button">驳回</button>
@@ -1334,6 +1463,27 @@ function bindMagicWandControls() {
       state.magicWandPreset = "custom";
       updateMagicWandControls();
     });
+  }
+}
+
+function bindRefineParamControls() {
+  const bindings = [
+    ["randomWalkerBeta", "randomWalkerBetaValue", "randomWalkerBeta", 20, 180],
+    ["roiMargin", "roiMarginValue", "roiMargin", 4, 80],
+    ["minVoxels", "minVoxelsValue", "minVoxels", 0, 1000],
+  ];
+  for (const [rangeId, numberId, key, min, max] of bindings) {
+    const range = $(`#${rangeId}`);
+    const number = $(`#${numberId}`);
+    if (!range || !number) continue;
+    const update = (rawValue) => {
+      const value = clamp(Number(rawValue) || min, min, max);
+      state.refineParams[key] = value;
+      range.value = String(value);
+      number.value = String(value);
+    };
+    range.addEventListener("input", () => update(range.value));
+    number.addEventListener("change", () => update(number.value));
   }
 }
 
@@ -2221,7 +2371,7 @@ function renderVersions() {
   return `
     <section class="panel">
       <h2>${item ? item.case_id : "暂无病例"} 版本时间线</h2>
-      <div class="timeline">${["v1_manual", "v2_ai", "v3_fusion", "final"].map((version) => `<span class="chip ${versions.some((entry) => entry.version === version) ? "active-chip" : ""}">${version}</span>`).join("")}</div>
+      <div class="timeline">${["v1_manual", "v2_ai", "v3_preview", "v3_fusion", "final"].map((version) => `<span class="chip ${versions.some((entry) => entry.version === version) ? "active-chip" : ""}">${version}</span>`).join("")}</div>
       ${renderVersionList(versions)}
     </section>
     <div class="grid cols-2" style="margin-top:18px"><section class="viewer"><h2>人工 / AI 版本</h2><div class="ct-frame" style="min-height:330px"><div class="mask-overlay"></div></div></section><section class="viewer"><h2>final 审核版本</h2><div class="ct-frame" style="min-height:330px"><div class="roi-box"></div></div></section></div>
@@ -2289,6 +2439,7 @@ function render() {
     button.addEventListener("click", () => setAnnotationTool(button.dataset.annotationTool));
   });
   bindMagicWandControls();
+  bindRefineParamControls();
   document.querySelectorAll("[data-deepedit-prompt]").forEach((button) => {
     button.addEventListener("click", () => {
       state.deepEditPromptMode = button.dataset.deepeditPrompt === "negative" ? "negative" : "positive";
@@ -2303,6 +2454,10 @@ function render() {
   const finalMaskButton = $("[data-final-mask]");
   if (finalMaskButton) {
     finalMaskButton.addEventListener("click", approveFinalMask);
+  }
+  const fusionMaskButton = $("[data-confirm-fusion]");
+  if (fusionMaskButton) {
+    fusionMaskButton.addEventListener("click", approveFusionMask);
   }
   const aiPredictButton = $("[data-ai-predict]");
   if (aiPredictButton) {
@@ -2377,7 +2532,15 @@ async function startVolumeViewer(image) {
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/volume_viewer.js?v=mask-entity-visible-continuous-20260702`);
+    const module = await import(`/frontend/volume_viewer.js?v=vtk-organ-color-ui-20260710`);
+    if (maskId) {
+      loadMaskQuality(maskId)
+        .then(() => updateMaskQualitySummary(maskId))
+        .catch((error) => {
+          console.warn(`3D Mask 质量摘要加载失败：${maskId}`, error);
+          updateMaskQualitySummary(maskId);
+        });
+    }
     await module.renderVolume3D({
       container,
       imageId: image.image_id,

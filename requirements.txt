@@ -11,6 +11,7 @@ pydicom
 SimpleITK
 opencv-python
 pillow
+vtk
 
 # AI baseline
 torch

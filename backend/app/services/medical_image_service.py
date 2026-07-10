@@ -8,6 +8,7 @@ import threading
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from zipfile import ZipFile
 
 import numpy as np
@@ -544,6 +545,243 @@ def get_volume_render_data(
         "downsample_stride": [stride_z, stride_y, stride_x],
         "value_range": [int(values.min()), int(values.max())],
         "values_base64": payload,
+    }
+
+
+def _filter_binary_components(binary: np.ndarray, min_voxels: int, max_components: int) -> tuple[np.ndarray, dict[str, Any]]:
+    try:
+        from scipy import ndimage as ndi
+    except ModuleNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="scipy is required for VTK CT surface mesh") from exc
+
+    before = int(np.count_nonzero(binary))
+    if before == 0:
+        return binary.astype(np.uint8, copy=False), {
+            "voxel_count_before": 0,
+            "voxel_count_after": 0,
+            "component_count_before": 0,
+            "component_count_after": 0,
+        }
+    labeled, component_count = ndi.label(binary > 0, structure=np.ones((3, 3, 3), dtype=np.uint8))
+    sizes = np.bincount(labeled.reshape(-1))
+    labels = np.arange(1, sizes.size)
+    keep = [
+        int(label)
+        for label in sorted(labels, key=lambda value: int(sizes[value]), reverse=True)
+        if int(sizes[label]) >= max(1, int(min_voxels))
+    ][: max(1, int(max_components))]
+    if not keep and labels.size:
+        keep = [int(labels[np.argmax(sizes[1:])])]
+    cleaned = np.isin(labeled, keep)
+    after = int(np.count_nonzero(cleaned))
+    return cleaned.astype(np.uint8, copy=False), {
+        "voxel_count_before": before,
+        "voxel_count_after": after,
+        "component_count_before": int(component_count),
+        "component_count_after": len(keep),
+        "removed_voxels": before - after,
+        "kept_component_voxels": [int(sizes[label]) for label in keep],
+    }
+
+
+def _vtk_binary_surface_mesh(
+    binary: np.ndarray,
+    spacing: tuple[float, float, float],
+    origin: tuple[float, float, float],
+    max_triangles: int,
+    target_reduction: float,
+    smooth_iterations: int,
+) -> tuple[np.ndarray, np.ndarray, list[int], dict[str, int]]:
+    try:
+        import vtk
+        from vtk.util import numpy_support
+    except ModuleNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="vtk is not installed. Run `pip install -r requirements.txt` to enable VTK CT surface mesh.",
+        ) from exc
+
+    depth, height, width = binary.shape[:3]
+    image_data = vtk.vtkImageData()
+    image_data.SetDimensions(int(width), int(height), int(depth))
+    image_data.SetSpacing(tuple(float(value) for value in spacing))
+    image_data.SetOrigin(tuple(float(value) for value in origin))
+    scalars = numpy_support.numpy_to_vtk(
+        np.ascontiguousarray(binary.astype(np.uint8, copy=False)).reshape(-1, order="C"),
+        deep=True,
+        array_type=vtk.VTK_UNSIGNED_CHAR,
+    )
+    scalars.SetName("surface")
+    image_data.GetPointData().SetScalars(scalars)
+
+    marching = vtk.vtkMarchingCubes()
+    marching.SetInputData(image_data)
+    marching.SetValue(0, 0.5)
+    marching.ComputeNormalsOff()
+    marching.ComputeGradientsOff()
+    marching.Update()
+
+    triangle_filter = vtk.vtkTriangleFilter()
+    triangle_filter.SetInputConnection(marching.GetOutputPort())
+    triangle_filter.Update()
+    polydata = triangle_filter.GetOutput()
+
+    if smooth_iterations > 0 and polydata.GetNumberOfPoints() > 0:
+        smoother = vtk.vtkWindowedSincPolyDataFilter()
+        smoother.SetInputData(polydata)
+        smoother.SetNumberOfIterations(max(0, min(int(smooth_iterations), 18)))
+        smoother.BoundarySmoothingOff()
+        smoother.FeatureEdgeSmoothingOff()
+        smoother.NonManifoldSmoothingOn()
+        smoother.NormalizeCoordinatesOn()
+        smoother.Update()
+        if smoother.GetOutput().GetNumberOfPolys() > 0:
+            polydata = smoother.GetOutput()
+
+    original_triangles = int(polydata.GetNumberOfPolys())
+    if original_triangles > max_triangles:
+        reduction = max(float(target_reduction), min(0.94, 1.0 - (float(max_triangles) / float(original_triangles))))
+        best = polydata
+        best_count = original_triangles
+        for attempt in sorted(set([reduction, 0.70, 0.84, 0.92, 0.95])):
+            decimator = vtk.vtkQuadricDecimation()
+            decimator.SetInputData(polydata)
+            decimator.SetTargetReduction(max(0.0, min(float(attempt), 0.95)))
+            decimator.VolumePreservationOn()
+            decimator.Update()
+            output = decimator.GetOutput()
+            count = int(output.GetNumberOfPolys())
+            if output.GetNumberOfPoints() > 0 and 0 < count < best_count:
+                best = output
+                best_count = count
+            if 0 < count <= max_triangles:
+                best = output
+                break
+        polydata = best
+
+    normals_filter = vtk.vtkPolyDataNormals()
+    normals_filter.SetInputData(polydata)
+    normals_filter.ComputePointNormalsOn()
+    normals_filter.ComputeCellNormalsOff()
+    normals_filter.SplittingOff()
+    normals_filter.ConsistencyOn()
+    normals_filter.AutoOrientNormalsOn()
+    normals_filter.Update()
+    normals_polydata = normals_filter.GetOutput()
+    if normals_polydata.GetNumberOfPoints() > 0 and normals_polydata.GetPointData().GetNormals() is not None:
+        polydata = normals_polydata
+
+    if polydata.GetNumberOfPoints() == 0 or polydata.GetNumberOfPolys() == 0:
+        raise HTTPException(status_code=422, detail="VTK could not extract CT surface mesh")
+
+    points = numpy_support.vtk_to_numpy(polydata.GetPoints().GetData()).astype(np.float32, copy=False)
+    normal_data = polydata.GetPointData().GetNormals()
+    if normal_data is not None:
+        normals = numpy_support.vtk_to_numpy(normal_data).astype(np.float32, copy=False)
+    else:
+        normals = np.zeros_like(points, dtype=np.float32)
+    extent = np.array(
+        [
+            spacing[0] * max(width - 1, 1),
+            spacing[1] * max(height - 1, 1),
+            spacing[2] * max(depth - 1, 1),
+        ],
+        dtype=np.float32,
+    )
+    normalized = (points - np.array(origin, dtype=np.float32)) / np.maximum(extent, 1e-6)
+    normalized = np.clip(normalized, 0.0, 1.0).astype(np.float32, copy=False)
+
+    polys = numpy_support.vtk_to_numpy(polydata.GetPolys().GetData()).astype(np.int64, copy=False)
+    indices: list[int] = []
+    cursor = 0
+    while cursor < polys.size:
+        count = int(polys[cursor])
+        if count == 3 and cursor + 3 < polys.size:
+            indices.extend(int(value) for value in polys[cursor + 1 : cursor + 4])
+        cursor += count + 1
+    return normalized, normals.astype(np.float32, copy=False), indices, {
+        "original_triangle_count": original_triangles,
+        "triangle_count": int(len(indices) // 3),
+        "vertex_count": int(normalized.shape[0]),
+    }
+
+
+def get_image_surface_mesh(
+    image_id: str,
+    protocol: str = "bone",
+    max_dim: int = 176,
+    min_component_voxels: int = 512,
+    max_components: int = 3,
+    max_triangles: int = 120000,
+    target_reduction: float = 0.50,
+    smooth_iterations: int = 6,
+) -> dict[str, Any]:
+    image, volume = load_volume(image_id)
+    downsampled, strides = _downsample_volume(volume.array, max_dim=max_dim)
+    protocol = (protocol or "bone").strip().lower()
+    if protocol == "body":
+        binary = downsampled > -550
+        iso_description = "body HU > -550"
+    elif protocol == "lung":
+        try:
+            from scipy import ndimage as ndi
+        except ModuleNotFoundError as exc:
+            raise HTTPException(status_code=500, detail="scipy is required for lung VTK surface mesh") from exc
+        body_seed = downsampled > -850
+        envelope = np.zeros_like(body_seed, dtype=bool)
+        for z in range(body_seed.shape[0]):
+            envelope[z] = ndi.binary_fill_holes(body_seed[z])
+        envelope = ndi.binary_closing(envelope, structure=np.ones((3, 5, 5), dtype=bool), iterations=1)
+        binary = envelope & (downsampled > -980) & (downsampled < -420)
+        iso_description = "lung/low-density cavity inside body envelope"
+    elif protocol == "soft":
+        binary = (downsampled > -160) & (downsampled < 360)
+        iso_description = "soft tissue -160 < HU < 360"
+    else:
+        protocol = "bone"
+        binary = downsampled > 180
+        iso_description = "bone HU > 180"
+
+    binary, cleanup = _filter_binary_components(
+        binary.astype(np.uint8, copy=False),
+        min_voxels=min_component_voxels,
+        max_components=max_components,
+    )
+    if not np.any(binary):
+        raise HTTPException(status_code=422, detail=f"No CT surface found for protocol: {protocol}")
+
+    stride_z, stride_y, stride_x = strides
+    spacing = (
+        float(volume.spacing[0]) * stride_x,
+        float(volume.spacing[1]) * stride_y,
+        float(volume.spacing[2]) * stride_z,
+    )
+    positions, normals, indices, mesh_info = _vtk_binary_surface_mesh(
+        binary=binary,
+        spacing=spacing,
+        origin=volume.origin,
+        max_triangles=max_triangles,
+        target_reduction=target_reduction,
+        smooth_iterations=smooth_iterations,
+    )
+    depth, height, width = binary.shape[:3]
+    return {
+        "success": True,
+        "image_id": image["image_id"],
+        "case_id": image["case_id"],
+        "source": "vtk_marching_cubes",
+        "protocol": protocol,
+        "iso": iso_description,
+        "dimensions": [width, height, depth],
+        "spacing": [float(value) for value in spacing],
+        "origin": [float(value) for value in volume.origin],
+        "cleanup": cleanup,
+        "vertex_count": mesh_info["vertex_count"],
+        "triangle_count": mesh_info["triangle_count"],
+        "original_triangle_count": mesh_info["original_triangle_count"],
+        "positions": positions.reshape(-1).round(6).tolist(),
+        "normals": normals.reshape(-1).round(5).tolist(),
+        "indices": indices,
     }
 
 

@@ -67,6 +67,33 @@ const RENDERING_PRESETS = [
 
 const PRESET_BY_ID = new Map(RENDERING_PRESETS.map((preset) => [preset.id, preset]));
 
+const CT_MESH_LAYER_STYLES = {
+  body: {
+    label: "外层",
+    color: [0.36, 0.58, 0.72],
+    alphaKey: "outerMeshAlpha",
+    material: "outer",
+  },
+  lung: {
+    label: "肺/低密度腔",
+    color: [0.30, 0.70, 0.95],
+    alphaKey: "lungMeshAlpha",
+    material: "lung",
+  },
+  soft: {
+    label: "软组织",
+    color: [0.86, 0.62, 0.55],
+    alphaKey: "innerMeshAlpha",
+    material: "soft",
+  },
+  bone: {
+    label: "骨性",
+    color: [0.92, 0.88, 0.68],
+    alphaKey: "boneMeshAlpha",
+    material: "bone",
+  },
+};
+
 function defaultPreset() {
   return RENDERING_PRESETS[0];
 }
@@ -78,6 +105,162 @@ function decodeBase64ToUint8Array(value) {
     output[i] = binary.charCodeAt(i);
   }
   return output;
+}
+
+function hexToRgb01(hex) {
+  const value = String(hex || "#00e5b0").replace("#", "").trim();
+  const normalized = value.length === 3
+    ? value.split("").map((part) => part + part).join("")
+    : value.padEnd(6, "0").slice(0, 6);
+  const number = Number.parseInt(normalized, 16);
+  return [
+    ((number >> 16) & 255) / 255,
+    ((number >> 8) & 255) / 255,
+    (number & 255) / 255,
+  ];
+}
+
+function isMaskSurfaceVoxel(values, width, height, depth, x, y, z) {
+  const index = z * width * height + y * width + x;
+  if (!values[index]) return false;
+  return (
+    x === 0 || x === width - 1 ||
+    y === 0 || y === height - 1 ||
+    z === 0 || z === depth - 1 ||
+    !values[index - 1] ||
+    !values[index + 1] ||
+    !values[index - width] ||
+    !values[index + width] ||
+    !values[index - width * height] ||
+    !values[index + width * height]
+  );
+}
+
+function hasMaskThicknessSupport(values, width, height, depth, x, y, z) {
+  const index = z * width * height + y * width + x;
+  if (!values[index]) return false;
+  const area = width * height;
+  const zMinus2 = z >= 2 && values[index - area * 2];
+  const zPlus2 = z < depth - 2 && values[index + area * 2];
+  const zMinus3 = z >= 3 && values[index - area * 3];
+  const zPlus3 = z < depth - 3 && values[index + area * 3];
+  if (!(zMinus2 || zPlus2 || zMinus3 || zPlus3)) {
+    return false;
+  }
+
+  let support = 0;
+  for (let dz = -2; dz <= 2; dz += 1) {
+    const zz = z + dz;
+    if (zz < 0 || zz >= depth) continue;
+    for (let dy = -1; dy <= 1; dy += 1) {
+      const yy = y + dy;
+      if (yy < 0 || yy >= height) continue;
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const xx = x + dx;
+        if (xx < 0 || xx >= width) continue;
+        if (values[zz * area + yy * width + xx]) support += 1;
+      }
+    }
+  }
+  return support >= 12;
+}
+
+function huFromTextureValue(value, huRange) {
+  const low = Number(huRange?.[0] ?? -1000);
+  const high = Number(huRange?.[1] ?? 1800);
+  return low + (high - low) * (Number(value) / 255);
+}
+
+function hasNearbyBodySignal(volumeData, volumeValues, width, height, depth, x, y, z) {
+  if (!volumeData || !volumeValues || !Array.isArray(volumeData.dimensions)) {
+    return true;
+  }
+  if (
+    volumeData.dimensions[0] !== width ||
+    volumeData.dimensions[1] !== height ||
+    volumeData.dimensions[2] !== depth
+  ) {
+    return true;
+  }
+  const huRange = Array.isArray(volumeData.hu_range) ? volumeData.hu_range : [-1000, 1800];
+  const offsets = [
+    [0, 0, 0],
+    [4, 0, 0], [-4, 0, 0],
+    [0, 4, 0], [0, -4, 0],
+    [0, 0, 3], [0, 0, -3],
+    [7, 0, 0], [-7, 0, 0],
+    [0, 7, 0], [0, -7, 0],
+    [0, 0, 5], [0, 0, -5],
+  ];
+  for (const [dx, dy, dz] of offsets) {
+    const sx = Math.max(0, Math.min(width - 1, x + dx));
+    const sy = Math.max(0, Math.min(height - 1, y + dy));
+    const sz = Math.max(0, Math.min(depth - 1, z + dz));
+    const hu = huFromTextureValue(volumeValues[sz * width * height + sy * width + sx], huRange);
+    if (hu > -700) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function createMaskSurfacePoints(maskData, maskValues, options = {}) {
+  const maxPoints = options.maxPoints || 140000;
+  if (!maskData || !maskValues || !Array.isArray(maskData.dimensions)) {
+    return new Float32Array();
+  }
+  const [width, height, depth] = maskData.dimensions.map((value) => Number(value) || 0);
+  if (!width || !height || !depth) return new Float32Array();
+
+  const candidates = [];
+  let stride = 1;
+  const voxelCount = width * height * depth;
+  if (voxelCount > 180 * 180 * 180) stride = 2;
+  if (voxelCount > 260 * 260 * 180) stride = 3;
+
+  for (let z = 0; z < depth; z += stride) {
+    for (let y = 0; y < height; y += stride) {
+      for (let x = 0; x < width; x += stride) {
+        if (
+          isMaskSurfaceVoxel(maskValues, width, height, depth, x, y, z) &&
+          hasMaskThicknessSupport(maskValues, width, height, depth, x, y, z) &&
+          hasNearbyBodySignal(options.volumeData, options.volumeValues, width, height, depth, x, y, z)
+        ) {
+          candidates.push((x + 0.5) / width, (y + 0.5) / height, (z + 0.5) / depth);
+        }
+      }
+    }
+  }
+
+  if (candidates.length / 3 <= maxPoints) {
+    return new Float32Array(candidates);
+  }
+  const output = new Float32Array(maxPoints * 3);
+  const step = Math.ceil(candidates.length / 3 / maxPoints);
+  let cursor = 0;
+  for (let point = 0; point < candidates.length / 3 && cursor < output.length; point += step) {
+    output[cursor++] = candidates[point * 3];
+    output[cursor++] = candidates[point * 3 + 1];
+    output[cursor++] = candidates[point * 3 + 2];
+  }
+  return output.subarray(0, cursor);
+}
+
+function normalizeMeshPayload(meshData) {
+  if (!meshData || !Array.isArray(meshData.positions) || !Array.isArray(meshData.indices)) {
+    return null;
+  }
+  if (meshData.positions.length < 9 || meshData.indices.length < 3) {
+    return null;
+  }
+  return {
+    ...meshData,
+    positionsArray: new Float32Array(meshData.positions),
+    normalsArray: Array.isArray(meshData.normals) && meshData.normals.length === meshData.positions.length
+      ? new Float32Array(meshData.normals)
+      : new Float32Array(meshData.positions.length),
+    indicesArray: new Uint32Array(meshData.indices),
+  };
 }
 
 function clearContainer(container) {
@@ -109,8 +292,26 @@ export async function renderVolume3D({
 
   const volumeData = await response.json();
   const values = decodeBase64ToUint8Array(volumeData.values_base64);
+  status.textContent = "正在提取 VTK CT 内外表面网格...";
+  const ctMeshRequests = [
+    { protocol: "body", query: `protocol=body&max_dim=${maxDim}&min_component_voxels=2000&max_components=1&max_triangles=70000&target_reduction=0.45&smooth_iterations=12` },
+    { protocol: "lung", query: `protocol=lung&max_dim=${maxDim}&min_component_voxels=900&max_components=4&max_triangles=70000&target_reduction=0.46&smooth_iterations=12` },
+    { protocol: "soft", query: `protocol=soft&max_dim=${maxDim}&min_component_voxels=1200&max_components=8&max_triangles=110000&target_reduction=0.42&smooth_iterations=14` },
+    { protocol: "bone", query: `protocol=bone&max_dim=${maxDim}&min_component_voxels=512&max_components=3&max_triangles=110000&target_reduction=0.38&smooth_iterations=14` },
+  ];
+  const ctMeshes = (await Promise.all(ctMeshRequests.map(async (request) => {
+    const ctMeshResponse = await fetch(apiUrl(`/api/image/${imageId}/surface-mesh?${request.query}`));
+    if (!ctMeshResponse.ok) {
+      const message = await ctMeshResponse.text();
+      console.warn(`VTK CT ${request.protocol} mesh unavailable:`, message);
+      return null;
+    }
+    const mesh = normalizeMeshPayload(await ctMeshResponse.json());
+    return mesh ? { ...mesh, layer: request.protocol } : null;
+  }))).filter(Boolean);
   let maskData = null;
   let maskValues = null;
+  let maskMesh = null;
   if (maskId) {
     status.textContent = "正在读取 3D Mask 实体数据...";
     const maskResponse = await fetch(apiUrl(`/api/mask/${maskId}/volume-data?max_dim=${maxDim}`));
@@ -120,10 +321,20 @@ export async function renderVolume3D({
     }
     maskData = await maskResponse.json();
     maskValues = decodeBase64ToUint8Array(maskData.values_base64);
+
+    status.textContent = "正在提取 VTK Mask 表面网格...";
+    const meshQuery = "min_component_voxels=96&max_components=8&max_triangles=90000&target_reduction=0.45&smooth_iterations=10&remove_thin=true&constrain_to_body=true&constrain_to_source_roi=true&source_roi_margin_mm=45";
+    const meshResponse = await fetch(apiUrl(`/api/mask/${maskId}/surface-mesh?${meshQuery}`));
+    if (meshResponse.ok) {
+      maskMesh = normalizeMeshPayload(await meshResponse.json());
+    } else {
+      const message = await meshResponse.text();
+      console.warn("VTK mask surface mesh unavailable, fallback to WebGL point surface:", message);
+    }
   }
 
-  status.textContent = "正在初始化 WebGL2 体渲染引擎...";
-  renderWithWebGL({ container, volumeData, values, maskData, maskValues });
+  status.textContent = "正在初始化 VTK 综合 3D 渲染...";
+  renderWithWebGL({ container, volumeData, values, ctMeshes, maskData, maskValues, maskMesh });
 }
 
 async function fetchVolumeData({ imageId, maxDim, windowName, isotropic }) {
@@ -170,7 +381,7 @@ function createProgram(gl, vertexSource, fragmentSource) {
   return program;
 }
 
-function renderWithWebGL({ container, volumeData, values, maskData = null, maskValues = null }) {
+function renderWithWebGL({ container, volumeData, values, ctMeshes = [], maskData = null, maskValues = null, maskMesh = null }) {
   clearContainer(container);
 
   const canvas = document.createElement("canvas");
@@ -179,7 +390,7 @@ function renderWithWebGL({ container, volumeData, values, maskData = null, maskV
 
   const badge = document.createElement("div");
   badge.className = "volume-engine-badge";
-  badge.textContent = "WebGL2 医学渲染协议";
+  badge.textContent = "3D 医学渲染";
   container.appendChild(badge);
 
   const gl = canvas.getContext("webgl2", {
@@ -226,6 +437,8 @@ function renderWithWebGL({ container, volumeData, values, maskData = null, maskV
     uniform float uEdgeStrength;
     uniform float uAlphaStop;
     uniform float uOpacityClamp;
+    uniform vec3 uMaskColor;
+    uniform float uMaskAlpha;
     uniform vec3 uVoxelStep;
     uniform int uRenderMode;
 
@@ -303,6 +516,26 @@ function renderWithWebGL({ container, volumeData, values, maskData = null, maskV
       m = max(m, texture(uMask, clamp(p + vec3(0.0, 0.0, d.z), vec3(0.0), vec3(1.0))).r);
       m = max(m, texture(uMask, clamp(p - vec3(0.0, 0.0, d.z), vec3(0.0), vec3(1.0))).r);
       return m;
+    }
+
+    float maskThicknessAt(vec3 p) {
+      float center = texture(uMask, clamp(p, vec3(0.0), vec3(1.0))).r;
+      if (center < 0.001) {
+        return 0.0;
+      }
+      vec3 dz2 = vec3(0.0, 0.0, uVoxelStep.z * 2.2);
+      vec3 dz3 = vec3(0.0, 0.0, uVoxelStep.z * 3.2);
+      float zSupport = max(
+        max(texture(uMask, clamp(p + dz2, vec3(0.0), vec3(1.0))).r, texture(uMask, clamp(p - dz2, vec3(0.0), vec3(1.0))).r),
+        max(texture(uMask, clamp(p + dz3, vec3(0.0), vec3(1.0))).r, texture(uMask, clamp(p - dz3, vec3(0.0), vec3(1.0))).r)
+      );
+      vec3 dxy = uVoxelStep * vec3(1.7, 1.7, 0.0);
+      float xySupport =
+        texture(uMask, clamp(p + vec3(dxy.x, 0.0, 0.0), vec3(0.0), vec3(1.0))).r +
+        texture(uMask, clamp(p - vec3(dxy.x, 0.0, 0.0), vec3(0.0), vec3(1.0))).r +
+        texture(uMask, clamp(p + vec3(0.0, dxy.y, 0.0), vec3(0.0), vec3(1.0))).r +
+        texture(uMask, clamp(p - vec3(0.0, dxy.y, 0.0), vec3(0.0), vec3(1.0))).r;
+      return smoothstep(0.10, 0.90, zSupport) * smoothstep(0.25, 1.50, xySupport);
     }
 
     vec3 transferColor(float hu, float edge) {
@@ -463,16 +696,17 @@ function renderWithWebGL({ container, volumeData, values, maskData = null, maskV
         vec3 sampleColor = applyLighting(transferColor(hu, edge), gradient, rayDir, edge);
         if (uHasMask) {
           float maskValue = maskAt(p);
-          if (maskValue > 0.001) {
-            vec3 maskCore = vec3(0.00, 1.00, 0.74);
-            vec3 maskRim = vec3(1.00, 0.94, 0.20);
+          float maskThickness = maskThicknessAt(p);
+          if (maskValue > 0.001 && maskThickness > 0.02) {
+            vec3 maskCore = uMaskColor;
+            vec3 maskRim = mix(uMaskColor, vec3(1.0, 0.95, 0.20), 0.55);
             float maskEdge = smoothstep(0.12, 0.70, length(gradient) * 3.2);
             vec3 maskSampleColor = mix(maskCore, maskRim, maskEdge);
-            float maskAlpha = mix(0.16, 0.30, clamp(maskValue, 0.0, 1.0));
+            float maskAlpha = mix(uMaskAlpha * 0.25, uMaskAlpha, clamp(maskValue * maskThickness, 0.0, 1.0));
             maskColorAccum += (1.0 - maskAlphaAccum) * maskAlpha * maskSampleColor;
             maskAlphaAccum += (1.0 - maskAlphaAccum) * maskAlpha;
-            sampleColor = mix(sampleColor, maskSampleColor, 0.72);
-            opacity = max(opacity, 0.065);
+            sampleColor = mix(sampleColor, maskSampleColor, 0.72 * maskThickness);
+            opacity = max(opacity, 0.065 * maskThickness);
           }
         }
         color += (1.0 - alpha) * opacity * sampleColor;
@@ -511,6 +745,8 @@ function renderWithWebGL({ container, volumeData, values, maskData = null, maskV
     edgeStrength: gl.getUniformLocation(program, "uEdgeStrength"),
     alphaStop: gl.getUniformLocation(program, "uAlphaStop"),
     opacityClamp: gl.getUniformLocation(program, "uOpacityClamp"),
+    maskColor: gl.getUniformLocation(program, "uMaskColor"),
+    maskAlpha: gl.getUniformLocation(program, "uMaskAlpha"),
     voxelStep: gl.getUniformLocation(program, "uVoxelStep"),
     renderMode: gl.getUniformLocation(program, "uRenderMode"),
   };
@@ -576,46 +812,280 @@ function renderWithWebGL({ container, volumeData, values, maskData = null, maskV
     );
   }
 
+  const surfaceVertexSource = `#version 300 es
+    in vec3 aMaskPosition;
+    uniform float uYaw;
+    uniform float uPitch;
+    uniform float uAspect;
+    uniform float uPointSize;
+    out float vDepthShade;
+
+    mat3 rotateX(float a) {
+      float s = sin(a);
+      float c = cos(a);
+      return mat3(1.0, 0.0, 0.0, 0.0, c, -s, 0.0, s, c);
+    }
+
+    mat3 rotateY(float a) {
+      float s = sin(a);
+      float c = cos(a);
+      return mat3(c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c);
+    }
+
+    void main() {
+      vec3 centered = aMaskPosition - vec3(0.5);
+      vec3 rotated = rotateY(uYaw) * rotateX(uPitch) * centered;
+      vec2 screen = rotated.xy / 0.42;
+      screen.x /= max(uAspect, 0.001);
+      gl_Position = vec4(screen, 0.15 + rotated.z * 0.55, 1.0);
+      gl_PointSize = uPointSize * (1.12 - rotated.z * 0.35);
+      vDepthShade = clamp(0.68 + rotated.z * 0.65, 0.35, 1.20);
+    }
+  `;
+
+  const surfaceFragmentSource = `#version 300 es
+    precision highp float;
+    uniform vec3 uColor;
+    uniform float uAlpha;
+    in float vDepthShade;
+    out vec4 outColor;
+
+    void main() {
+      vec2 p = gl_PointCoord * 2.0 - 1.0;
+      float r = dot(p, p);
+      if (r > 1.0) {
+        discard;
+      }
+      float edge = smoothstep(1.0, 0.18, r);
+      vec3 color = mix(uColor, vec3(1.0, 0.96, 0.35), 0.20) * vDepthShade;
+      outColor = vec4(color, uAlpha * edge);
+    }
+  `;
+  const meshVertexSource = `#version 300 es
+    in vec3 aMaskPosition;
+    in vec3 aMaskNormal;
+    uniform float uYaw;
+    uniform float uPitch;
+    uniform float uAspect;
+    uniform float uScale;
+    out vec3 vNormal;
+    out float vDepthShade;
+
+    mat3 rotateX(float a) {
+      float s = sin(a);
+      float c = cos(a);
+      return mat3(1.0, 0.0, 0.0, 0.0, c, -s, 0.0, s, c);
+    }
+
+    mat3 rotateY(float a) {
+      float s = sin(a);
+      float c = cos(a);
+      return mat3(c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c);
+    }
+
+    void main() {
+      mat3 rotation = rotateY(uYaw) * rotateX(uPitch);
+      vec3 centered = aMaskPosition - vec3(0.5);
+      vec3 rotated = rotation * centered;
+      vec2 screen = rotated.xy / max(uScale, 0.1);
+      screen.x /= max(uAspect, 0.001);
+      gl_Position = vec4(screen, 0.15 + rotated.z * 0.55, 1.0);
+      vNormal = normalize(rotation * aMaskNormal);
+      vDepthShade = clamp(0.62 + rotated.z * 0.70, 0.34, 1.22);
+    }
+  `;
+  const meshFragmentSource = `#version 300 es
+    precision highp float;
+    uniform vec3 uColor;
+    uniform float uAlpha;
+    uniform float uSpecular;
+    uniform float uRim;
+    uniform float uMaterial;
+    in vec3 vNormal;
+    in float vDepthShade;
+    out vec4 outColor;
+
+    void main() {
+      vec3 n = normalize(vNormal);
+      vec3 lightDir = normalize(vec3(-0.45, 0.62, 0.64));
+      vec3 viewDir = normalize(vec3(0.0, 0.0, 1.0));
+      float diffuse = max(dot(n, lightDir), 0.0);
+      float back = max(dot(-n, lightDir), 0.0) * 0.18;
+      float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 2.0) * uRim;
+      float specular = pow(max(dot(reflect(-lightDir, n), viewDir), 0.0), 34.0) * uSpecular;
+      vec3 warm = mix(uColor, vec3(1.0, 0.95, 0.74), 0.16 * uMaterial);
+      vec3 color = warm * (0.38 + 0.58 * diffuse + back + rim) * vDepthShade;
+      color += vec3(1.0, 0.96, 0.80) * specular;
+      outColor = vec4(color, uAlpha);
+    }
+  `;
+  const surfaceProgram = createProgram(gl, surfaceVertexSource, surfaceFragmentSource);
+  const surfacePositionLocation = gl.getAttribLocation(surfaceProgram, "aMaskPosition");
+  const surfaceUniforms = {
+    yaw: gl.getUniformLocation(surfaceProgram, "uYaw"),
+    pitch: gl.getUniformLocation(surfaceProgram, "uPitch"),
+    aspect: gl.getUniformLocation(surfaceProgram, "uAspect"),
+    pointSize: gl.getUniformLocation(surfaceProgram, "uPointSize"),
+    color: gl.getUniformLocation(surfaceProgram, "uColor"),
+    alpha: gl.getUniformLocation(surfaceProgram, "uAlpha"),
+  };
+  const meshProgram = createProgram(gl, meshVertexSource, meshFragmentSource);
+  const meshPositionLocation = gl.getAttribLocation(meshProgram, "aMaskPosition");
+  const meshNormalLocation = gl.getAttribLocation(meshProgram, "aMaskNormal");
+  const meshUniforms = {
+    yaw: gl.getUniformLocation(meshProgram, "uYaw"),
+    pitch: gl.getUniformLocation(meshProgram, "uPitch"),
+    aspect: gl.getUniformLocation(meshProgram, "uAspect"),
+    scale: gl.getUniformLocation(meshProgram, "uScale"),
+    color: gl.getUniformLocation(meshProgram, "uColor"),
+    alpha: gl.getUniformLocation(meshProgram, "uAlpha"),
+    specular: gl.getUniformLocation(meshProgram, "uSpecular"),
+    rim: gl.getUniformLocation(meshProgram, "uRim"),
+    material: gl.getUniformLocation(meshProgram, "uMaterial"),
+  };
+  const meshPositions = maskMesh?.positionsArray || new Float32Array();
+  const meshNormals = maskMesh?.normalsArray || new Float32Array(meshPositions.length);
+  const meshIndices = maskMesh?.indicesArray || new Uint32Array();
+  const hasMeshSurface = meshPositions.length > 0 && meshIndices.length > 0;
+  const ctMeshLayers = (Array.isArray(ctMeshes) ? ctMeshes : []).filter((mesh) => (
+    mesh?.positionsArray?.length > 0 && mesh?.indicesArray?.length > 0
+  ));
+  const ctMeshBuffers = ctMeshLayers.map((mesh) => {
+    const vertexBufferRef = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBufferRef);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.positionsArray, gl.STATIC_DRAW);
+    const normalBufferRef = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, normalBufferRef);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.normalsArray || new Float32Array(mesh.positionsArray.length), gl.STATIC_DRAW);
+    const indexBufferRef = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBufferRef);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indicesArray, gl.STATIC_DRAW);
+    const style = CT_MESH_LAYER_STYLES[mesh.layer] || CT_MESH_LAYER_STYLES.bone;
+    return {
+      mesh,
+      style,
+      vertexBuffer: vertexBufferRef,
+      normalBuffer: normalBufferRef,
+      indexBuffer: indexBufferRef,
+      indexCount: mesh.indicesArray.length,
+    };
+  });
+  const hasCtMeshSurface = ctMeshBuffers.length > 0;
+  const ctTriangleCount = ctMeshLayers.reduce((total, mesh) => total + Number(mesh.triangle_count || mesh.indicesArray.length / 3 || 0), 0);
+  const meshVertexBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, meshVertexBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, meshPositions, gl.STATIC_DRAW);
+  const meshNormalBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, meshNormalBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, meshNormals, gl.STATIC_DRAW);
+  const meshIndexBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, meshIndexBuffer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, meshIndices, gl.STATIC_DRAW);
+  const surfacePoints = maskDimensionsMatch
+    ? createMaskSurfacePoints(maskData, maskValues, { volumeData, volumeValues: values })
+    : new Float32Array();
+  const surfaceBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, surfaceBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, surfacePoints, gl.STATIC_DRAW);
+
   const initialPreset = defaultPreset();
   const viewerState = {
     yaw: 0.65,
     pitch: -0.28,
+    renderEngine: hasCtMeshSurface ? "vtk" : "volume",
     preset: initialPreset,
     opacityScale: initialPreset.opacity,
     brightness: initialPreset.brightness,
     threshold: initialPreset.threshold,
     steps: initialPreset.steps,
+    maskColor: "#00e5b0",
+    maskAlpha: 0.58,
+    outerMeshAlpha: 0.12,
+    lungMeshAlpha: 0.42,
+    innerMeshAlpha: 0.32,
+    boneMeshAlpha: 0.22,
+    meshScale: 0.72,
+    maskSurfaceEnabled: true,
     dragging: false,
     lastX: 0,
     lastY: 0,
   };
 
   const controls = document.createElement("div");
-  controls.className = "volume-control-panel";
+  controls.className = "volume-control-panel collapsed";
   controls.innerHTML = `
-    <label class="preset-select">医学渲染协议
-      <select data-volume-mode>
-        ${RENDERING_PRESETS.map((preset) => `<option value="${preset.id}">${preset.label}</option>`).join("")}
-      </select>
-    </label>
-    <label>透明度
-      <input data-volume-opacity type="range" min="20" max="180" value="${Math.round(initialPreset.opacity * 100)}" />
-    </label>
-    <label>亮度
-      <input data-volume-brightness type="range" min="70" max="170" value="${Math.round(initialPreset.brightness * 100)}" />
-    </label>
-    <label>组织阈值
-      <input data-volume-threshold type="range" min="0" max="100" value="${Math.round(initialPreset.threshold * 100)}" />
-    </label>
-    <label>质量
-      <input data-volume-steps type="range" min="160" max="448" value="${initialPreset.steps}" />
-    </label>
-    <div class="tf-editor-mini">
-      <strong>Transfer Function Editor</strong>
-      <span>HU 分段透明度 + Gradient Opacity + Ray Marching 采样</span>
+    <button class="volume-control-toggle" type="button" data-volume-controls-toggle>
+      <span>渲染参数</span>
+      <strong>展开</strong>
+    </button>
+    <div class="volume-control-body">
+      <div class="control-section compact-section">
+        <label class="control-field preset-select">
+          <span>渲染方式</span>
+          <select data-render-engine>
+            <option value="vtk" ${hasCtMeshSurface ? "selected" : "disabled"}>VTK 综合重建（内外）</option>
+            <option value="volume" ${hasCtMeshSurface ? "" : "selected"}>WebGL 体渲染（备用）</option>
+          </select>
+        </label>
+      </div>
+      <div class="mesh-metrics">
+        <div class="mesh-metric"><span>CT Mesh</span><b>${hasCtMeshSurface ? ctTriangleCount.toLocaleString("zh-CN") : "-"}</b></div>
+        <div class="mesh-metric"><span>Mask Mesh</span><b>${hasMeshSurface ? Number(maskMesh.triangle_count || meshIndices.length / 3).toLocaleString("zh-CN") : "-"}</b></div>
+        <div class="mesh-metric"><span>Spacing</span><b>${Array.isArray(volumeData.spacing) ? volumeData.spacing.map((value) => Number(value).toFixed(1)).join("/") : "-"}</b></div>
+      </div>
+      <div class="volume-mode-controls ${hasCtMeshSurface ? "is-hidden" : ""}" data-volume-mode-controls>
+        <label class="control-field preset-select">
+          <span>医学渲染协议</span>
+          <select data-volume-mode>
+            ${RENDERING_PRESETS.map((preset) => `<option value="${preset.id}">${preset.label}</option>`).join("")}
+          </select>
+        </label>
+        <label class="control-field"><span>体透明度</span>
+          <input data-volume-opacity type="range" min="20" max="180" value="${Math.round(initialPreset.opacity * 100)}" />
+        </label>
+        <label class="control-field"><span>体亮度</span>
+          <input data-volume-brightness type="range" min="70" max="170" value="${Math.round(initialPreset.brightness * 100)}" />
+        </label>
+        <label class="control-field"><span>组织阈值</span>
+          <input data-volume-threshold type="range" min="0" max="100" value="${Math.round(initialPreset.threshold * 100)}" />
+        </label>
+        <label class="control-field"><span>采样质量</span>
+          <input data-volume-steps type="range" min="160" max="448" value="${initialPreset.steps}" />
+        </label>
+      </div>
+      <div class="vtk-layer-controls" data-vtk-controls>
+        <label class="control-field"><span><i style="background:#5c94b8"></i>外层</span>
+          <input data-outer-mesh-alpha type="range" min="0" max="45" value="${Math.round(viewerState.outerMeshAlpha * 100)}" />
+        </label>
+        <label class="control-field"><span><i style="background:#4db3f2"></i>肺/低密度腔</span>
+          <input data-lung-mesh-alpha type="range" min="0" max="75" value="${Math.round(viewerState.lungMeshAlpha * 100)}" />
+        </label>
+        <label class="control-field"><span><i style="background:#db9e8c"></i>软组织</span>
+          <input data-inner-mesh-alpha type="range" min="0" max="70" value="${Math.round(viewerState.innerMeshAlpha * 100)}" />
+        </label>
+        <label class="control-field"><span><i style="background:#ebe0ad"></i>骨性</span>
+          <input data-bone-mesh-alpha type="range" min="0" max="70" value="${Math.round(viewerState.boneMeshAlpha * 100)}" />
+        </label>
+      </div>
+      ${maskDimensionsMatch ? `
+        <label class="control-field"><span>高亮颜色</span>
+          <input data-mask-color type="color" value="#00e5b0" />
+        </label>
+        <label class="control-field"><span>高亮透明度</span>
+          <input data-mask-alpha type="range" min="10" max="95" value="58" />
+        </label>
+        <label class="control-field mask-surface-toggle"><span>表面高亮</span>
+          <input data-mask-surface type="checkbox" checked />
+        </label>
+      ` : ""}
+      <div class="tf-editor-mini">
+        <strong>VTK Surface Mesh</strong>
+        <span>外层 body + 内部 soft tissue + 骨性 bone 均来自后端 VTK Marching Cubes。</span>
+      </div>
     </div>
   `;
   container.appendChild(controls);
+  let controlsCollapsed = true;
 
   const protocolPanel = document.createElement("div");
   protocolPanel.className = "volume-protocol-panel collapsed";
@@ -635,43 +1105,122 @@ function renderWithWebGL({ container, volumeData, values, maskData = null, maskV
   function draw() {
     resize();
     const huRange = Array.isArray(volumeData.hu_range) ? volumeData.hu_range : [-1000, 1800];
-    gl.useProgram(program);
     gl.clearColor(0.01, 0.025, 0.045, 1.0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_3D, texture);
-    gl.uniform1i(uniforms.volume, 0);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_3D, maskTexture || texture);
-    gl.uniform1i(uniforms.mask, 1);
-    gl.uniform1i(uniforms.hasMask, maskTexture ? 1 : 0);
-    gl.uniform1f(uniforms.yaw, viewerState.yaw);
-    gl.uniform1f(uniforms.pitch, viewerState.pitch);
-    gl.uniform1f(uniforms.aspect, canvas.width / Math.max(canvas.height, 1));
-    gl.uniform1f(uniforms.steps, viewerState.steps);
-    gl.uniform1f(uniforms.opacityScale, viewerState.opacityScale);
-    gl.uniform1f(uniforms.brightness, viewerState.brightness);
-    gl.uniform1f(uniforms.threshold, viewerState.threshold);
-    gl.uniform1f(uniforms.huLow, Number(huRange[0]));
-    gl.uniform1f(uniforms.huHigh, Number(huRange[1]));
-    gl.uniform1f(uniforms.ambient, viewerState.preset.ambient);
-    gl.uniform1f(uniforms.diffuse, viewerState.preset.diffuse);
-    gl.uniform1f(uniforms.specular, viewerState.preset.specular);
-    gl.uniform1f(uniforms.rim, viewerState.preset.rim);
-    gl.uniform1f(uniforms.edgeStrength, viewerState.preset.edgeStrength);
-    gl.uniform1f(uniforms.alphaStop, viewerState.preset.alphaStop);
-    gl.uniform1f(uniforms.opacityClamp, viewerState.preset.opacityClamp);
-    gl.uniform3f(
-      uniforms.voxelStep,
-      1 / Math.max(volumeData.dimensions[0], 1),
-      1 / Math.max(volumeData.dimensions[1], 1),
-      1 / Math.max(volumeData.dimensions[2], 1)
-    );
-    gl.uniform1i(uniforms.renderMode, viewerState.preset.mode);
-    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-    gl.enableVertexAttribArray(positionLocation);
-    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    const maskColor = hexToRgb01(viewerState.maskColor);
+
+    if (viewerState.renderEngine === "volume") {
+      gl.disable(gl.DEPTH_TEST);
+      gl.useProgram(program);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_3D, texture);
+      gl.uniform1i(uniforms.volume, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_3D, maskTexture || texture);
+      gl.uniform1i(uniforms.mask, 1);
+      gl.uniform1i(uniforms.hasMask, maskTexture ? 1 : 0);
+      gl.uniform1f(uniforms.yaw, viewerState.yaw);
+      gl.uniform1f(uniforms.pitch, viewerState.pitch);
+      gl.uniform1f(uniforms.aspect, canvas.width / Math.max(canvas.height, 1));
+      gl.uniform1f(uniforms.steps, viewerState.steps);
+      gl.uniform1f(uniforms.opacityScale, viewerState.opacityScale);
+      gl.uniform1f(uniforms.brightness, viewerState.brightness);
+      gl.uniform1f(uniforms.threshold, viewerState.threshold);
+      gl.uniform1f(uniforms.huLow, Number(huRange[0]));
+      gl.uniform1f(uniforms.huHigh, Number(huRange[1]));
+      gl.uniform1f(uniforms.ambient, viewerState.preset.ambient);
+      gl.uniform1f(uniforms.diffuse, viewerState.preset.diffuse);
+      gl.uniform1f(uniforms.specular, viewerState.preset.specular);
+      gl.uniform1f(uniforms.rim, viewerState.preset.rim);
+      gl.uniform1f(uniforms.edgeStrength, viewerState.preset.edgeStrength);
+      gl.uniform1f(uniforms.alphaStop, viewerState.preset.alphaStop);
+      gl.uniform1f(uniforms.opacityClamp, viewerState.preset.opacityClamp);
+      gl.uniform3f(uniforms.maskColor, maskColor[0], maskColor[1], maskColor[2]);
+      gl.uniform1f(uniforms.maskAlpha, viewerState.maskAlpha);
+      gl.uniform3f(
+        uniforms.voxelStep,
+        1 / Math.max(volumeData.dimensions[0], 1),
+        1 / Math.max(volumeData.dimensions[1], 1),
+        1 / Math.max(volumeData.dimensions[2], 1)
+      );
+      gl.uniform1i(uniforms.renderMode, viewerState.preset.mode);
+      gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+      gl.enableVertexAttribArray(positionLocation);
+      gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+
+    function drawMesh(vertexBufferRef, normalBufferRef, indexBufferRef, indexCount, color, alpha, material) {
+      if (!indexCount) return;
+      gl.useProgram(meshProgram);
+      gl.enable(gl.DEPTH_TEST);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(alpha >= 0.92);
+      gl.bindBuffer(gl.ARRAY_BUFFER, vertexBufferRef);
+      gl.enableVertexAttribArray(meshPositionLocation);
+      gl.vertexAttribPointer(meshPositionLocation, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, normalBufferRef);
+      gl.enableVertexAttribArray(meshNormalLocation);
+      gl.vertexAttribPointer(meshNormalLocation, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBufferRef);
+      gl.uniform1f(meshUniforms.yaw, viewerState.yaw);
+      gl.uniform1f(meshUniforms.pitch, viewerState.pitch);
+      gl.uniform1f(meshUniforms.aspect, canvas.width / Math.max(canvas.height, 1));
+      gl.uniform1f(meshUniforms.scale, viewerState.meshScale);
+      gl.uniform3f(meshUniforms.color, color[0], color[1], color[2]);
+      gl.uniform1f(meshUniforms.alpha, alpha);
+      gl.uniform1f(meshUniforms.specular, material === "mask" ? 0.42 : 0.20);
+      gl.uniform1f(meshUniforms.rim, material === "mask" ? 0.34 : 0.22);
+      gl.uniform1f(meshUniforms.material, material === "mask" ? 1.0 : 0.35);
+      gl.drawElements(gl.TRIANGLES, indexCount, gl.UNSIGNED_INT, 0);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+    }
+
+    if (viewerState.renderEngine === "vtk" && hasCtMeshSurface) {
+      for (const layer of ctMeshBuffers) {
+        const alpha = Number(viewerState[layer.style.alphaKey] ?? 0.2);
+        if (alpha <= 0.001) continue;
+        drawMesh(
+          layer.vertexBuffer,
+          layer.normalBuffer,
+          layer.indexBuffer,
+          layer.indexCount,
+          layer.style.color,
+          alpha,
+          layer.style.material
+        );
+      }
+    }
+    if (viewerState.renderEngine === "vtk" && viewerState.maskSurfaceEnabled && hasMeshSurface && maskData) {
+      drawMesh(
+        meshVertexBuffer,
+        meshNormalBuffer,
+        meshIndexBuffer,
+        meshIndices.length,
+        maskColor,
+        Math.min(0.94, viewerState.maskAlpha + 0.18),
+        "mask"
+      );
+    } else if (viewerState.renderEngine === "volume" && !hasMeshSurface && viewerState.maskSurfaceEnabled && surfacePoints.length > 0 && maskData) {
+      gl.useProgram(surfaceProgram);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.bindBuffer(gl.ARRAY_BUFFER, surfaceBuffer);
+      gl.enableVertexAttribArray(surfacePositionLocation);
+      gl.vertexAttribPointer(surfacePositionLocation, 3, gl.FLOAT, false, 0, 0);
+      gl.uniform1f(surfaceUniforms.yaw, viewerState.yaw);
+      gl.uniform1f(surfaceUniforms.pitch, viewerState.pitch);
+      gl.uniform1f(surfaceUniforms.aspect, canvas.width / Math.max(canvas.height, 1));
+      gl.uniform1f(surfaceUniforms.pointSize, Math.max(2.2, Math.min(6.0, 620 / Math.max(...maskData.dimensions))));
+      gl.uniform3f(surfaceUniforms.color, maskColor[0], maskColor[1], maskColor[2]);
+      gl.uniform1f(surfaceUniforms.alpha, viewerState.maskAlpha);
+      gl.drawArrays(gl.POINTS, 0, surfacePoints.length / 3);
+      gl.disable(gl.BLEND);
+    }
   }
 
   canvas.addEventListener("pointerdown", (event) => {
@@ -698,8 +1247,11 @@ function renderWithWebGL({ container, volumeData, values, maskData = null, maskV
     const resampling = volumeData.resampling || {};
     const spacing = Array.isArray(volumeData.spacing) ? volumeData.spacing.map((value) => Number(value).toFixed(2)).join(" / ") : "-";
     const maskText = maskTexture
-      ? `Mask 实体叠加：${maskData.mask_id} · ${maskData.version} · ${maskData.dimensions.join("×")}`
+      ? `Mask：${maskData.mask_id} · ${maskData.version} · ${hasMeshSurface ? `VTK ${Number(maskMesh.triangle_count || meshIndices.length / 3).toLocaleString("zh-CN")} triangles` : "体渲染叠加"}`
       : (maskData ? "Mask 尺寸与 CT 体数据不一致，已跳过叠加" : "未加载 3D Mask");
+    const ctMeshText = hasCtMeshSurface
+      ? `CT VTK：${ctMeshLayers.map((mesh) => CT_MESH_LAYER_STYLES[mesh.layer]?.label || mesh.layer).join(" / ")} · ${ctTriangleCount.toLocaleString("zh-CN")} triangles`
+      : "CT VTK mesh 未加载，使用 WebGL2 volume ray casting";
     const resampleText = resampling.requested
       ? (resampling.applied ? "各向同性重采样已启用" : `各向同性重采样未启用：${resampling.reason || "无需处理"}`)
       : "使用原始 spacing";
@@ -707,14 +1259,15 @@ function renderWithWebGL({ container, volumeData, values, maskData = null, maskV
     protocolPanel.innerHTML = `
       <button class="protocol-toggle" type="button" data-protocol-toggle>
         <span>Rendering Protocol</span>
-        <strong>${viewerState.preset.label}</strong>
+        <strong>${viewerState.renderEngine === "vtk" ? "VTK 综合" : viewerState.preset.label}</strong>
         <b>${protocolCollapsed ? "展开" : "收起"}</b>
       </button>
       <div class="protocol-details">
-        <span>WL ${viewerState.preset.wl} / WW ${viewerState.preset.ww} · ${viewerState.preset.steps} samples · stop ${viewerState.preset.alphaStop}</span>
+        <span>当前引擎：${viewerState.renderEngine === "vtk" ? "VTK 综合重建" : "WebGL2 体渲染"}</span>
         <span>${resampleText} · spacing ${spacing} mm</span>
+        <span>${ctMeshText}</span>
         <span>${maskText}</span>
-        <p>${viewerState.preset.summary}</p>
+        <p>${viewerState.renderEngine === "vtk" ? "仅显示 VTK 三角网格：外层、内部软组织、骨性结构和 Mask 均由 VTK mesh 渲染。" : viewerState.preset.summary}</p>
       </div>
     `;
     protocolPanel.querySelector("[data-protocol-toggle]").addEventListener("click", () => {
@@ -731,7 +1284,38 @@ function renderWithWebGL({ container, volumeData, values, maskData = null, maskV
     controls.querySelector("[data-volume-steps]").value = String(viewerState.steps);
   }
 
+  function updateControlPanel() {
+    controls.classList.toggle("collapsed", controlsCollapsed);
+    const toggle = controls.querySelector("[data-volume-controls-toggle] strong");
+    if (toggle) toggle.textContent = controlsCollapsed ? "展开" : "收起";
+    badge.textContent = viewerState.renderEngine === "vtk" ? "VTK 综合重建" : "WebGL2 体渲染";
+    const volumeControls = controls.querySelector("[data-volume-mode-controls]");
+    if (volumeControls) {
+      volumeControls.classList.toggle("is-hidden", viewerState.renderEngine !== "volume");
+    }
+    controls.querySelectorAll("[data-vtk-controls]").forEach((element) => {
+      element.classList.toggle("is-hidden", viewerState.renderEngine !== "vtk");
+    });
+  }
+
   updateProtocolPanel();
+  updateControlPanel();
+
+  controls.querySelector("[data-volume-controls-toggle]").addEventListener("click", () => {
+    controlsCollapsed = !controlsCollapsed;
+    updateControlPanel();
+  });
+
+  controls.querySelector("[data-render-engine]").addEventListener("change", (event) => {
+    const requested = event.target.value;
+    viewerState.renderEngine = requested === "vtk" && !hasCtMeshSurface ? "volume" : requested;
+    if (event.target.value !== viewerState.renderEngine) {
+      event.target.value = viewerState.renderEngine;
+    }
+    updateControlPanel();
+    updateProtocolPanel();
+    draw();
+  });
 
   controls.querySelector("[data-volume-mode]").addEventListener("change", (event) => {
     const preset = PRESET_BY_ID.get(event.target.value) || defaultPreset();
@@ -760,6 +1344,42 @@ function renderWithWebGL({ container, volumeData, values, maskData = null, maskV
     viewerState.steps = Number(event.target.value);
     draw();
   });
+  const maskColorInput = controls.querySelector("[data-mask-color]");
+  if (maskColorInput) {
+    maskColorInput.addEventListener("input", (event) => {
+      viewerState.maskColor = event.target.value;
+      draw();
+    });
+  }
+  const maskAlphaInput = controls.querySelector("[data-mask-alpha]");
+  if (maskAlphaInput) {
+    maskAlphaInput.addEventListener("input", (event) => {
+      viewerState.maskAlpha = Number(event.target.value) / 100;
+      draw();
+    });
+  }
+  const meshAlphaBindings = [
+    ["[data-outer-mesh-alpha]", "outerMeshAlpha"],
+    ["[data-lung-mesh-alpha]", "lungMeshAlpha"],
+    ["[data-inner-mesh-alpha]", "innerMeshAlpha"],
+    ["[data-bone-mesh-alpha]", "boneMeshAlpha"],
+  ];
+  for (const [selector, stateKey] of meshAlphaBindings) {
+    const input = controls.querySelector(selector);
+    if (input) {
+      input.addEventListener("input", (event) => {
+        viewerState[stateKey] = Number(event.target.value) / 100;
+        draw();
+      });
+    }
+  }
+  const maskSurfaceInput = controls.querySelector("[data-mask-surface]");
+  if (maskSurfaceInput) {
+    maskSurfaceInput.addEventListener("change", (event) => {
+      viewerState.maskSurfaceEnabled = Boolean(event.target.checked);
+      draw();
+    });
+  }
 
   const resizeObserver = new ResizeObserver(draw);
   resizeObserver.observe(container);
@@ -770,7 +1390,18 @@ function renderWithWebGL({ container, volumeData, values, maskData = null, maskV
       resizeObserver.disconnect();
       gl.deleteTexture(texture);
       if (maskTexture) gl.deleteTexture(maskTexture);
+      for (const layer of ctMeshBuffers) {
+        gl.deleteBuffer(layer.vertexBuffer);
+        gl.deleteBuffer(layer.normalBuffer);
+        gl.deleteBuffer(layer.indexBuffer);
+      }
+      gl.deleteBuffer(meshVertexBuffer);
+      gl.deleteBuffer(meshNormalBuffer);
+      gl.deleteBuffer(meshIndexBuffer);
+      gl.deleteBuffer(surfaceBuffer);
       gl.deleteBuffer(vertexBuffer);
+      gl.deleteProgram(meshProgram);
+      gl.deleteProgram(surfaceProgram);
       gl.deleteProgram(program);
     },
   });

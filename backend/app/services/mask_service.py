@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
+import shutil
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -35,7 +37,8 @@ from backend.app.services.medical_image_service import load_volume
 from backend.app.services.sqlite_service import get_record, list_records, next_sqlite_entity_id, upsert_record
 
 
-VALID_MASK_VERSIONS = {"v1_manual", "v2_ai", "v3_fusion", "final"}
+VALID_MASK_VERSIONS = {"v1_manual", "v2_ai", "v3_preview", "v3_fusion", "final"}
+PROMOTABLE_TARGET_VERSIONS = {"v3_fusion", "final"}
 VALID_MASK_FORMATS = {"nii.gz", "json"}
 VALID_SLICE_AXES = {"axial", "coronal", "sagittal"}
 
@@ -408,6 +411,7 @@ def get_mask_volume_data(mask_id: str, max_dim: int = 176) -> dict[str, Any]:
     if array.ndim == 2:
         array = array.reshape((1, array.shape[0], array.shape[1]))
     values = (array > 0).astype(np.uint8)
+    full_voxel_count = int(np.count_nonzero(values))
     downsampled, strides = _downsample_mask_volume(values, max_dim=max_dim)
     texture_values = (downsampled > 0).astype(np.uint8) * 255
     depth, height, width = downsampled.shape[:3]
@@ -426,8 +430,530 @@ def get_mask_volume_data(mask_id: str, max_dim: int = 176) -> dict[str, Any]:
         "direction": [float(value) for value in image.GetDirection()],
         "scalar_type": "uint8",
         "downsample_stride": [stride_z, stride_y, stride_x],
+        "full_mask_voxel_count": full_voxel_count,
         "mask_voxel_count": int(np.count_nonzero(downsampled)),
         "values_base64": base64.b64encode(np.ascontiguousarray(texture_values).tobytes(order="C")).decode("ascii"),
+    }
+
+
+def _read_nifti_mask_array(mask_id: str) -> tuple[dict[str, Any], Any, np.ndarray]:
+    try:
+        import SimpleITK as sitk
+    except ModuleNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="SimpleITK is required to read 3D masks") from exc
+
+    masks = _load_masks()
+    record = next((item for item in masks if item.get("mask_id") == mask_id), None)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Mask not found: {mask_id}")
+    if record.get("mask_format") != "nii.gz":
+        raise HTTPException(status_code=400, detail="Only 3D NIfTI masks can be rendered as surface mesh")
+
+    path = (PROJECT_ROOT / str(record.get("path"))).resolve()
+    try:
+        path.relative_to(PROJECT_ROOT.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid mask path") from exc
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Mask file not found: {record.get('path')}")
+
+    image = sitk.ReadImage(str(path))
+    array = sitk.GetArrayFromImage(image)
+    if array.ndim == 2:
+        array = array.reshape((1, array.shape[0], array.shape[1]))
+    return record, image, (array > 0).astype(np.uint8, copy=False)
+
+
+def _filter_mask_components(binary: np.ndarray, min_voxels: int, max_components: int) -> tuple[np.ndarray, dict[str, Any]]:
+    min_voxels = max(1, int(min_voxels))
+    max_components = max(1, int(max_components))
+    voxel_count_before = int(np.count_nonzero(binary))
+    if voxel_count_before == 0:
+        return binary.astype(np.uint8, copy=False), {
+            "voxel_count_before": 0,
+            "voxel_count_after": 0,
+            "component_count_before": 0,
+            "component_count_after": 0,
+            "removed_voxels": 0,
+        }
+
+    try:
+        from scipy import ndimage as ndi
+    except ModuleNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="scipy is required to clean mask surface artifacts") from exc
+
+    labeled, component_count = ndi.label(binary > 0, structure=np.ones((3, 3, 3), dtype=np.uint8))
+    if component_count == 0:
+        return np.zeros_like(binary, dtype=np.uint8), {
+            "voxel_count_before": voxel_count_before,
+            "voxel_count_after": 0,
+            "component_count_before": 0,
+            "component_count_after": 0,
+            "removed_voxels": voxel_count_before,
+        }
+
+    sizes = np.bincount(labeled.reshape(-1))
+    component_labels = np.arange(1, sizes.size)
+    keep_labels = [
+        int(label)
+        for label in sorted(component_labels, key=lambda value: int(sizes[value]), reverse=True)
+        if int(sizes[label]) >= min_voxels
+    ][:max_components]
+    if not keep_labels:
+        keep_labels = [int(component_labels[np.argmax(sizes[1:])])]
+
+    cleaned = np.isin(labeled, keep_labels)
+    voxel_count_after = int(np.count_nonzero(cleaned))
+    return cleaned.astype(np.uint8, copy=False), {
+        "voxel_count_before": voxel_count_before,
+        "voxel_count_after": voxel_count_after,
+        "component_count_before": int(component_count),
+        "component_count_after": len(keep_labels),
+        "removed_voxels": voxel_count_before - voxel_count_after,
+        "kept_component_voxels": [int(sizes[label]) for label in keep_labels],
+    }
+
+
+def _remove_thin_axial_artifacts(binary: np.ndarray, min_support_slices: int = 2) -> tuple[np.ndarray, int]:
+    """Remove sparse single-slice sheets before surface extraction.
+
+    The current label propagation fallback can occasionally create flat sheets
+    outside the anatomy. Real 3D targets usually have support on neighboring
+    slices, so this pass removes voxels that have no z-neighborhood support.
+    """
+    depth = binary.shape[0]
+    if depth < 5:
+        return binary.astype(np.uint8, copy=False), 0
+
+    source = binary > 0
+    support = np.zeros_like(source, dtype=np.uint8)
+    for offset in (-3, -2, -1, 1, 2, 3):
+        shifted = np.zeros_like(source, dtype=bool)
+        if offset < 0:
+            shifted[:offset] = source[-offset:]
+        else:
+            shifted[offset:] = source[:-offset]
+        support += shifted.astype(np.uint8, copy=False)
+
+    cleaned = source & (support >= max(1, int(min_support_slices)))
+    removed = int(np.count_nonzero(source) - np.count_nonzero(cleaned))
+    return cleaned.astype(np.uint8, copy=False), removed
+
+
+def _constrain_mask_to_ct_body(record: dict[str, Any], binary: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+    image_id = str(record.get("image_id") or "")
+    if not image_id:
+        return binary.astype(np.uint8, copy=False), {"applied": False, "reason": "mask has no image_id"}
+
+    try:
+        _, volume = load_volume(image_id)
+        from scipy import ndimage as ndi
+    except Exception as exc:
+        return binary.astype(np.uint8, copy=False), {"applied": False, "reason": str(exc)}
+
+    ct = volume.array
+    if ct.shape[:3] != binary.shape[:3]:
+        return binary.astype(np.uint8, copy=False), {
+            "applied": False,
+            "reason": f"ct/mask shape mismatch: ct={list(ct.shape[:3])}, mask={list(binary.shape[:3])}",
+        }
+
+    body_seed = ct > -850
+    labeled, component_count = ndi.label(body_seed, structure=np.ones((3, 3, 3), dtype=np.uint8))
+    if component_count > 0:
+      sizes = np.bincount(labeled.reshape(-1))
+      largest = int(np.argmax(sizes[1:]) + 1)
+      body_seed = labeled == largest
+
+    # Fill axial holes so lung/airway masks inside the chest remain inside the
+    # envelope, then dilate a little to tolerate imperfect CT thresholding.
+    envelope = np.zeros_like(body_seed, dtype=bool)
+    for z in range(body_seed.shape[0]):
+        envelope[z] = ndi.binary_fill_holes(body_seed[z])
+    envelope = ndi.binary_closing(envelope, structure=np.ones((3, 5, 5), dtype=bool), iterations=1)
+    envelope = ndi.binary_dilation(envelope, structure=np.ones((3, 5, 5), dtype=bool), iterations=2)
+
+    before = int(np.count_nonzero(binary))
+    constrained = (binary > 0) & envelope
+    after = int(np.count_nonzero(constrained))
+    if before > 0 and after < max(16, int(before * 0.02)):
+        return binary.astype(np.uint8, copy=False), {
+            "applied": False,
+            "reason": "ct envelope would remove nearly all mask voxels",
+            "voxel_count_before": before,
+            "voxel_count_after": after,
+        }
+    return constrained.astype(np.uint8, copy=False), {
+        "applied": True,
+        "voxel_count_before": before,
+        "voxel_count_after": after,
+        "removed_voxels": before - after,
+    }
+
+
+def _source_mask_ids(record: dict[str, Any]) -> list[str]:
+    source = record.get("source_mask_ids")
+    if isinstance(source, list):
+        return [str(value) for value in source]
+    if isinstance(source, str) and source.strip():
+        try:
+            parsed = json.loads(source)
+            if isinstance(parsed, list):
+                return [str(value) for value in parsed]
+        except json.JSONDecodeError:
+            return [item.strip() for item in source.split(",") if item.strip()]
+    return []
+
+
+def _constrain_mask_to_source_roi(
+    record: dict[str, Any],
+    binary: np.ndarray,
+    spacing: tuple[float, float, float],
+    margin_mm: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    masks = _load_masks()
+    source_ids = set(_source_mask_ids(record))
+    source_records = [
+        item
+        for item in masks
+        if item.get("mask_id") in source_ids
+        and (item.get("mask_format") == "json" or str(item.get("path") or "").endswith(".json"))
+    ]
+    if not source_records:
+        return binary.astype(np.uint8, copy=False), {"applied": False, "reason": "no source 2D JSON masks"}
+
+    depth, height, width = binary.shape[:3]
+    z_values: list[np.ndarray] = []
+    y_values: list[np.ndarray] = []
+    x_values: list[np.ndarray] = []
+    for source in source_records:
+        content = _read_mask_json(str(source.get("path") or ""))
+        if not content or content.get("encoding") != "rle":
+            continue
+        axis = _normalize_axis(str(content.get("axis") or source.get("axis") or "axial"))
+        slice_index = int(content.get("slice_index", -1))
+        content_width = int(content.get("width", 0))
+        content_height = int(content.get("height", 0))
+        if content_width <= 0 or content_height <= 0:
+            continue
+        decoded = _decode_rle(content.get("mask") or [], content_width, content_height)
+        axis_mask = _display_mask_to_axis_mask(axis, decoded)
+        rows, cols = np.nonzero(axis_mask > 0)
+        if rows.size == 0 or cols.size == 0:
+            continue
+
+        if axis == "axial" and 0 <= slice_index < depth:
+            z_values.append(np.full(rows.shape, slice_index, dtype=np.int32))
+            y_values.append(rows.astype(np.int32, copy=False))
+            x_values.append(cols.astype(np.int32, copy=False))
+        elif axis == "coronal" and 0 <= slice_index < height:
+            z_values.append(rows.astype(np.int32, copy=False))
+            y_values.append(np.full(rows.shape, slice_index, dtype=np.int32))
+            x_values.append(cols.astype(np.int32, copy=False))
+        elif axis == "sagittal" and 0 <= slice_index < width:
+            z_values.append(rows.astype(np.int32, copy=False))
+            y_values.append(cols.astype(np.int32, copy=False))
+            x_values.append(np.full(rows.shape, slice_index, dtype=np.int32))
+
+    if not z_values:
+        return binary.astype(np.uint8, copy=False), {"applied": False, "reason": "source 2D masks are empty"}
+
+    z_all = np.concatenate(z_values)
+    y_all = np.concatenate(y_values)
+    x_all = np.concatenate(x_values)
+    margin_x = max(4, int(round(float(margin_mm) / max(float(spacing[0]), 1e-6))))
+    margin_y = max(4, int(round(float(margin_mm) / max(float(spacing[1]), 1e-6))))
+    margin_z = max(2, int(round(float(margin_mm) / max(float(spacing[2]), 1e-6))))
+    z0 = max(0, int(z_all.min()) - margin_z)
+    z1 = min(depth, int(z_all.max()) + margin_z + 1)
+    y0 = max(0, int(y_all.min()) - margin_y)
+    y1 = min(height, int(y_all.max()) + margin_y + 1)
+    x0 = max(0, int(x_all.min()) - margin_x)
+    x1 = min(width, int(x_all.max()) + margin_x + 1)
+
+    roi = np.zeros_like(binary, dtype=bool)
+    roi[z0:z1, y0:y1, x0:x1] = True
+    before = int(np.count_nonzero(binary))
+    constrained = (binary > 0) & roi
+    after = int(np.count_nonzero(constrained))
+    if before > 0 and after < max(16, int(before * 0.005)):
+        return binary.astype(np.uint8, copy=False), {
+            "applied": False,
+            "reason": "source ROI would remove nearly all propagated voxels",
+            "source_mask_ids": sorted(source_ids),
+            "voxel_count_before": before,
+            "voxel_count_after": after,
+        }
+    return constrained.astype(np.uint8, copy=False), {
+        "applied": True,
+        "source_mask_ids": sorted(source_ids),
+        "margin_mm": float(margin_mm),
+        "roi_zyx": [z0, z1, y0, y1, x0, x1],
+        "voxel_count_before": before,
+        "voxel_count_after": after,
+        "removed_voxels": before - after,
+    }
+
+
+def _decimate_polydata(polydata, target_reduction: float, max_triangles: int):
+    try:
+        import vtk
+    except ModuleNotFoundError as exc:
+        raise HTTPException(status_code=503, detail="vtk is required for mask surface mesh generation") from exc
+
+    triangle_count = int(polydata.GetNumberOfPolys())
+    reduction = max(0.0, min(float(target_reduction), 0.92))
+    if max_triangles > 0 and triangle_count > max_triangles:
+        reduction = max(reduction, min(0.92, 1.0 - (float(max_triangles) / float(triangle_count))))
+    if reduction <= 0.001:
+        return polydata
+
+    best_output = polydata
+    best_triangle_count = triangle_count
+    attempts = [reduction]
+    if max_triangles > 0 and triangle_count > max_triangles:
+        attempts.extend([0.70, 0.82, 0.90, 0.94])
+
+    for attempt in sorted(set(max(0.0, min(value, 0.94)) for value in attempts)):
+        decimator = vtk.vtkQuadricDecimation()
+        decimator.SetInputData(polydata)
+        decimator.SetTargetReduction(attempt)
+        decimator.VolumePreservationOn()
+        decimator.Update()
+        output = decimator.GetOutput()
+        output_triangles = int(output.GetNumberOfPolys())
+        if output.GetNumberOfPoints() == 0 or output_triangles == 0:
+            continue
+        if output_triangles < best_triangle_count:
+            best_output = output
+            best_triangle_count = output_triangles
+        if max_triangles <= 0 or output_triangles <= max_triangles:
+            return output
+
+    return best_output
+
+
+def get_mask_surface_mesh(
+    mask_id: str,
+    min_component_voxels: int = 64,
+    max_components: int = 8,
+    max_triangles: int = 90000,
+    target_reduction: float = 0.55,
+    smooth_iterations: int = 8,
+    remove_thin: bool = True,
+    constrain_to_body: bool = True,
+    constrain_to_source_roi: bool = True,
+    source_roi_margin_mm: float = 45.0,
+) -> dict[str, Any]:
+    try:
+        import vtk
+        from vtk.util import numpy_support
+    except ModuleNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="vtk is not installed. Run `pip install -r requirements.txt` to enable VTK mask surface mesh.",
+        ) from exc
+
+    record, image, binary = _read_nifti_mask_array(mask_id)
+    spacing = tuple(float(value) for value in image.GetSpacing()[:3])
+    cleanup: dict[str, Any] = {}
+    if constrain_to_source_roi:
+        binary, roi_cleanup = _constrain_mask_to_source_roi(
+            record=record,
+            binary=binary,
+            spacing=spacing,
+            margin_mm=source_roi_margin_mm,
+        )
+        cleanup["source_roi_constraint"] = roi_cleanup
+    if constrain_to_body:
+        binary, body_cleanup = _constrain_mask_to_ct_body(record, binary)
+        cleanup["ct_body_constraint"] = body_cleanup
+    if remove_thin:
+        binary, removed_thin_voxels = _remove_thin_axial_artifacts(binary)
+        cleanup["removed_thin_voxels"] = removed_thin_voxels
+
+    binary, component_cleanup = _filter_mask_components(
+        binary=binary,
+        min_voxels=min_component_voxels,
+        max_components=max_components,
+    )
+    cleanup.update(component_cleanup)
+    if not np.any(binary):
+        raise HTTPException(status_code=422, detail="Mask is empty after artifact cleanup")
+
+    depth, height, width = binary.shape[:3]
+    origin = tuple(float(value) for value in image.GetOrigin()[:3])
+
+    image_data = vtk.vtkImageData()
+    image_data.SetDimensions(int(width), int(height), int(depth))
+    image_data.SetSpacing(spacing)
+    image_data.SetOrigin(origin)
+    scalars = numpy_support.numpy_to_vtk(
+        np.ascontiguousarray(binary).reshape(-1, order="C"),
+        deep=True,
+        array_type=vtk.VTK_UNSIGNED_CHAR,
+    )
+    scalars.SetName("mask")
+    image_data.GetPointData().SetScalars(scalars)
+
+    marching = vtk.vtkMarchingCubes()
+    marching.SetInputData(image_data)
+    marching.SetValue(0, 0.5)
+    marching.ComputeNormalsOff()
+    marching.ComputeGradientsOff()
+    marching.Update()
+
+    triangle_filter = vtk.vtkTriangleFilter()
+    triangle_filter.SetInputConnection(marching.GetOutputPort())
+    triangle_filter.Update()
+    polydata = triangle_filter.GetOutput()
+
+    if smooth_iterations > 0 and polydata.GetNumberOfPoints() > 0:
+        smoother = vtk.vtkWindowedSincPolyDataFilter()
+        smoother.SetInputData(polydata)
+        smoother.SetNumberOfIterations(max(0, min(int(smooth_iterations), 24)))
+        smoother.BoundarySmoothingOff()
+        smoother.FeatureEdgeSmoothingOff()
+        smoother.NonManifoldSmoothingOn()
+        smoother.NormalizeCoordinatesOn()
+        smoother.Update()
+        smoothed = smoother.GetOutput()
+        if smoothed.GetNumberOfPoints() > 0 and smoothed.GetNumberOfPolys() > 0:
+            polydata = smoothed
+
+    polydata = _decimate_polydata(polydata, target_reduction=target_reduction, max_triangles=max_triangles)
+    normals_filter = vtk.vtkPolyDataNormals()
+    normals_filter.SetInputData(polydata)
+    normals_filter.ComputePointNormalsOn()
+    normals_filter.ComputeCellNormalsOff()
+    normals_filter.SplittingOff()
+    normals_filter.ConsistencyOn()
+    normals_filter.AutoOrientNormalsOn()
+    normals_filter.Update()
+    normals_polydata = normals_filter.GetOutput()
+    if normals_polydata.GetNumberOfPoints() > 0 and normals_polydata.GetPointData().GetNormals() is not None:
+        polydata = normals_polydata
+
+    if polydata.GetNumberOfPoints() == 0 or polydata.GetNumberOfPolys() == 0:
+        raise HTTPException(status_code=422, detail="VTK could not extract a surface from this mask")
+
+    points = polydata.GetPoints()
+    vtk_points = numpy_support.vtk_to_numpy(points.GetData()).astype(np.float32, copy=False)
+    normal_data = polydata.GetPointData().GetNormals()
+    if normal_data is not None:
+        normals = numpy_support.vtk_to_numpy(normal_data).astype(np.float32, copy=False)
+    else:
+        normals = np.zeros_like(vtk_points, dtype=np.float32)
+    extent = np.array(
+        [
+            spacing[0] * max(width - 1, 1),
+            spacing[1] * max(height - 1, 1),
+            spacing[2] * max(depth - 1, 1),
+        ],
+        dtype=np.float32,
+    )
+    normalized = (vtk_points - np.array(origin, dtype=np.float32)) / np.maximum(extent, 1e-6)
+    normalized = np.clip(normalized, 0.0, 1.0).astype(np.float32, copy=False)
+
+    polys = numpy_support.vtk_to_numpy(polydata.GetPolys().GetData()).astype(np.int64, copy=False)
+    indices: list[int] = []
+    cursor = 0
+    while cursor < polys.size:
+        count = int(polys[cursor])
+        if count == 3 and cursor + 3 < polys.size:
+            indices.extend(int(value) for value in polys[cursor + 1 : cursor + 4])
+        cursor += count + 1
+
+    if not indices:
+        raise HTTPException(status_code=422, detail="VTK surface contains no triangles")
+
+    return {
+        "success": True,
+        "mask_id": mask_id,
+        "case_id": record.get("case_id"),
+        "image_id": record.get("image_id"),
+        "version": record.get("version"),
+        "label": record.get("label"),
+        "source": "vtk_marching_cubes",
+        "dimensions": [width, height, depth],
+        "spacing": [float(value) for value in spacing],
+        "origin": [float(value) for value in origin],
+        "cleanup": cleanup,
+        "vertex_count": int(normalized.shape[0]),
+        "triangle_count": int(len(indices) // 3),
+        "positions": normalized.reshape(-1).round(6).tolist(),
+        "normals": normals.reshape(-1).round(5).tolist(),
+        "indices": indices,
+    }
+
+
+def get_mask_quality_summary(mask_id: str) -> dict[str, Any]:
+    try:
+        import SimpleITK as sitk
+    except ModuleNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="SimpleITK is required to read 3D mask quality") from exc
+
+    masks = _load_masks()
+    record = next((item for item in masks if item.get("mask_id") == mask_id), None)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Mask not found: {mask_id}")
+    if record.get("mask_format") != "nii.gz":
+        raise HTTPException(status_code=400, detail="Only 3D NIfTI masks have 3D quality summary")
+
+    path = (PROJECT_ROOT / str(record.get("path"))).resolve()
+    try:
+        path.relative_to(PROJECT_ROOT.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid mask path") from exc
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Mask file not found: {record.get('path')}")
+
+    image = sitk.ReadImage(str(path))
+    array = sitk.GetArrayFromImage(image)
+    if array.ndim == 2:
+        array = array.reshape((1, array.shape[0], array.shape[1]))
+    values = array > 0
+    depth, height, width = values.shape[:3]
+    spacing = [float(value) for value in image.GetSpacing()[:3]]
+    voxel_count = int(np.count_nonzero(values))
+    voxel_volume_mm3 = float(spacing[0] * spacing[1] * spacing[2])
+    physical_volume_mm3 = voxel_count * voxel_volume_mm3
+
+    if voxel_count > 0:
+        z_indices = np.where(np.any(values, axis=(1, 2)))[0]
+        slice_range = {
+            "start": int(z_indices[0]),
+            "end": int(z_indices[-1]),
+            "count": int(z_indices[-1] - z_indices[0] + 1),
+        }
+        component_image = sitk.ConnectedComponent(sitk.GetImageFromArray(values.astype(np.uint8)))
+        stats = sitk.LabelShapeStatisticsImageFilter()
+        stats.Execute(component_image)
+        component_sizes = [int(stats.GetNumberOfPixels(label)) for label in stats.GetLabels()]
+        connected_component_count = len(component_sizes)
+        largest_component_voxels = max(component_sizes) if component_sizes else 0
+    else:
+        slice_range = {"start": None, "end": None, "count": 0}
+        connected_component_count = 0
+        largest_component_voxels = 0
+    largest_component_ratio = (largest_component_voxels / voxel_count) if voxel_count else 0.0
+
+    return {
+        "success": True,
+        "mask_id": mask_id,
+        "case_id": record.get("case_id"),
+        "image_id": record.get("image_id"),
+        "version": record.get("version"),
+        "label": record.get("label"),
+        "voxel_count": voxel_count,
+        "volume_ml": physical_volume_mm3 / 1000.0,
+        "connected_component_count": connected_component_count,
+        "largest_component_voxels": largest_component_voxels,
+        "largest_component_ratio": largest_component_ratio,
+        "slice_range": slice_range,
+        "dimensions": [width, height, depth],
+        "spacing": spacing,
+        "physical_volume_mm3": physical_volume_mm3,
     }
 
 
@@ -547,6 +1073,86 @@ def save_mask(request: SaveMaskRequest) -> SaveMaskResponse:
 
     mask = MaskRecord(**record)
     return SaveMaskResponse(success=True, mask_id=mask_id, path=mask_path, mask=mask)
+
+
+def promote_mask(mask_id: str, target_version: str) -> SaveMaskResponse:
+    ensure_project_dirs()
+    target_version = target_version.strip()
+    if target_version not in PROMOTABLE_TARGET_VERSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported target_version: {target_version}. Use one of {sorted(PROMOTABLE_TARGET_VERSIONS)}",
+        )
+
+    masks = _load_masks()
+    source = next((item for item in masks if item.get("mask_id") == mask_id), None)
+    if source is None:
+        raise HTTPException(status_code=404, detail=f"Mask not found: {mask_id}")
+    if source.get("version") not in {"v3_preview", "v3_fusion"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Only v3_preview or v3_fusion 3D masks can be promoted",
+        )
+    if source.get("version") == "v3_fusion" and target_version != "final":
+        raise HTTPException(status_code=400, detail="v3_fusion can only be promoted to final")
+    if source.get("version") == target_version:
+        raise HTTPException(status_code=400, detail=f"Mask is already {target_version}")
+
+    source_path = PROJECT_ROOT / str(source.get("path") or "")
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail=f"Source mask file not found: {source.get('path')}")
+    if not (source.get("mask_format") == "nii.gz" or str(source.get("path") or "").endswith(".nii.gz")):
+        raise HTTPException(status_code=400, detail="Only NIfTI 3D masks can be promoted")
+
+    new_mask_id = next_sqlite_entity_id("Mask", "masks", "mask_id")
+    label = _normalize_label(str(source.get("label") or "label"))
+    new_path = _mask_path(
+        case_id=str(source.get("case_id")),
+        image_id=str(source.get("image_id")),
+        mask_id=new_mask_id,
+        version=target_version,
+        label=label,
+        mask_format="nii.gz",
+    )
+    target_path = PROJECT_ROOT / new_path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_path, target_path)
+
+    source_mask_ids = [mask_id]
+    existing_source_ids = source.get("source_mask_ids")
+    if isinstance(existing_source_ids, str):
+        try:
+            parsed = json.loads(existing_source_ids)
+            if isinstance(parsed, list):
+                source_mask_ids.extend(str(value) for value in parsed)
+        except json.JSONDecodeError:
+            pass
+    elif isinstance(existing_source_ids, list):
+        source_mask_ids.extend(str(value) for value in existing_source_ids)
+
+    record = {
+        "mask_id": new_mask_id,
+        "annotation_id": source.get("annotation_id"),
+        "case_id": source.get("case_id"),
+        "image_id": source.get("image_id"),
+        "path": new_path,
+        "version": target_version,
+        "label": label,
+        "mask_format": "nii.gz",
+        "slice_index": None,
+        "width": source.get("width"),
+        "height": source.get("height"),
+        "encoding": f"promoted_from_{mask_id}",
+        "create_time": _now_iso(),
+        "source_mask_ids": sorted(set(source_mask_ids)),
+        "shape": source.get("shape"),
+        "spacing": source.get("spacing"),
+        "origin": source.get("origin"),
+        "direction": source.get("direction"),
+    }
+    upsert_record("masks", record)
+    mask = MaskRecord(**record)
+    return SaveMaskResponse(success=True, mask_id=new_mask_id, path=new_path, mask=mask)
 
 
 def get_mask(mask_id: str) -> MaskRecord:
@@ -831,13 +1437,17 @@ def _random_walker_refine_slice(
     ct_slice: np.ndarray,
     candidate_mask: np.ndarray,
     sparse_mask: np.ndarray | None,
+    positive_seed_mask: np.ndarray | None,
+    negative_seed_mask: np.ndarray | None,
     beta: float,
     roi_margin: int,
     max_nodes: int,
 ) -> np.ndarray:
     candidate = candidate_mask > 0
     sparse_foreground = sparse_mask > 0 if sparse_mask is not None else np.zeros_like(candidate, dtype=bool)
-    seed_source = candidate | sparse_foreground
+    positive_seed = positive_seed_mask > 0 if positive_seed_mask is not None else np.zeros_like(candidate, dtype=bool)
+    negative_seed = negative_seed_mask > 0 if negative_seed_mask is not None else np.zeros_like(candidate, dtype=bool)
+    seed_source = candidate | sparse_foreground | positive_seed | negative_seed
     bbox = _bounding_box(seed_source, max(4, int(roi_margin)))
     if bbox is None:
         return np.zeros_like(candidate_mask, dtype=np.uint8)
@@ -845,25 +1455,27 @@ def _random_walker_refine_slice(
     y0, y1, x0, x1 = bbox
     node_count = (y1 - y0) * (x1 - x0)
     if node_count > max(256, int(max_nodes)):
-        return candidate.astype(np.uint8)
+        return (candidate & ~negative_seed).astype(np.uint8)
 
     candidate_roi = candidate[y0:y1, x0:x1]
     sparse_roi = sparse_foreground[y0:y1, x0:x1]
-    foreground = sparse_roi.copy()
+    positive_roi = positive_seed[y0:y1, x0:x1]
+    negative_roi = negative_seed[y0:y1, x0:x1]
+    foreground = (sparse_roi | positive_roi) & ~negative_roi
     if not np.any(foreground):
-        foreground = _morphology_mask(candidate_roi, "erode", 1)
+        foreground = _morphology_mask(candidate_roi & ~negative_roi, "erode", 1)
     if not np.any(foreground):
-        foreground = candidate_roi.copy()
+        foreground = candidate_roi & ~negative_roi
 
     dilated = _morphology_mask(candidate_roi | foreground, "dilate", 3)
-    background = ~dilated
+    background = negative_roi | ~dilated
     background[0, :] = True
     background[-1, :] = True
     background[:, 0] = True
     background[:, -1] = True
     background &= ~foreground
     if not np.any(background):
-        return candidate.astype(np.uint8)
+        return (candidate & ~negative_seed).astype(np.uint8)
 
     refined_roi = _solve_binary_random_walker(
         image_roi=ct_slice[y0:y1, x0:x1],
@@ -872,8 +1484,11 @@ def _random_walker_refine_slice(
         beta=max(1.0, float(beta)),
     )
     refined_roi = np.maximum(refined_roi, sparse_roi.astype(np.uint8))
+    refined_roi = np.maximum(refined_roi, positive_roi.astype(np.uint8))
+    refined_roi[negative_roi] = 0
     refined = np.zeros_like(candidate_mask, dtype=np.uint8)
     refined[y0:y1, x0:x1] = refined_roi
+    refined[negative_seed] = 0
     return refined
 
 
@@ -881,6 +1496,8 @@ def _refine_with_random_walker(
     candidate_volume: np.ndarray,
     volume_array: np.ndarray,
     sparse_slices: dict[int, np.ndarray],
+    positive_slices: dict[int, np.ndarray] | None,
+    negative_slices: dict[int, np.ndarray] | None,
     fill_holes: bool,
     keep_largest_component: bool,
     closing_radius: int,
@@ -888,27 +1505,40 @@ def _refine_with_random_walker(
     roi_margin: int,
     max_nodes: int,
 ) -> np.ndarray:
+    positive_slices = positive_slices or {}
+    negative_slices = negative_slices or {}
     refined = np.zeros_like(candidate_volume, dtype=np.uint8)
     for slice_index in range(candidate_volume.shape[0]):
-        if not np.any(candidate_volume[slice_index]) and slice_index not in sparse_slices:
+        if (
+            not np.any(candidate_volume[slice_index])
+            and slice_index not in sparse_slices
+            and slice_index not in positive_slices
+        ):
             continue
         slice_refined = _random_walker_refine_slice(
             ct_slice=volume_array[slice_index],
             candidate_mask=candidate_volume[slice_index],
             sparse_mask=sparse_slices.get(slice_index),
+            positive_seed_mask=positive_slices.get(slice_index),
+            negative_seed_mask=negative_slices.get(slice_index),
             beta=beta,
             roi_margin=roi_margin,
             max_nodes=max_nodes,
         )
-        refined[slice_index] = _cleanup_binary_slice(
+        cleaned = _cleanup_binary_slice(
             slice_refined,
             fill_holes=fill_holes,
             keep_largest_component=keep_largest_component,
             closing_radius=closing_radius,
         )
+        if slice_index in negative_slices:
+            cleaned[negative_slices[slice_index] > 0] = 0
+        refined[slice_index] = cleaned
 
-    for slice_index, slice_mask in sparse_slices.items():
+    for slice_index, slice_mask in {**sparse_slices, **positive_slices}.items():
         refined[slice_index] = np.maximum(refined[slice_index], (slice_mask > 0).astype(np.uint8))
+    for slice_index, slice_mask in negative_slices.items():
+        refined[slice_index][slice_mask > 0] = 0
     return refined
 
 
@@ -922,6 +1552,58 @@ def _seed_volume_from_sparse_slices(
         if 0 <= slice_index < depth:
             seed_volume[slice_index] = np.maximum(seed_volume[slice_index], (slice_mask > 0).astype(np.uint8))
     return seed_volume
+
+
+def _draw_seed_disk(mask: np.ndarray, row: int, col: int, radius: int) -> None:
+    height, width = mask.shape[:2]
+    radius = max(1, int(radius))
+    row = max(0, min(int(row), height - 1))
+    col = max(0, min(int(col), width - 1))
+    y0 = max(0, row - radius)
+    y1 = min(height, row + radius + 1)
+    x0 = max(0, col - radius)
+    x1 = min(width, col + radius + 1)
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    mask[y0:y1, x0:x1][(yy - row) ** 2 + (xx - col) ** 2 <= radius * radius] = 1
+
+
+def _point_to_axis_indices(point: list[float], axis: str, shape: tuple[int, int, int]) -> tuple[int, int, int] | None:
+    if len(point) < 3:
+        return None
+    depth, height, width = shape
+    x = int(round(float(point[0])))
+    y = int(round(float(point[1])))
+    z = int(round(float(point[2])))
+    if axis == "axial":
+        slice_index, row, col = z, y, x
+    elif axis == "coronal":
+        slice_index, row, col = y, z, x
+    elif axis == "sagittal":
+        slice_index, row, col = x, z, y
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported slice axis: {axis}")
+    if not (0 <= slice_index < depth and 0 <= row < height and 0 <= col < width):
+        return None
+    return slice_index, row, col
+
+
+def _point_prompt_slices(
+    points: list[list[float]],
+    axis: str,
+    shape: tuple[int, int, int],
+    radius: int = 5,
+) -> dict[int, np.ndarray]:
+    _, height, width = shape
+    slices: dict[int, np.ndarray] = {}
+    for point in points or []:
+        indices = _point_to_axis_indices(point, axis, shape)
+        if indices is None:
+            continue
+        slice_index, row, col = indices
+        if slice_index not in slices:
+            slices[slice_index] = np.zeros((height, width), dtype=np.uint8)
+        _draw_seed_disk(slices[slice_index], row, col, radius)
+    return slices
 
 
 def _connected_component_filter_volume(
@@ -1103,10 +1785,14 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
             closing_radius=max(0, int(request.closing_radius)),
         )
         if request.method == "random_walker":
+            positive_slices = _point_prompt_slices(request.positive_points, axis, axis_result.shape[:3])
+            negative_slices = _point_prompt_slices(request.negative_points, axis, axis_result.shape[:3])
             axis_result = _refine_with_random_walker(
                 candidate_volume=axis_result,
                 volume_array=axis_volume,
                 sparse_slices=sparse_slices,
+                positive_slices=positive_slices,
+                negative_slices=negative_slices,
                 fill_holes=request.fill_holes,
                 keep_largest_component=request.keep_largest_component,
                 closing_radius=max(0, int(request.closing_radius)),
@@ -1114,6 +1800,9 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
                 roi_margin=request.random_walker_roi_margin,
                 max_nodes=request.random_walker_max_nodes,
             )
+        else:
+            positive_slices = {}
+            negative_slices = {}
         axis_seed_volume = _seed_volume_from_sparse_slices(sparse_slices, axis_result.shape[:3])
         axis_result = _connected_component_filter_volume(
             mask_volume=axis_result,
@@ -1123,6 +1812,12 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
             max_components=request.connected_component_max_components,
             keep_largest_component=request.keep_largest_component,
         )
+        for slice_index, slice_mask in negative_slices.items():
+            axis_result[slice_index][slice_mask > 0] = 0
+        for slice_index, slice_mask in positive_slices.items():
+            axis_result[slice_index] = np.maximum(axis_result[slice_index], (slice_mask > 0).astype(np.uint8))
+        for slice_index, slice_mask in negative_slices.items():
+            axis_result[slice_index][slice_mask > 0] = 0
         propagated = np.maximum(propagated, _axis_result_to_volume(axis_result, axis))
     if request.method == "random_walker":
         encoding = "label_propagation_random_walker_graph"
@@ -1222,22 +1917,78 @@ def _remote_refinement_response(
     status: str,
     default_message: str,
 ) -> DeepEditRefineResponse | None:
-    if not remote_result or not remote_result.get("mask_id"):
+    if not remote_result or remote_result.get("success") is False:
         return None
-    mask_id = str(remote_result["mask_id"])
-    mask = get_mask(mask_id)
+    if remote_result.get("mask_id"):
+        mask_id = str(remote_result["mask_id"])
+        mask = get_mask(mask_id)
+        source_mask_ids = [request.current_mask_id] if request.current_mask_id else []
+    elif remote_result.get("mask_base64"):
+        image_record, volume = load_volume(request.image_id)
+        if image_record.get("case_id") != request.case_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Image {request.image_id} does not belong to case {request.case_id}",
+            )
+        label = _normalize_label(request.label)
+        mask_id = next_sqlite_entity_id("Mask", "masks", "mask_id")
+        mask_path = _mask_path(
+            case_id=request.case_id,
+            image_id=request.image_id,
+            mask_id=mask_id,
+            version=request.output_version,
+            label=label,
+            mask_format="nii.gz",
+        )
+        target = PROJECT_ROOT / mask_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.write_bytes(base64.b64decode(str(remote_result["mask_base64"])))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=502, detail="DeepEdit service returned invalid mask_base64") from exc
+
+        shape = remote_result.get("shape")
+        if not isinstance(shape, list) or len(shape) != 3:
+            shape = list(volume.array.shape[:3])
+        source_mask_ids = [request.current_mask_id] if request.current_mask_id else []
+        record = {
+            "mask_id": mask_id,
+            "annotation_id": None,
+            "case_id": request.case_id,
+            "image_id": request.image_id,
+            "path": mask_path,
+            "version": request.output_version,
+            "label": label,
+            "mask_format": "nii.gz",
+            "slice_index": None,
+            "width": int(shape[2]),
+            "height": int(shape[1]),
+            "encoding": "deepedit_neural_network",
+            "create_time": _now_iso(),
+            "source_mask_ids": source_mask_ids,
+            "shape": [int(value) for value in shape],
+            "spacing": remote_result.get("spacing") or [float(value) for value in volume.spacing],
+            "origin": remote_result.get("origin") or [float(value) for value in volume.origin],
+            "direction": remote_result.get("direction") or [float(value) for value in volume.direction],
+        }
+        upsert_record("masks", record)
+        mask = MaskRecord(**record)
+    else:
+        return None
+    response_shape = list(remote_result.get("shape") or [])
+    propagated_slices = int(response_shape[0]) if response_shape else int(mask.height or 0)
     return DeepEditRefineResponse(
         success=True,
         mask_id=mask.mask_id,
         path=mask.path,
         method=method,
-        source_mask_ids=[request.current_mask_id] if request.current_mask_id else [],
+        source_mask_ids=source_mask_ids,
         annotated_slices=sorted(set(int(value) for value in request.confirmed_slices)),
-        propagated_slices=mask.height or 0,
-        shape=[],
-        spacing=[],
-        origin=[],
-        direction=[],
+        propagated_slices=propagated_slices,
+        shape=response_shape,
+        spacing=list(remote_result.get("spacing") or []),
+        origin=list(remote_result.get("origin") or []),
+        direction=list(remote_result.get("direction") or []),
         mask=mask,
         refinement_mode=method,
         model_status=status,
@@ -1277,9 +2028,13 @@ def deepedit_refine(request: DeepEditRefineRequest) -> DeepEditRefineResponse:
             keep_largest_component=False,
             image_guidance=True,
             closing_radius=1,
+            random_walker_beta=request.random_walker_beta,
+            random_walker_roi_margin=request.random_walker_roi_margin,
             connected_component_mode="seeded",
-            connected_component_min_voxels=64,
+            connected_component_min_voxels=request.connected_component_min_voxels,
             connected_component_max_components=8,
+            positive_points=request.positive_points,
+            negative_points=request.negative_points,
         )
     )
     return DeepEditRefineResponse(
