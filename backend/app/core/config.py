@@ -33,6 +33,7 @@ DATASETS_DB_PATH = DATABASE_DIR / "dev_datasets.json"
 
 ALLOWED_UPLOAD_EXTENSIONS = {
     ".dcm",
+    ".dicom",
     ".zip",
     ".nii",
     ".gz",

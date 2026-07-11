@@ -206,7 +206,7 @@ def _load_with_simpleitk(path: Path) -> VolumeData:
                 reader = sitk.ImageSeriesReader()
                 reader.SetFileNames(dicom_names)
                 image = reader.Execute()
-    elif suffix == ".dcm":
+    elif suffix in {".dcm", ".dicom"}:
         dicom_names = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(str(path.parent))
         if dicom_names:
             reader = sitk.ImageSeriesReader()

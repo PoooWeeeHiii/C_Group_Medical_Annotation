@@ -758,36 +758,153 @@ async function uploadCase(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const fileInput = form.querySelector("[name=file]");
-  if (!fileInput.files.length) {
-    showToast("请选择一个 DICOM / NRRD / NIfTI / PNG 文件");
+  const files = fileInput?.files ? [...fileInput.files] : [];
+  await uploadCtFiles(files, form);
+}
+
+function isAllowedCtFile(file) {
+  const name = String(file?.name || "").toLowerCase();
+  if (!name) return false;
+  if (name.endsWith(".nii.gz")) return true;
+  const ext = name.includes(".") ? `.${name.split(".").pop()}` : "";
+  const allowed = new Set([".dcm", ".dicom", ".nii", ".gz", ".nrrd", ".zip", ".png", ".jpg", ".jpeg"]);
+  if (allowed.has(ext)) return true;
+  // Extensionless DICOM instances are common in clinical exports.
+  return ext === "" && file.size > 128;
+}
+
+function describeUploadSelection(files) {
+  if (!files.length) return "未选择文件";
+  if (files.length === 1) return files[0].name;
+  return `${files.length} 个文件（${files[0].name} 等）`;
+}
+
+async function uploadCtFiles(fileList, form) {
+  const files = [...(fileList || [])].filter(Boolean);
+  if (!files.length) {
+    showToast("请选择或拖入 CT 文件（DICOM / NIfTI / NRRD / ZIP）");
     return;
+  }
+  const invalid = files.filter((file) => !isAllowedCtFile(file));
+  if (invalid.length) {
+    showToast(`含不支持的文件：${invalid[0].name}`);
+    return;
+  }
+  if (files.length > 1) {
+    const allDicom = files.every((file) => {
+      const name = file.name.toLowerCase();
+      return name.endsWith(".dcm") || name.endsWith(".dicom") || !name.includes(".");
+    });
+    if (!allDicom) {
+      showToast("多文件导入仅支持同一 DICOM 序列；体积数据请单个导入 .nii / .nrrd / .zip");
+      return;
+    }
   }
 
   const body = new FormData();
-  body.append("file", fileInput.files[0]);
-  body.append("patient_id", form.patient_id.value || "");
-  body.append("modality", form.modality.value || "CT");
-  body.append("source_group", form.source_group.value || "local");
+  for (const file of files) body.append("files", file);
+  body.append("patient_id", form?.patient_id?.value || "");
+  body.append("modality", form?.modality?.value || "CT");
+  body.append("source_group", form?.source_group?.value || "local");
 
-  const button = form.querySelector("button[type=submit]");
-  button.disabled = true;
-  button.textContent = "上传中...";
+  const button = form?.querySelector("button[type=submit]");
+  const hint = $("#uploadDropHint");
+  const previousText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "导入中...";
+  }
+  if (hint) hint.textContent = `正在导入 ${describeUploadSelection(files)}...`;
+
   try {
     const response = await fetch(apiUrl("/api/upload"), { method: "POST", body, headers: authHeaders() });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || "上传失败");
+    if (!response.ok) {
+      const detail = data.detail;
+      throw new Error(typeof detail === "string" ? detail : (detail?.message || "上传失败"));
+    }
     showToast(`导入成功：${data.case_id} / ${data.image_id}`);
     state.activeCaseId = data.case_id;
     state.activeImageId = data.image_id;
-    form.reset();
+    if (form) {
+      const patientId = form.patient_id?.value || "";
+      const modality = form.modality?.value || "CT";
+      const sourceGroup = form.source_group?.value || "local";
+      form.reset();
+      if (form.patient_id) form.patient_id.value = patientId;
+      if (form.modality) form.modality.value = modality;
+      if (form.source_group) form.source_group.value = sourceGroup;
+    }
+    const nameEl = $("#uploadSelectedName");
+    if (nameEl) nameEl.textContent = "未选择文件";
     await refreshCases();
     setView("cases");
   } catch (error) {
-    showToast(error.message);
+    showToast(error.message || "上传失败");
   } finally {
-    button.disabled = false;
-    button.textContent = "上传病例";
+    if (button) {
+      button.disabled = false;
+      button.textContent = previousText || "上传病例";
+    }
+    if (hint) hint.textContent = "点击选择，或将 CT 文件拖到此处；选完后自动导入";
   }
+}
+
+function bindUploadDropzone() {
+  const form = $("#uploadForm");
+  const dropzone = $("#uploadDropzone");
+  const fileInput = form?.querySelector("[name=file]");
+  const nameEl = $("#uploadSelectedName");
+  if (!form || !dropzone || !fileInput) return;
+
+  const syncName = () => {
+    if (nameEl) nameEl.textContent = describeUploadSelection([...fileInput.files]);
+  };
+
+  const openPicker = () => fileInput.click();
+
+  dropzone.addEventListener("click", (event) => {
+    // Avoid double-firing if the hidden input somehow receives the click.
+    if (event.target === fileInput) return;
+    openPicker();
+  });
+  dropzone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openPicker();
+    }
+  });
+
+  fileInput.addEventListener("change", async () => {
+    syncName();
+    if (!fileInput.files?.length) return;
+    await uploadCtFiles(fileInput.files, form);
+    fileInput.value = "";
+    syncName();
+  });
+
+  ["dragenter", "dragover"].forEach((type) => {
+    dropzone.addEventListener(type, (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      dropzone.classList.add("is-dragover");
+    });
+  });
+  dropzone.addEventListener("dragleave", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (dropzone.contains(event.relatedTarget)) return;
+    dropzone.classList.remove("is-dragover");
+  });
+  dropzone.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dropzone.classList.remove("is-dragover");
+    const files = [...(event.dataTransfer?.files || [])];
+    if (!files.length) return;
+    if (nameEl) nameEl.textContent = describeUploadSelection(files);
+    await uploadCtFiles(files, form);
+  });
 }
 
 async function saveCurrentMask(event) {
@@ -1671,12 +1788,30 @@ function renderCases() {
     : `<tr><td colspan="6"><div class="placeholder">暂无任务。审核员/管理员可在下方分配。</div></td></tr>`;
   return `
     <section class="panel">
-      <form id="uploadForm" class="toolbar-row">
-        <input class="file-input" type="file" name="file" accept=".dcm,.zip,.nii,.gz,.nrrd,.png,.jpg,.jpeg" />
-        <div class="field"><label>患者编号</label><input name="patient_id" placeholder="LUNG1-001" /></div>
-        <div class="field"><label>影像类型</label><select name="modality"><option value="CT">CT</option><option value="MRI">MRI</option><option value="PNG">PNG/JPG</option></select></div>
-        <div class="field"><label>数据来源</label><select name="source_group"><option value="local">本地</option><option value="A">A组</option><option value="B">B组</option></select></div>
-        <button class="primary-button" type="submit">上传病例</button>
+      <h2>导入 CT 病例</h2>
+      <p class="panel-lead">支持 DICOM（.dcm，可多选序列）、NIfTI（.nii/.nii.gz）、NRRD、ZIP；选择文件打开后自动导入，也可直接拖入下方区域。</p>
+      <form id="uploadForm" class="upload-form">
+        <div id="uploadDropzone" class="upload-dropzone" tabindex="0" role="button" aria-label="选择或拖入 CT 文件">
+          <input
+            id="uploadFileInput"
+            class="upload-file-input"
+            type="file"
+            name="file"
+            multiple
+            accept=".dcm,.dicom,.nii,.nii.gz,.nrrd,.zip,.gz,application/dicom,application/zip,.png,.jpg,.jpeg,image/*"
+          />
+          <div class="upload-dropzone-body">
+            <strong>点击选择文件，或拖入 CT 文件</strong>
+            <span id="uploadDropHint">点击选择，或将 CT 文件拖到此处；选完后自动导入</span>
+            <em id="uploadSelectedName">未选择文件</em>
+          </div>
+        </div>
+        <div class="toolbar-row" style="margin-top:14px;margin-bottom:0">
+          <div class="field"><label>患者编号</label><input name="patient_id" placeholder="LUNG1-001" /></div>
+          <div class="field"><label>影像类型</label><select name="modality"><option value="CT">CT</option><option value="MRI">MRI</option><option value="PNG">PNG/JPG</option></select></div>
+          <div class="field"><label>数据来源</label><select name="source_group"><option value="local">本地</option><option value="A">A组</option><option value="B">B组</option></select></div>
+          <button class="primary-button" type="submit">上传病例</button>
+        </div>
       </form>
     </section>
     <section class="table-wrap" style="margin-top:18px">
@@ -4045,6 +4180,7 @@ function render() {
   $("#viewRoot").innerHTML = (views[state.view] || renderDashboard)();
   const uploadForm = $("#uploadForm");
   if (uploadForm) uploadForm.addEventListener("submit", uploadCase);
+  bindUploadDropzone();
   const taskForm = $("#taskForm");
   if (taskForm) taskForm.addEventListener("submit", createTaskAssignment);
   const loginForm = $("#loginForm");

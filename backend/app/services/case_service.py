@@ -35,6 +35,8 @@ def _infer_format(path: Path) -> str:
     if name.endswith(".nii.gz"):
         return "nii.gz"
     suffix = path.suffix.lower().lstrip(".")
+    if suffix == "dicom":
+        return "dcm"
     return suffix or "unknown"
 
 
@@ -42,7 +44,16 @@ def _is_allowed_upload(filename: str) -> bool:
     name = filename.lower()
     if name.endswith(".nii.gz"):
         return True
-    return Path(name).suffix in ALLOWED_UPLOAD_EXTENSIONS
+    suffix = Path(name).suffix
+    if suffix in ALLOWED_UPLOAD_EXTENSIONS:
+        return True
+    # DICOM series members are sometimes named without an extension.
+    return suffix == "" and name != ""
+
+
+def _looks_like_dicom_name(filename: str) -> bool:
+    name = filename.lower()
+    return name.endswith(".dcm") or name.endswith(".dicom") or Path(name).suffix == ""
 
 
 def _parse_nrrd_sizes_from_text(text: str) -> tuple[int, int, int | None] | None:
@@ -178,17 +189,32 @@ def get_image(image_id: str) -> ImageRecord:
 
 
 async def create_case_from_upload(
-    file: UploadFile,
+    files: list[UploadFile] | UploadFile | None = None,
+    *,
+    file: UploadFile | None = None,
     source_group: str = "local",
     patient_id: str | None = None,
     modality: str | None = None,
 ) -> UploadResponse:
     ensure_project_dirs()
-    if not file.filename or not _is_allowed_upload(file.filename):
-        raise HTTPException(
-            status_code=400,
-            detail="Unsupported file type. Please upload DICOM, NIfTI, NRRD, PNG/JPG, or zip.",
-        )
+
+    uploads: list[UploadFile] = []
+    if isinstance(files, list):
+        uploads.extend(files)
+    elif files is not None:
+        uploads.append(files)
+    if file is not None:
+        uploads.append(file)
+    uploads = [item for item in uploads if item is not None and (item.filename or "").strip()]
+    if not uploads:
+        raise HTTPException(status_code=400, detail="请选择至少一个 CT / DICOM / NIfTI / NRRD / ZIP 文件")
+
+    for item in uploads:
+        if not _is_allowed_upload(item.filename or ""):
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的文件类型: {item.filename}. 请上传 DICOM、NIfTI、NRRD、PNG/JPG 或 zip。",
+            )
 
     case_id = next_sqlite_entity_id("Case", "cases", "case_id")
     image_id = next_sqlite_entity_id("Image", "images", "image_id")
@@ -196,9 +222,33 @@ async def create_case_from_upload(
     case_modality = (modality or "CT").upper()
 
     case_raw_dir = RAW_DATA_DIR / case_id
-    saved_path = await save_upload_file(file, case_raw_dir)
-    width, height, slice_count = _infer_dimensions(saved_path)
-    file_format = _infer_format(saved_path)
+    case_raw_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_paths: list[Path] = []
+    for item in uploads:
+        saved_paths.append(await save_upload_file(item, case_raw_dir))
+
+    # Multiple DICOM slices → keep them in one folder; image path points to first .dcm
+    # so SimpleITK ImageSeriesReader can discover the whole series via path.parent.
+    if len(saved_paths) > 1:
+        if not all(_looks_like_dicom_name(path.name) for path in saved_paths):
+            raise HTTPException(
+                status_code=400,
+                detail="多文件上传目前仅支持同一 DICOM 序列（多个 .dcm）。体积数据请使用单个 .nii/.nrrd/.zip。",
+            )
+        primary_path = next((path for path in saved_paths if path.suffix.lower() in {".dcm", ".dicom"}), saved_paths[0])
+        width, height, slice_count = _infer_dicom_dimensions(primary_path) or (0, 0, None)
+        if slice_count is None:
+            slice_count = len(saved_paths)
+        file_format = "dcm"
+        image_path = primary_path
+        filename = f"{len(saved_paths)}_dicom_slices"
+    else:
+        primary_path = saved_paths[0]
+        width, height, slice_count = _infer_dimensions(primary_path)
+        file_format = _infer_format(primary_path)
+        image_path = primary_path
+        filename = primary_path.name
 
     case_record = {
         "case_id": case_id,
@@ -211,10 +261,10 @@ async def create_case_from_upload(
     image_record = {
         "image_id": image_id,
         "case_id": case_id,
-        "path": path_for_api(saved_path, PROJECT_ROOT),
+        "path": path_for_api(image_path, PROJECT_ROOT),
         "width": width,
         "height": height,
-        "filename": saved_path.name,
+        "filename": filename,
         "file_format": file_format,
         "slice_count": slice_count,
     }
