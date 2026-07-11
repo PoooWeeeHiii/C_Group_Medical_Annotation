@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -231,3 +232,88 @@ def run_cli() -> None:
 
 if __name__ == "__main__":
     run_cli()
+
+
+# --- Person B: real spleen nnU-Net helpers (optional local weights) ---
+
+def build_predict_response(
+    case_id: str,
+    image_id: str,
+    mask_id: str,
+    image_path: str,
+    mask_path: str,
+    label: str = "spleen",
+    model_id: str = "Model0002",
+    version: str = "v2_ai",
+    source: str = "ai",
+    dice: float | None = None,
+) -> dict:
+    """Response schema helper aligned with Person B docs."""
+    payload = {
+        "case_id": case_id,
+        "image_id": image_id,
+        "mask_id": mask_id,
+        "image_path": image_path,
+        "mask_path": mask_path,
+        "mask_format": "nii.gz",
+        "label": label,
+        "version": version,
+        "source": source,
+        "model_id": model_id,
+    }
+    if dice is not None:
+        payload["dice"] = dice
+    return payload
+
+
+def predict_spleen_mask_array(volume: np.ndarray, spacing: tuple[float, float, float] | list[float]) -> np.ndarray:
+    """Run local Dataset506 spleen nnU-Net and return a binary mask array."""
+    from ai.spleen_nnunet import ensure_spleen_model_ready, predict_spleen_volume
+
+    ensure_spleen_model_ready()
+    with tempfile.TemporaryDirectory(prefix="spleen_predict_") as tmp:
+        output_path = Path(tmp) / "spleen_pred.nii.gz"
+        predict_spleen_volume(volume=volume, spacing=tuple(spacing), output_mask_path=output_path)
+        try:
+            import SimpleITK as sitk
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("SimpleITK is required to read spleen nnU-Net output") from exc
+        image = sitk.ReadImage(str(output_path))
+        array = sitk.GetArrayFromImage(image)
+        if array.ndim == 2:
+            array = array.reshape((1, array.shape[0], array.shape[1]))
+        return (array > 0).astype(np.uint8)
+
+
+def predict_spleen(
+    case_id: str,
+    image_id: str,
+    mask_id: str,
+    volume: np.ndarray,
+    spacing: tuple[float, float, float],
+    image_path: str,
+) -> dict:
+    """Person B entry: run spleen nnU-Net and write mask under dataset/labels/."""
+    from ai.config import LABELS_DIR, SPLEEN_LABEL, SPLEEN_MODEL_ID, VERSION_AI, mask_filename
+    from ai.spleen_nnunet import ensure_spleen_model_ready, predict_spleen_volume
+
+    ensure_spleen_model_ready()
+    relative_mask = (
+        Path("dataset")
+        / "labels"
+        / case_id
+        / VERSION_AI
+        / mask_filename(case_id, image_id, mask_id, VERSION_AI, SPLEEN_LABEL, ext="nii.gz")
+    )
+    absolute_mask = Path(__file__).resolve().parents[1] / relative_mask
+    predict_spleen_volume(volume=volume, spacing=spacing, output_mask_path=absolute_mask)
+    return build_predict_response(
+        case_id=case_id,
+        image_id=image_id,
+        mask_id=mask_id,
+        image_path=image_path,
+        mask_path=str(relative_mask).replace("\\", "/"),
+        label=SPLEEN_LABEL,
+        model_id=SPLEEN_MODEL_ID,
+        version=VERSION_AI,
+    )

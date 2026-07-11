@@ -1,8 +1,8 @@
 from fastapi import APIRouter
 
-from backend.app.schemas.ai import AIPredictRequest, AIPredictResponse
+from backend.app.schemas.ai import AIPredictRequest, AIPredictResponse, AiHealthResponse
 from backend.app.schemas.model import ModelListResponse, ModelRecord, RegisterModelRequest, RegisterModelResponse
-from backend.app.services.ai_service import run_ai_prediction
+from backend.app.services.ai_service import get_ai_health, run_ai_prediction
 from backend.app.services.model_service import list_models, register_model
 
 
@@ -28,6 +28,11 @@ def create_model(request: RegisterModelRequest) -> RegisterModelResponse:
         backend=request.backend,
     )
     return RegisterModelResponse(model=ModelRecord(**model))
+
+
+@router.get("/ai/health", response_model=AiHealthResponse)
+def ai_health() -> AiHealthResponse:
+    return get_ai_health()
 
 
 @router.post("/ai/predict", response_model=AIPredictResponse)

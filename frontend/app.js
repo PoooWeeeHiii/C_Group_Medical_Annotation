@@ -274,19 +274,35 @@ async function apiGet(path) {
   return data;
 }
 
-async function apiPost(path, payload) {
-  const response = await fetch(apiUrl(path), {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(payload ?? {}),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    if (response.status === 401) clearAuthSession();
-    const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || {});
-    throw new Error(detail || `${path} 请求失败：${response.status}`);
+async function apiPost(path, payload, options = {}) {
+  const controller = new AbortController();
+  const timeoutMs = Number(options.timeoutMs || 0);
+  let timer = null;
+  if (timeoutMs > 0) {
+    timer = window.setTimeout(() => controller.abort(), timeoutMs);
   }
-  return data;
+  try {
+    const response = await fetch(apiUrl(path), {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload ?? {}),
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 401) clearAuthSession();
+      const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || {});
+      throw new Error(detail || `${path} 请求失败：${response.status}`);
+    }
+    return data;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`${path} 超时（>${Math.round(timeoutMs / 1000)}s），CPU 推理可能较慢，请稍后在 Mask 列表中刷新查看`);
+    }
+    throw error;
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
 }
 
 async function apiDelete(path) {
@@ -955,13 +971,18 @@ async function runAIPredict(event) {
   button.disabled = true;
   const previousText = button.textContent;
   button.textContent = "预测中...";
+  const isSpleen = String(model.label || "").toLowerCase().includes("spleen") ||
+    String(model.model_id || "").toLowerCase().includes("spleen");
+  if (isSpleen) {
+    showToast("正在运行脾脏推理（真实 nnU-Net 或 baseline），CPU 可能需要数分钟...");
+  }
   try {
     const data = await apiPost("/api/ai/predict", {
       case_id: item.case_id,
       image_id: image.image_id,
       model_id: model.model_id,
       label: model.label || state.annotationLabel || "label",
-    });
+    }, { timeoutMs: isSpleen ? 30 * 60 * 1000 : 120 * 1000 });
     await loadImageMasks(image.image_id, { force: true });
     await loadCaseVersions(item.case_id, { force: true });
     await refreshCases();

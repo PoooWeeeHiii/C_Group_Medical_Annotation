@@ -108,10 +108,66 @@ def _run_external_spleen_command(image_path: Path, case_id: str) -> np.ndarray |
     return None
 
 
+def get_ai_health():
+    from backend.app.schemas.ai import AiHealthResponse
+
+    try:
+        from ai.config import SPLEEN_MODEL_ID, SPLEEN_NNUNET_PYTHON
+        from ai.spleen_nnunet import ensure_spleen_model_ready
+    except Exception as exc:  # pragma: no cover
+        return AiHealthResponse(
+            success=False,
+            ready=False,
+            message=f"AI module import failed: {exc}",
+        )
+
+    try:
+        checkpoint = ensure_spleen_model_ready()
+        return AiHealthResponse(
+            success=True,
+            ready=True,
+            model_id=str(SPLEEN_MODEL_ID),
+            label="spleen",
+            checkpoint=str(checkpoint),
+            nnunet_python=str(SPLEEN_NNUNET_PYTHON),
+            message="spleen nnUNet checkpoint ready",
+        )
+    except FileNotFoundError as exc:
+        return AiHealthResponse(
+            success=True,
+            ready=False,
+            model_id=str(SPLEEN_MODEL_ID),
+            label="spleen",
+            nnunet_python=str(SPLEEN_NNUNET_PYTHON),
+            message=str(exc),
+        )
+
+
+def _run_local_spleen_nnunet(volume, spacing) -> np.ndarray | None:
+    """Try Person B's local Dataset506 spleen weights via ai.spleen_nnunet."""
+    try:
+        from ai.predict import predict_spleen_mask_array
+        from ai.spleen_nnunet import ensure_spleen_model_ready
+
+        ensure_spleen_model_ready()
+        return predict_spleen_mask_array(volume, spacing)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        # Fall through to command template / baseline; keep detail for logs.
+        print(f"[ai_service] local spleen nnUNet unavailable: {exc}")
+        return None
+
+
 def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
     from backend.app.services.model_service import get_model, resolve_predict_label
 
     model_id, label = resolve_predict_label(request.model_id, request.label)
+    # Person B historically used Model0002 for spleen.
+    if model_id in {"Model0002", "model0002"}:
+        model_id = "spleen_nnunetv2_task506"
+        label = label if label and label != "label" else "spleen"
+
     image_record, volume = load_volume(request.image_id)
     if image_record.get("case_id") != request.case_id:
         raise HTTPException(
@@ -122,8 +178,10 @@ def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
     try:
         image_path = (PROJECT_ROOT / str(image_record.get("path", ""))).resolve()
         mask_stack = None
-        if _is_spleen_request(label, model_id) and image_path.exists():
-            mask_stack = _run_external_spleen_command(image_path, request.case_id)
+        if _is_spleen_request(label, model_id):
+            mask_stack = _run_local_spleen_nnunet(volume.array, volume.spacing)
+            if mask_stack is None and image_path.exists():
+                mask_stack = _run_external_spleen_command(image_path, request.case_id)
         if mask_stack is None:
             mask_stack = predict_mask_array(volume.array, label=label, model_id=model_id)
     except HTTPException:
@@ -199,7 +257,9 @@ def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
         mask_id=mask.mask_id,
         version="v2_ai",
         model_id=model_id,
+        label=label,
         dice=None,
         mask_path=mask_path,
         mask=mask,
+        message="ai predict success",
     )

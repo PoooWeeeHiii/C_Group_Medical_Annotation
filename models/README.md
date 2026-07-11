@@ -4,11 +4,16 @@ Do not commit large model weight files such as `.pth`, `.pt`, `.ckpt`, `.onnx`, 
 
 Only keep model notes, configuration examples, or download links here.
 
-Recommended future layout:
+Current notes:
+
+- [spleen_nnunet.md](spleen_nnunet.md): local Dataset506 spleen nnUNet weights for `POST /api/ai/predict`
+
+Recommended layout:
 
 ```text
 models/
   README.md
+  spleen_nnunet.md
   deepedit/
     model.ts          # local only, ignored by Git
   model_registry.md
