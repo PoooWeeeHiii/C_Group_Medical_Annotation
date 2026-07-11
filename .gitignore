@@ -2,6 +2,11 @@
 .DS_Store
 Thumbs.db
 
+# Local SQLite dev database
+*.db
+*.sqlite
+*.sqlite3
+
 # Python cache and local environments
 __pycache__/
 *.py[cod]

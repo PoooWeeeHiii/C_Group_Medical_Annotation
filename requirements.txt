@@ -20,4 +20,5 @@ scikit-learn
 # Utilities
 python-multipart
 pytest
+httpx
 
