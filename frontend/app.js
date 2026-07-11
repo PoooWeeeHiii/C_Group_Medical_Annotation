@@ -88,18 +88,34 @@ async function apiGet(path) {
   return data;
 }
 
-async function apiPost(path, payload) {
-  const response = await fetch(apiUrl(path), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || {});
-    throw new Error(detail || `${path} 请求失败：${response.status}`);
+async function apiPost(path, payload, options = {}) {
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? 0;
+  let timer = null;
+  if (timeoutMs > 0) {
+    timer = window.setTimeout(() => controller.abort(), timeoutMs);
   }
-  return data;
+  try {
+    const response = await fetch(apiUrl(path), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || {});
+      throw new Error(detail || `${path} 请求失败：${response.status}`);
+    }
+    return data;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`${path} 超时（>${Math.round(timeoutMs / 1000)}s），CPU 推理可能较慢，请稍后在 Mask 列表中刷新查看`);
+    }
+    throw error;
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
 }
 
 async function loadCaseDetail(caseId) {
@@ -244,6 +260,39 @@ async function saveCurrentMask(event) {
     render();
   } catch (error) {
     showToast(error.message || "Mask 保存失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+async function runAiPredict(event) {
+  const button = event.currentTarget;
+  const item = activeCase();
+  const image = activeImage();
+  if (!item || !image) {
+    showToast("请先选择病例和图像");
+    return;
+  }
+
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "AI预测中...";
+  showToast("正在运行脾 nnUNet 推理，CPU 可能需要数分钟...");
+  try {
+    const data = await apiPost("/api/ai/predict", {
+      case_id: item.case_id,
+      image_id: image.image_id,
+      model_id: "Model0002",
+      label: "spleen",
+    }, { timeoutMs: 30 * 60 * 1000 });
+    await loadImageMasks(image.image_id, { force: true });
+    await loadCaseVersions(item.case_id, { force: true });
+    await refreshCases();
+    showToast(`脾 AI 标注完成：${data.mask_id}`);
+    render();
+  } catch (error) {
+    showToast(error.message || "AI 预测失败");
   } finally {
     button.disabled = false;
     button.textContent = previousText;
@@ -635,7 +684,7 @@ function renderAnnotation() {
       ${state.volumeViewMode === "3d" ? render3DViewer(item, image, volume) : render2DViewer(item, image, volume, activeSlice, sliceCount, maxSlice)}
       <aside class="tool-panel">
         <h2>标注工具</h2>
-        <div class="tool-grid">${["画笔", "橡皮擦", "多边形", "矩形ROI", "点标注", "智能选择", "撤销", "重做", "清空", "AI预测"].map((tool) => `<button class="tool-button">${tool}</button>`).join("")}</div>
+        <div class="tool-grid">${["画笔", "橡皮擦", "多边形", "矩形ROI", "点标注", "智能选择", "撤销", "重做", "清空"].map((tool) => `<button class="tool-button">${tool}</button>`).join("")}<button class="tool-button" data-ai-predict ${image ? "" : "disabled"}>AI预测</button></div>
         <div class="grid action-stack" style="margin-top:18px"><button class="primary-button" data-save-mask ${image ? "" : "disabled"}>保存 Mask</button><button class="ghost-button" data-final-mask ${masks.some((mask) => mask.version === "v1_manual") ? "" : "disabled"}>设为 final</button><a class="ghost-button export-link ${image ? "" : "disabled-link"}" href="${image ? apiUrl(`/api/image/${image.image_id}/export-3d`) : "#"}">导出 3D 图像</a><button class="danger-button">驳回</button></div>
         <h3 style="margin-top:22px">当前 Mask</h3>
         ${renderMaskList(masks)}
@@ -784,12 +833,21 @@ Epoch 03 | Loss 0.618 | Dice 0.59
 }
 
 function renderInference() {
+  const item = activeCase();
+  const image = activeImage();
+  const masks = masksForActiveImage();
+  const aiMask = [...masks].reverse().find((mask) => mask.version === "v2_ai" && mask.label === "spleen");
   return `
-    <section class="panel toolbar-row"><div class="field"><label>模型版本</label><select><option>UNet_V1</option><option>Attention_UNet_V1</option></select></div><button class="primary-button">开始推理</button><button class="ghost-button">保存为 v2_ai</button></section>
+    <section class="panel toolbar-row">
+      <div class="field"><label>模型版本</label><select><option value="Model0002">Spleen_nnUNet_2d (Model0002)</option></select></div>
+      <div class="field"><label>标签</label><input value="spleen" disabled /></div>
+      <button class="primary-button" data-ai-predict ${image ? "" : "disabled"}>开始脾推理</button>
+      <button class="ghost-button" disabled>当前输出：v2_ai</button>
+    </section>
     <div class="grid cols-3" style="margin-top:18px">
-      <section class="viewer"><h2>原始图像</h2><div class="ct-frame" style="min-height:320px"></div></section>
-      <section class="viewer"><h2>AI Mask</h2><div class="ct-frame" style="min-height:320px"><div class="mask-overlay"></div></div></section>
-      <section class="viewer"><h2>叠加显示</h2><div class="ct-frame" style="min-height:320px"><div class="mask-overlay"></div><div class="roi-box"></div></div></section>
+      <section class="viewer"><h2>原始图像</h2><div class="ct-frame" style="min-height:320px"><strong>${image ? escapeHtml(image.image_id) : "请先选择病例"}</strong></div></section>
+      <section class="viewer"><h2>AI Mask</h2><div class="ct-frame" style="min-height:320px"><div class="mask-overlay"></div><code>${aiMask ? escapeHtml(aiMask.path) : "尚未生成"}</code></div></section>
+      <section class="viewer"><h2>叠加显示</h2><div class="ct-frame" style="min-height:320px"><div class="mask-overlay"></div><div class="roi-box"></div><strong>${item ? escapeHtml(item.case_id) : "-"}</strong></div></section>
     </div>
   `;
 }
@@ -868,6 +926,9 @@ function render() {
   if (saveMaskButton) {
     saveMaskButton.addEventListener("click", saveCurrentMask);
   }
+  document.querySelectorAll("[data-ai-predict]").forEach((button) => {
+    button.addEventListener("click", runAiPredict);
+  });
   const finalMaskButton = $("[data-final-mask]");
   if (finalMaskButton) {
     finalMaskButton.addEventListener("click", approveFinalMask);

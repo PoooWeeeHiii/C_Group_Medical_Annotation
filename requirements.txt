@@ -18,6 +18,9 @@ torch
 torchvision
 monai
 scikit-learn
+# Optional for in-process spleen inference:
+# nnunetv2
+# Otherwise configure SPLEEN_NNUNET_PYTHON to an env that already has nnunetv2.
 
 # Utilities
 python-multipart

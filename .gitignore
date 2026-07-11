@@ -50,6 +50,7 @@ dataset/splits/**
 # Model weights and training outputs
 models/**
 !models/README.md
+!models/*.md
 !models/.gitkeep
 *.pt
 *.pth

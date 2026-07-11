@@ -16,6 +16,8 @@ Person A 文档：
 Person B 文档：
 
 - [docs/07_person_b_ai_framework.md](docs/07_person_b_ai_framework.md)
+- [docs/10_spleen_ai_predict.md](docs/10_spleen_ai_predict.md)（脾 nnUNet AI 预测联调）
+- [docs/11_totalseg_nnunet_dataset.md](docs/11_totalseg_nnunet_dataset.md)（TotalSeg zip → nnUNet 训练集）
 
 这些文档已经明确：
 
