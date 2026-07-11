@@ -41,10 +41,13 @@ dataset/raw/**
 dataset/images/**
 dataset/labels/**
 dataset/splits/**
+dataset/exports/**
+dataset/weak_supervise_runs/**
 !dataset/raw/.gitkeep
 !dataset/images/.gitkeep
 !dataset/labels/.gitkeep
 !dataset/splits/.gitkeep
+!dataset/exports/.gitkeep
 !dataset/splits/*.json
 
 # Model weights and training outputs

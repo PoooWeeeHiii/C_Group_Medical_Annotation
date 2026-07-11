@@ -16,6 +16,9 @@ const state = {
   volumeMeta: {},
   volumeErrors: {},
   datasetExportResult: null,
+  exportAssignments: {},
+  exportMaterialize: true,
+  exportStrict: true,
   activeCaseId: null,
   activeImageId: null,
   activeSlice: 0,
@@ -63,6 +66,11 @@ const state = {
   qualityRefMaskId: "",
   qualityReport: null,
   qualityMasks: [],
+  // P5: few-shot / coarse / weak
+  annotationMode: "dense", // dense | coarse | scribble
+  fewShotMinSlices: 3,
+  labelingAssist: null,
+  exportLabelSet: "dense", // dense | weak
 };
 
 const titles = {
@@ -799,9 +807,15 @@ async function saveCurrentMask(event) {
     await loadImageMasks(image.image_id, { force: true });
     await loadCaseVersions(item.case_id, { force: true });
     await refreshCases();
+    await refreshLabelingAssist({ silent: true });
     const updatedCount = saved.filter((item) => item.updated).length;
     const createdCount = saved.length - updatedCount;
-    showToast(`已保存 ${saved.length} 个切片 Mask（新建 ${createdCount} / 覆盖 ${updatedCount}）`);
+    const labeled = localLabeledAxialSlices(image);
+    let extra = "";
+    if ((state.annotationMode === "coarse" || state.annotationMode === "scribble") && labeled.length >= state.fewShotMinSlices) {
+      extra = " · 可一键传播生成 3D preview";
+    }
+    showToast(`已保存 ${saved.length} 个切片 Mask（${currentLabelType()}，新建 ${createdCount} / 覆盖 ${updatedCount}）${extra}`);
     render();
   } catch (error) {
     showToast(error.message || "Mask 保存失败");
@@ -878,6 +892,7 @@ async function create3DMaskPreview(item, image) {
       source_version: "v1_manual",
       output_version: "v3_preview",
       label: state.annotationLabel,
+      label_type: "pseudo",
       method: "image_guided_distance",
       fill_holes: true,
       keep_largest_component: false,
@@ -897,6 +912,89 @@ async function create3DMaskPreview(item, image) {
     showToast(`2D Mask 已保存，但 3D 实体生成失败：${error.message || "未知错误"}`);
     return null;
   }
+}
+
+async function refreshLabelingAssist({ silent = false } = {}) {
+  const image = activeImage();
+  if (!image) return null;
+  try {
+    const params = new URLSearchParams({
+      label: state.annotationLabel,
+      axis: "axial",
+      top_k: "5",
+      min_slices: String(state.fewShotMinSlices),
+      source_version: "v1_manual",
+    });
+    const data = await apiGet(`/api/image/${image.image_id}/labeling_assist?${params.toString()}`);
+    state.labelingAssist = data;
+    if (!silent) showToast(`已刷新：已标 ${data.workload?.labeled_count || 0} 层，推荐 ${data.recommendations?.length || 0} 层`);
+    return data;
+  } catch (error) {
+    if (!silent) showToast(error.message || "刷新标注推荐失败");
+    return null;
+  }
+}
+
+async function runFewShotPropagate(event) {
+  const button = event.currentTarget;
+  const item = activeCase();
+  const image = activeImage();
+  if (!item || !image) {
+    showToast("请先选择病例和图像");
+    return;
+  }
+  const labeled = localLabeledAxialSlices(image);
+  if (labeled.length < state.fewShotMinSlices) {
+    showToast(`请至少标注 ${state.fewShotMinSlices} 层轴位切片（当前 ${labeled.length}）`);
+    return;
+  }
+
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "保存并传播中...";
+  try {
+    await saveAllAnnotatedMasks(item, image);
+    button.textContent = "一键传播中...";
+    const data = await create3DMaskPreview(item, image);
+    if (!data) throw new Error("传播失败");
+    await loadImageMasks(image.image_id, { force: true });
+    await loadCaseVersions(item.case_id, { force: true });
+    await refreshCases();
+    await refreshLabelingAssist({ silent: true });
+    state.active3DMaskId = data.mask_id;
+    state.volumeViewMode = "3d";
+    state.volumeLoadingKey = null;
+    state.propagatedSliceLoads = {};
+    showToast(`少量标注传播完成：${data.mask_id}（label_type=pseudo）`);
+    render();
+  } catch (error) {
+    showToast(error.message || "一键传播失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+function setAnnotationMode(mode) {
+  if (!["dense", "coarse", "scribble"].includes(mode)) return;
+  state.annotationMode = mode;
+  const allowed = new Set(annotationToolsForMode().map(([tool]) => tool));
+  if (!allowed.has(state.annotationTool)) {
+    state.annotationTool = state.annotationMode === "coarse" ? "rectangle" : state.annotationMode === "scribble" ? "brush" : "brush";
+  }
+  render();
+}
+
+function jumpToRecommendedSlice(sliceIndex) {
+  const image = activeImage();
+  const meta = image ? state.volumeMeta[image.image_id] : null;
+  if (!image || !meta) return;
+  state.volumeViewMode = "2d";
+  state.activeAxis = "axial";
+  const maxSlice = Math.max(axisSliceCount(meta, "axial") - 1, 0);
+  setCurrentSliceIndex(Math.min(Math.max(0, Number(sliceIndex) || 0), maxSlice), "axial");
+  updateSliceViewer(image, meta);
+  showToast(`已跳转到推荐层 ${Number(sliceIndex) + 1}`);
 }
 
 async function promotePreviewMask(targetVersion, event) {
@@ -1368,36 +1466,92 @@ async function start3DImageRender(event) {
 
 async function exportDataset(event) {
   const button = event.currentTarget;
-  const item = activeCase();
-  if (!item) {
-    showToast("请先选择病例");
-    return;
-  }
-  const version = $("#exportVersion")?.value || "final";
+  const labelSet = $("#exportLabelSet")?.value || state.exportLabelSet || "dense";
+  let version = $("#exportVersion")?.value || (labelSet === "weak" ? "v3_preview" : "final");
+  if (labelSet === "weak" && version === "final") version = "v3_preview";
   const format = $("#exportFormat")?.value || "nnunet";
   const datasetId = $("#exportDatasetId")?.value.trim() || undefined;
+  const materialize = $("#exportMaterialize")?.checked ?? state.exportMaterialize;
+  const strict = $("#exportStrict")?.checked ?? state.exportStrict;
+  const name = $("#exportDatasetName")?.value.trim() || `medical_seg_${labelSet}_${version}`;
+
+  const train = [];
+  const val = [];
+  const test = [];
+  for (const [caseId, split] of Object.entries(state.exportAssignments || {})) {
+    if (split === "train") train.push(caseId);
+    else if (split === "val") val.push(caseId);
+    else if (split === "test") test.push(caseId);
+  }
+  if (!train.length && !val.length && !test.length) {
+    const fallback = activeCase();
+    if (fallback) train.push(fallback.case_id);
+  }
+  if (!train.length && !val.length && !test.length) {
+    showToast("请至少选择一个病例并指定 train/val/test");
+    return;
+  }
 
   button.disabled = true;
   const previousText = button.textContent;
-  button.textContent = "导出中...";
+  button.textContent = materialize ? "物化导出中..." : "导出中...";
   try {
     const data = await apiPost("/api/export", {
       dataset_id: datasetId,
-      name: `${item.case_id}_${version}`,
+      name,
       version,
-      train: [item.case_id],
-      val: [],
-      test: [],
+      label_set: labelSet,
+      train,
+      val,
+      test,
       format,
-    });
+      materialize: Boolean(materialize),
+      strict: Boolean(strict),
+    }, { timeoutMs: 10 * 60 * 1000 });
     state.datasetExportResult = data;
-    showToast(`Dataset 导出成功：${data.dataset_id}`);
+    state.exportLabelSet = labelSet;
+    state.exportMaterialize = Boolean(materialize);
+    state.exportStrict = Boolean(strict);
+    showToast(data.message || `Dataset 导出成功：${data.dataset_id}`);
     render();
   } catch (error) {
-    showToast(error.message || "Dataset 导出失败");
+    let message = error.message || "Dataset 导出失败";
+    try {
+      const parsed = JSON.parse(message);
+      if (parsed?.message) {
+        message = parsed.message;
+        if (Array.isArray(parsed.missing_masks)) {
+          state.datasetExportResult = {
+            success: false,
+            message: parsed.message,
+            label_set: labelSet,
+            version,
+            report: {
+              missing_masks: parsed.missing_masks,
+              success_count: 0,
+              skipped_count: parsed.missing_masks.length,
+              spacing_checks: [],
+            },
+          };
+        }
+      }
+    } catch {
+      // keep raw message
+    }
+    showToast(message);
+    render();
   } finally {
     button.disabled = false;
     button.textContent = previousText;
+  }
+}
+
+function ensureExportAssignments() {
+  if (!state.exportAssignments) state.exportAssignments = {};
+  for (const item of state.cases) {
+    if (!state.exportAssignments[item.case_id]) {
+      state.exportAssignments[item.case_id] = item.case_id === state.activeCaseId ? "train" : "none";
+    }
   }
 }
 
@@ -1718,6 +1872,7 @@ function renderMaskList(masks) {
         <article class="mask-record">
           <div><strong>${escapeHtml(mask.mask_id)}</strong><span>${escapeHtml(mask.version)}</span></div>
           <div><span>标签</span><b>${escapeHtml(mask.label)}</b></div>
+          <div><span>类型</span><b>${escapeHtml(mask.label_type || "-")}</b></div>
           <div><span>平面</span><b>${escapeHtml(axis)} / ${escapeHtml(sliceText)}</b></div>
           <code>${escapeHtml(mask.path)}</code>
           <div class="mask-record-actions">
@@ -1750,10 +1905,109 @@ function renderVersionList(versions) {
 }
 
 function renderToolButtons() {
-  const toolButtons = annotationTools
+  const allowed = annotationToolsForMode();
+  const toolButtons = allowed
     .map(([tool, label]) => `<button class="tool-button ${state.annotationTool === tool ? "active" : ""}" data-annotation-tool="${tool}">${label}</button>`)
     .join("");
   return `${toolButtons}<button class="tool-button" data-ai-predict>AI预测</button>`;
+}
+
+function annotationToolsForMode() {
+  if (state.annotationMode === "coarse") {
+    const allowed = new Set(["rectangle", "magic", "undo", "redo", "clear"]);
+    return annotationTools.filter(([tool]) => allowed.has(tool));
+  }
+  if (state.annotationMode === "scribble") {
+    const allowed = new Set(["brush", "erase", "smartErase", "point", "undo", "redo", "clear"]);
+    return annotationTools.filter(([tool]) => allowed.has(tool));
+  }
+  return annotationTools;
+}
+
+function currentLabelType() {
+  if (state.annotationMode === "coarse") return "coarse";
+  if (state.annotationMode === "scribble") return "scribble";
+  return "dense";
+}
+
+function localLabeledAxialSlices(image) {
+  if (!image) return [];
+  const values = new Set();
+  const imageMasks = state.sliceMasks[image.image_id] || {};
+  const imagePoints = state.pointAnnotations[image.image_id] || {};
+  for (const key of [...Object.keys(imageMasks), ...Object.keys(imagePoints)]) {
+    const { axis, sliceIndex } = parseSliceStorageKey(key);
+    if (axis !== "axial") continue;
+    const mask = imageMasks[key];
+    const points = imagePoints[key] || [];
+    const hasPixels = mask?.data && [...mask.data].some((value) => value > 0);
+    if (hasPixels || points.length) values.add(sliceIndex);
+  }
+  return [...values].sort((a, b) => a - b);
+}
+
+function renderAnnotationModeControls() {
+  const modes = [
+    ["dense", "精标"],
+    ["coarse", "粗标"],
+    ["scribble", "涂鸦"],
+  ];
+  return `
+    <div class="annotation-mode-panel">
+      <div class="param-header"><span>标注模式</span><strong>${currentLabelType()}</strong></div>
+      <div class="segmented-control cols-3">
+        ${modes.map(([mode, label]) => `
+          <button type="button" class="${state.annotationMode === mode ? "active" : ""}" data-annotation-mode="${mode}">${label}</button>
+        `).join("")}
+      </div>
+      <small>${state.annotationMode === "coarse"
+        ? "粗标：仅矩形 / Magic Wand，保存后可一键传播生成弱监督伪标。"
+        : state.annotationMode === "scribble"
+          ? "涂鸦：画笔/点/智能橡皮擦，适合 scribble 弱监督。"
+          : "精标：全部工具，label_type=dense。"}</small>
+    </div>
+  `;
+}
+
+function renderFewShotWizard(image, volume) {
+  const assist = state.labelingAssist;
+  const localLabeled = localLabeledAxialSlices(image);
+  const labeledCount = assist?.workload?.labeled_count ?? localLabeled.length;
+  const totalSlices = assist?.workload?.total_slices ?? (volume ? axisSliceCount(volume, "axial") : 0);
+  const minSlices = state.fewShotMinSlices;
+  const remaining = Math.max(0, minSlices - labeledCount);
+  const ready = labeledCount >= minSlices;
+  const recommendations = assist?.recommendations || [];
+  const estimated = assist?.workload?.estimated_remaining_dense ?? Math.max(0, Math.ceil(totalSlices * 0.12) - labeledCount);
+  return `
+    <div class="few-shot-panel">
+      <div class="param-header"><span>少量标注向导</span><strong>${labeledCount} / ${minSlices} 层</strong></div>
+      <label class="param-row" for="fewShotMinSlices">
+        <span>最少标 N 层</span>
+        <input id="fewShotMinSlices" type="number" min="1" max="20" step="1" value="${minSlices}" />
+      </label>
+      <div class="workload-grid">
+        <div><span>已标层数</span><strong>${labeledCount}</strong></div>
+        <div><span>总层数</span><strong>${totalSlices || "-"}</strong></div>
+        <div><span>距最少还差</span><strong>${remaining}</strong></div>
+        <div><span>预估精标剩余</span><strong>${estimated}</strong></div>
+      </div>
+      <div class="action-stack" style="margin-top:10px">
+        <button class="primary-button" data-few-shot-propagate ${image && canAnnotate() && ready ? "" : "disabled"}>
+          ${ready ? "一键传播 → v3_preview" : `还需标 ${remaining} 层`}
+        </button>
+        <button class="ghost-button" data-refresh-labeling-assist ${image ? "" : "disabled"}>刷新推荐</button>
+      </div>
+      <div class="al-recommend-list">
+        <span>下一层推荐（不稳定连通域 / 熵代理）</span>
+        ${recommendations.length ? recommendations.map((item) => `
+          <button type="button" class="al-slice-chip" data-jump-slice="${item.slice_index}" title="${escapeHtml(item.reason)} score=${item.score}">
+            层 ${item.slice_index + 1}<small>${escapeHtml(item.reason)}</small>
+          </button>
+        `).join("") : `<small>保存稀疏标注后点击「刷新推荐」</small>`}
+      </div>
+    </div>
+  `;
 }
 
 function annotationToolLabel(tool = state.annotationTool) {
@@ -2001,9 +2255,11 @@ function renderAnnotation() {
       ${state.volumeViewMode === "3d" ? render3DViewer(item, image, volume, masks) : render2DViewer(item, image, volume, activeSlice, sliceCount, maxSlice, axis)}
       <aside class="tool-panel">
         <h2>标注工具</h2>
+        ${renderAnnotationModeControls()}
         <div class="tool-grid">${renderToolButtons()}</div>
         <div class="annotation-state-line"><span>当前工具：<strong id="annotationToolLabel">${annotationToolLabel()}</strong></span><span>当前 label：<strong>${escapeHtml(state.annotationLabel)} #${state.annotationLabelId}</strong></span><span>智能阈值：<strong>HU ± ${state.magicWandThreshold}</strong></span><span>当前切片：<strong id="annotationMaskStats">0 像素</strong></span></div>
         ${renderMagicWandControls()}
+        ${renderFewShotWizard(image, volume)}
         ${renderSmartRefineHint()}
         ${renderRefineParamControls()}
         <div class="grid action-stack" style="margin-top:18px">
@@ -2037,6 +2293,7 @@ async function hydrateAnnotation() {
     const needsMaskRender = !state.masksByImage[image.image_id] || !state.versionsByCase[item.case_id];
     await loadImageMasks(image.image_id);
     await loadCaseVersions(item.case_id);
+    refreshLabelingAssist({ silent: true }).catch(() => {});
     if (needsMaskRender) {
       render();
       return;
@@ -2473,6 +2730,7 @@ function currentSliceMaskPayload(item, image) {
     version: "v1_manual",
     label: state.annotationLabel,
     label_id: state.annotationLabelId,
+    label_type: currentLabelType(),
     mask_format: "json",
     axis: activeAxis(),
     slice_index: currentSliceIndex(),
@@ -2495,6 +2753,7 @@ function buildSliceMaskPayload(item, image, axis, sliceIndex, mask, points = [])
     version: "v1_manual",
     label: state.annotationLabel,
     label_id: state.annotationLabelId,
+    label_type: currentLabelType(),
     mask_format: "json",
     axis,
     slice_index: Number(sliceIndex),
@@ -3646,30 +3905,133 @@ async function hydrateQuality() {
 }
 
 function renderExport() {
-  const item = activeCase();
+  ensureExportAssignments();
   const result = state.datasetExportResult;
+  const report = result?.report;
+  const version = result?.version || (state.exportLabelSet === "weak" ? "v3_preview" : "final");
+  const assignmentRows = state.cases.map((item) => {
+    const split = state.exportAssignments[item.case_id] || "none";
+    return `
+      <tr>
+        <td>${escapeHtml(item.case_id)}</td>
+        <td>${escapeHtml(item.patient_id)}</td>
+        <td>${escapeHtml(statusText[item.status] || item.status)}</td>
+        <td>${escapeHtml(item.mask_count)}</td>
+        <td>
+          <select data-export-split="${escapeHtml(item.case_id)}">
+            <option value="none" ${split === "none" ? "selected" : ""}>不导出</option>
+            <option value="train" ${split === "train" ? "selected" : ""}>train</option>
+            <option value="val" ${split === "val" ? "selected" : ""}>val</option>
+            <option value="test" ${split === "test" ? "selected" : ""}>test</option>
+          </select>
+        </td>
+      </tr>
+    `;
+  }).join("");
+  const selectedCounts = Object.values(state.exportAssignments || {}).reduce((acc, split) => {
+    if (split === "train" || split === "val" || split === "test") acc[split] += 1;
+    return acc;
+  }, { train: 0, val: 0, test: 0 });
+
   return `
     <section class="panel">
-      <div class="toolbar-row">
+      <h2>训练数据集导出</h2>
+      <p class="panel-lead">勾选 materialize 后会写入 <code>dataset/exports/DatasetXXXX/{imagesTr,labelsTr,dataset.json,splits_final.json}</code>。可分别导出<strong>弱标签</strong>（v3_preview 伪标）与<strong>精标</strong>（final）两套 split。</p>
+      <div class="toolbar-row" style="margin-top:12px">
         <div class="field"><label>Dataset ID</label><input id="exportDatasetId" placeholder="自动生成 Dataset0001" /></div>
-        <div class="field"><label>版本</label><select id="exportVersion"><option value="final">final</option><option value="v3_fusion">v3_fusion</option><option value="v2_ai">v2_ai</option><option value="v1_manual">v1_manual</option></select></div>
+        <div class="field"><label>名称</label><input id="exportDatasetName" placeholder="medical_segmentation_dataset" /></div>
+        <div class="field"><label>标签集</label>
+          <select id="exportLabelSet">
+            <option value="dense" ${state.exportLabelSet === "dense" ? "selected" : ""}>精标 dense (final)</option>
+            <option value="weak" ${state.exportLabelSet === "weak" ? "selected" : ""}>弱标签 weak (v3_preview)</option>
+          </select>
+        </div>
+        <div class="field"><label>版本</label>
+          <select id="exportVersion">
+            <option value="final">final</option>
+            <option value="v3_fusion">v3_fusion</option>
+            <option value="v3_preview">v3_preview</option>
+            <option value="v2_ai">v2_ai</option>
+          </select>
+        </div>
         <div class="field"><label>格式</label><select id="exportFormat"><option value="nnunet">nnUNet</option><option value="json">JSON Manifest</option></select></div>
-        <button class="primary-button" data-export-dataset ${item ? "" : "disabled"}>导出 Dataset</button>
+      </div>
+      <div class="toolbar-row" style="margin-top:10px">
+        <label class="checkbox-row"><input id="exportMaterialize" type="checkbox" ${state.exportMaterialize ? "checked" : ""} /> materialize 真导出（拷贝/转换 NIfTI）</label>
+        <label class="checkbox-row"><input id="exportStrict" type="checkbox" ${state.exportStrict ? "checked" : ""} /> 严格校验（缺 mask 则失败）</label>
+        <button class="ghost-button" data-export-assign-all-train>全部设为 train</button>
+        <button class="ghost-button" data-export-clear-splits>清空划分</button>
+        <button class="primary-button" data-export-dataset ${state.cases.length ? "" : "disabled"}>导出 Dataset</button>
+      </div>
+      <div class="grid cols-3" style="margin-top:14px">
+        ${metricCard("Train", selectedCounts.train, "训练病例")}
+        ${metricCard("Val", selectedCounts.val, "验证病例")}
+        ${metricCard("Test", selectedCounts.test, "测试病例")}
       </div>
     </section>
+
     <section class="table-wrap" style="margin-top:18px">
-      <table><thead><tr><th>病例ID</th><th>导出版本</th><th>数据划分</th><th>说明</th></tr></thead><tbody><tr><td>${item ? item.case_id : "-"}</td><td>final</td><td>train</td><td>当前最小版本按当前病例导出；val/test 暂为空。</td></tr></tbody></table>
+      <table>
+        <thead><tr><th>病例</th><th>患者</th><th>状态</th><th>Mask 数</th><th>划分</th></tr></thead>
+        <tbody>
+          ${assignmentRows || `<tr><td colspan="5">暂无病例</td></tr>`}
+        </tbody>
+      </table>
     </section>
+
     <section class="panel" style="margin-top:18px">
-      <h2>导出结果</h2>
+      <h2>导出报告</h2>
       ${result ? `
         <div class="case-meta">
-          <div class="meta-line"><span>Dataset</span><strong>${escapeHtml(result.dataset_id)}</strong></div>
-          <div class="meta-line"><span>Manifest</span><strong>${escapeHtml(result.output_path)}</strong></div>
-          <div class="meta-line"><span>Split</span><strong>${escapeHtml(result.split_path)}</strong></div>
-          <div class="meta-line"><span>Label Map</span><strong>${escapeHtml(result.label_map_path)}</strong></div>
+          <div class="meta-line"><span>Dataset</span><strong>${escapeHtml(result.dataset_id || "-")}</strong></div>
+          <div class="meta-line"><span>标签集</span><strong>${escapeHtml(result.label_set || state.exportLabelSet || "dense")}</strong></div>
+          <div class="meta-line"><span>版本</span><strong>${escapeHtml(result.version || version)}</strong></div>
+          <div class="meta-line"><span>Manifest</span><strong>${escapeHtml(result.output_path || "-")}</strong></div>
+          <div class="meta-line"><span>Export Dir</span><strong>${escapeHtml(result.export_dir || "-")}</strong></div>
+          <div class="meta-line"><span>dataset.json</span><strong>${escapeHtml(result.dataset_json_path || "-")}</strong></div>
+          <div class="meta-line"><span>splits_final.json</span><strong>${escapeHtml(result.splits_final_path || "-")}</strong></div>
+          <div class="meta-line"><span>说明</span><strong>${escapeHtml(result.message || "")}</strong></div>
         </div>
-      ` : `<div class="placeholder compact">尚未导出。请先确保当前病例已有 final Mask。</div>`}
+        <div class="grid cols-4" style="margin-top:14px">
+          ${metricCard("成功", report ? report.success_count : "-", "物化成功对数")}
+          ${metricCard("跳过", report ? report.skipped_count : "-", "缺文件/失败")}
+          ${metricCard("缺 Mask", report?.missing_masks?.length ?? "-", "校验结果")}
+          ${metricCard("Spacing 异常", report?.spacing_checks?.filter((item) => item.status !== "ok").length ?? "-", "形状/间距")}
+        </div>
+        <section class="table-wrap" style="margin-top:14px">
+          <h3 style="margin:0 0 8px">缺 Mask 列表</h3>
+          <table>
+            <thead><tr><th>病例</th><th>图像</th><th>版本</th><th>原因</th></tr></thead>
+            <tbody>
+              ${(report?.missing_masks || []).length ? report.missing_masks.map((item) => `
+                <tr>
+                  <td>${escapeHtml(item.case_id)}</td>
+                  <td>${escapeHtml(item.image_id || "-")}</td>
+                  <td>${escapeHtml(item.version || version)}</td>
+                  <td>${escapeHtml(item.reason)}</td>
+                </tr>
+              `).join("") : `<tr><td colspan="4">无</td></tr>`}
+            </tbody>
+          </table>
+        </section>
+        <section class="table-wrap" style="margin-top:14px">
+          <h3 style="margin:0 0 8px">Spacing 检查</h3>
+          <table>
+            <thead><tr><th>病例</th><th>图像</th><th>Mask</th><th>状态</th><th>详情</th></tr></thead>
+            <tbody>
+              ${(report?.spacing_checks || []).length ? report.spacing_checks.map((item) => `
+                <tr>
+                  <td>${escapeHtml(item.case_id)}</td>
+                  <td>${escapeHtml(item.image_id)}</td>
+                  <td>${escapeHtml(item.mask_id)}</td>
+                  <td>${escapeHtml(item.status)}</td>
+                  <td>${escapeHtml(item.detail || "-")}</td>
+                </tr>
+              `).join("") : `<tr><td colspan="5">尚未物化或无检查项</td></tr>`}
+            </tbody>
+          </table>
+        </section>
+      ` : `<div class="placeholder compact">尚未导出。请为病例指定 train/val/test，并确保目标版本有 3D NIfTI Mask。</div>`}
     </section>
   `;
 }
@@ -3703,6 +4065,28 @@ function render() {
   }
   document.querySelectorAll("[data-annotation-tool]").forEach((button) => {
     button.addEventListener("click", () => setAnnotationTool(button.dataset.annotationTool));
+  });
+  document.querySelectorAll("[data-annotation-mode]").forEach((button) => {
+    button.addEventListener("click", () => setAnnotationMode(button.dataset.annotationMode));
+  });
+  const fewShotMinInput = $("#fewShotMinSlices");
+  if (fewShotMinInput) {
+    fewShotMinInput.addEventListener("change", () => {
+      state.fewShotMinSlices = Math.max(1, Math.min(20, Number(fewShotMinInput.value) || 3));
+      refreshLabelingAssist({ silent: true }).then(() => render());
+    });
+  }
+  const fewShotPropagate = $("[data-few-shot-propagate]");
+  if (fewShotPropagate) fewShotPropagate.addEventListener("click", runFewShotPropagate);
+  const refreshAssist = $("[data-refresh-labeling-assist]");
+  if (refreshAssist) {
+    refreshAssist.addEventListener("click", async () => {
+      await refreshLabelingAssist();
+      render();
+    });
+  }
+  document.querySelectorAll("[data-jump-slice]").forEach((button) => {
+    button.addEventListener("click", () => jumpToRecommendedSlice(Number(button.dataset.jumpSlice)));
   });
   bindMagicWandControls();
   bindRefineParamControls();
@@ -3901,6 +4285,49 @@ function render() {
   const exportDatasetButton = $("[data-export-dataset]");
   if (exportDatasetButton) {
     exportDatasetButton.addEventListener("click", exportDataset);
+  }
+  document.querySelectorAll("[data-export-split]").forEach((select) => {
+    select.addEventListener("change", () => {
+      if (!state.exportAssignments) state.exportAssignments = {};
+      state.exportAssignments[select.dataset.exportSplit] = select.value;
+    });
+  });
+  const assignAllTrain = $("[data-export-assign-all-train]");
+  if (assignAllTrain) {
+    assignAllTrain.addEventListener("click", () => {
+      ensureExportAssignments();
+      for (const item of state.cases) state.exportAssignments[item.case_id] = "train";
+      render();
+    });
+  }
+  const clearSplits = $("[data-export-clear-splits]");
+  if (clearSplits) {
+    clearSplits.addEventListener("click", () => {
+      ensureExportAssignments();
+      for (const item of state.cases) state.exportAssignments[item.case_id] = "none";
+      render();
+    });
+  }
+  const materializeBox = $("#exportMaterialize");
+  if (materializeBox) {
+    materializeBox.addEventListener("change", () => {
+      state.exportMaterialize = materializeBox.checked;
+    });
+  }
+  const strictBox = $("#exportStrict");
+  if (strictBox) {
+    strictBox.addEventListener("change", () => {
+      state.exportStrict = strictBox.checked;
+    });
+  }
+  const exportLabelSet = $("#exportLabelSet");
+  if (exportLabelSet) {
+    exportLabelSet.addEventListener("change", () => {
+      state.exportLabelSet = exportLabelSet.value;
+      const versionSelect = $("#exportVersion");
+      if (versionSelect && state.exportLabelSet === "weak") versionSelect.value = "v3_preview";
+      if (versionSelect && state.exportLabelSet === "dense") versionSelect.value = "final";
+    });
   }
   document.querySelectorAll("[data-open-case]").forEach((button) => {
     button.addEventListener("click", () => {

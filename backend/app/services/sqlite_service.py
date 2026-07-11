@@ -257,8 +257,16 @@ def _ensure_auth_schema(connection: sqlite3.Connection) -> None:
             connection.execute(
                 "ALTER TABLE masks ADD COLUMN axis TEXT CHECK (axis IS NULL OR axis IN ('axial', 'coronal', 'sagittal'))"
             )
+        if "label_type" not in mask_columns:
+            connection.execute(
+                "ALTER TABLE masks ADD COLUMN label_type TEXT "
+                "CHECK (label_type IS NULL OR label_type IN ('coarse', 'scribble', 'dense', 'pseudo'))"
+            )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_masks_axis_slice ON masks(image_id, version, label, axis, slice_index)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_masks_label_type ON masks(image_id, label_type)"
         )
 
     seeds = [
@@ -384,11 +392,11 @@ def _upsert_mask(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
     connection.execute(
         """
         INSERT INTO masks (
-            mask_id, annotation_id, case_id, image_id, path, version, label, label_id,
+            mask_id, annotation_id, case_id, image_id, path, version, label, label_id, label_type,
             mask_format, axis, slice_index, width, height, encoding, source_mask_ids,
             shape, spacing, origin, direction, create_time
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(mask_id) DO UPDATE SET
             annotation_id=excluded.annotation_id,
             case_id=excluded.case_id,
@@ -397,6 +405,7 @@ def _upsert_mask(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
             version=excluded.version,
             label=excluded.label,
             label_id=excluded.label_id,
+            label_type=excluded.label_type,
             mask_format=excluded.mask_format,
             axis=excluded.axis,
             slice_index=excluded.slice_index,
@@ -419,6 +428,7 @@ def _upsert_mask(connection: sqlite3.Connection, item: dict[str, Any]) -> None:
             item.get("version") or "v1_manual",
             item.get("label") or "label",
             item.get("label_id"),
+            item.get("label_type"),
             item.get("mask_format") or "nii.gz",
             item.get("axis"),
             item.get("slice_index"),

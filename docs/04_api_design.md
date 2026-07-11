@@ -47,6 +47,7 @@
 | 删除 Mask | DELETE | `/api/mask/{mask_id}` | Vue |
 | 查询 Mask | GET | `/api/mask/{mask_id}` | Vue、AI、E 组 |
 | 查询某图像 Mask 列表 | GET | `/api/image/{image_id}/masks` | Vue |
+| 少量标注辅助 / AL 推荐 | GET | `/api/image/{image_id}/labeling_assist` | Vue |
 | 保存版本 | POST | `/api/version` | Vue、AI |
 | 查询版本列表 | GET | `/api/case/{case_id}/versions` | Vue、F 组 |
 | 运行 AI 自动标注 | POST | `/api/ai/predict` | Vue、F 组 |
@@ -697,6 +698,7 @@ application/octet-stream
   "source_version": "v1_manual",
   "output_version": "v3_preview",
   "label": "label",
+  "label_type": "pseudo",
   "method": "random_walker",
   "fill_holes": true,
   "keep_largest_component": false,
@@ -723,7 +725,8 @@ application/octet-stream
   "source_mask_ids": ["Mask0001", "Mask0002"],
   "annotated_slices": [42, 61],
   "propagated_slices": 134,
-  "shape": [134, 512, 512]
+  "shape": [134, 512, 512],
+  "label_type": "pseudo"
 }
 ```
 
@@ -739,7 +742,20 @@ application/octet-stream
 - `connected_component_min_voxels` 控制噪点清理阈值；`connected_component_max_components` 控制 seeded 找不到匹配组件时的回退保留数量。
 - `method=random_walker` 是当前 graph-based segmentation V2：前景种子来自手工标注或候选区域腐蚀，背景种子来自候选区域外扩后的外部区域；边权由 CT 灰度差决定。
 - `random_walker_beta` 越大，边界越依赖灰度突变；`random_walker_max_nodes` 控制单层 ROI 图规模，过大的 ROI 会回退到 signed distance 候选，避免接口卡死。
+- `label_type`：传播产物默认 `pseudo`；手工切片可为 `coarse` / `scribble` / `dense`。
 - 当前版本适合课程项目和第一版 Demo；后续可替换为 MONAI Label / DeepEdit 或 Person B 训练好的分割模型。
+
+### GET `/api/image/{image_id}/labeling_assist`
+
+用途：少量标注工作量面板 + 轻量 Active Learning 推荐下一层切片。
+
+查询参数：`label`、`axis`（默认 axial）、`top_k`、`min_slices`（默认 3）、`source_version`、`preview_mask_id`。
+
+响应要点：
+
+- `workload`：已标层数、总层数、距最少还差、预估精标剩余层数
+- `recommendations`：按连通域不稳定度 / 邻层 IoU 差 / 熵代理排序的待标切片
+- `ready_for_propagate`：已标层数 ≥ `min_slices` 时可一键 `label_propagate`
 
 ### GET `/api/mask/{mask_id}/slice/{slice_index}`
 
@@ -1083,12 +1099,39 @@ uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
   "dataset_id": "Dataset0001",
   "name": "lung_nodule_segmentation_v1",
   "version": "final",
+  "label_set": "dense",
   "train": ["Case0001", "Case0002"],
   "val": ["Case0003"],
   "test": ["Case0004"],
-  "format": "nnunet"
+  "format": "nnunet",
+  "materialize": true,
+  "strict": true
 }
 ```
+
+说明：
+
+- `label_set=dense`：精标导出，通常 `version=final` / `v3_fusion`。
+- `label_set=weak`：弱标签导出；若 `version` 仍为 `final` 会自动改为 `v3_preview`（伪标）。
+- 可对同一批病例分别导出两套 split（弱标签 + 精标），供 Person B `ai/weak_supervise.py` 迭代。
+- `materialize=false`（默认）：只写 `dataset/splits/*_manifest.json` 等元数据（旧行为）。
+- `materialize=true`：额外物化到
+
+```text
+dataset/exports/Dataset0001/
+  imagesTr/*.nii.gz
+  labelsTr/*.nii.gz
+  imagesTs/*.nii.gz   # test
+  labelsTs/*.nii.gz
+  dataset.json
+  splits_final.json
+```
+
+- 图像会转换为/复制为 `{id}_0000.nii.gz`，标签为 `{id}.nii.gz`。
+- 校验每例需有目标版本的 **3D NIfTI mask**；`strict=true` 时缺 mask 直接 400，并返回 `missing_masks`。
+- 响应 `report` 含成功数、缺 mask 列表、spacing/shape 检查结果；另含 `label_set` / `version`。
+- 导出目录可直接被 `nnUNetv2_plan_and_preprocess` 读取（将 `dataset.json` 对应 raw 数据集目录配置到 `nnUNet_raw`）。
+- Mask 字段 `label_type`：`coarse | scribble | dense | pseudo`。
 
 响应：
 
@@ -1097,21 +1140,30 @@ uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
   "success": true,
   "dataset_id": "Dataset0001",
   "output_path": "dataset/splits/Dataset0001_manifest.json",
+  "export_dir": "dataset/exports/Dataset0001",
+  "dataset_json_path": "dataset/exports/Dataset0001/dataset.json",
+  "splits_final_path": "dataset/exports/Dataset0001/splits_final.json",
+  "materialize": true,
   "train_count": 2,
   "val_count": 1,
   "test_count": 1,
-  "message": "export success"
+  "message": "materialized nnU-Net dataset ...",
+  "report": {
+    "success_count": 3,
+    "skipped_count": 0,
+    "missing_masks": [],
+    "spacing_checks": []
+  }
 }
 ```
 
 导出前检查：
 
 - 每个病例都有 image。
-- 每个病例都有指定版本 mask 记录。
+- 每个病例都有指定版本 3D NIfTI mask。
 - 默认使用 `final` 版本。
 - train/val/test 不允许出现同一病例。
-- 当前 JSON 阶段暂不强制 mask 文件真实存在，允许先导出占位 metadata；真实体素 mask 接入后，再开启 image 与 mask 的尺寸和空间一致性检查。
-- 成功后生成三个文件：`dataset/splits/Dataset0001_manifest.json`、`dataset/splits/Dataset0001_split.json`、`dataset/splits/Dataset0001_label_map.json`。
+- 成功后仍生成 manifest/split/label_map；materialize 时额外生成 exports 目录。
 
 ## 12. 前端与 AI 的调用关系
 

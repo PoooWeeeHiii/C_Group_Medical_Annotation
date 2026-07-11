@@ -42,10 +42,23 @@ VALID_MASK_VERSIONS = {"v1_manual", "v2_ai", "v3_preview", "v3_fusion", "final"}
 PROMOTABLE_TARGET_VERSIONS = {"v3_fusion", "final"}
 VALID_MASK_FORMATS = {"nii.gz", "json"}
 VALID_SLICE_AXES = {"axial", "coronal", "sagittal"}
+VALID_LABEL_TYPES = {"coarse", "scribble", "dense", "pseudo"}
 
 
 def _now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
+
+
+def _normalize_label_type(value: str | None, default: str = "dense") -> str:
+    if value is None or str(value).strip() == "":
+        return default
+    cleaned = str(value).strip().lower()
+    if cleaned not in VALID_LABEL_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported label_type: {value}. Use one of {sorted(VALID_LABEL_TYPES)}",
+        )
+    return cleaned
 
 
 def _normalize_label(label: str) -> str:
@@ -327,6 +340,7 @@ def _append_3d_mask_record(
     mask_stack: np.ndarray,
     volume,
     annotation_id: str | None = None,
+    label_type: str = "pseudo",
 ) -> tuple[MaskRecord, str]:
     depth, height, width = mask_stack.shape[:3]
     mask_id = next_sqlite_entity_id("Mask", "masks", "mask_id")
@@ -348,6 +362,7 @@ def _append_3d_mask_record(
         "path": mask_path,
         "version": version,
         "label": label,
+        "label_type": _normalize_label_type(label_type, default="pseudo"),
         "mask_format": "nii.gz",
         "slice_index": None,
         "width": width,
@@ -1088,6 +1103,12 @@ def save_mask(request: SaveMaskRequest, user: dict | None = None) -> SaveMaskRes
             axis=axis or "axial",
             slice_index=request.slice_index,
         )
+    if request.label_type is not None:
+        label_type = _normalize_label_type(request.label_type)
+    elif existing and existing.get("label_type"):
+        label_type = _normalize_label_type(str(existing.get("label_type")))
+    else:
+        label_type = "dense"
 
     updated = False
     if existing:
@@ -1121,6 +1142,7 @@ def save_mask(request: SaveMaskRequest, user: dict | None = None) -> SaveMaskRes
         "version": version,
         "label": label,
         "label_id": request.label_id,
+        "label_type": label_type,
         "mask_format": mask_format,
         "axis": axis,
         "slice_index": request.slice_index,
@@ -1167,6 +1189,12 @@ def update_mask(mask_id: str, request: UpdateMaskRequest, user: dict | None = No
     width = request.width if request.width is not None else source.get("width")
     height = request.height if request.height is not None else source.get("height")
     encoding = request.encoding if request.encoding is not None else source.get("encoding") or "rle"
+    if request.label_type is not None:
+        label_type = _normalize_label_type(request.label_type)
+    elif source.get("label_type"):
+        label_type = _normalize_label_type(str(source.get("label_type")))
+    else:
+        label_type = "dense"
     if slice_index is None or width is None or height is None:
         raise HTTPException(status_code=400, detail="JSON mask update requires slice_index, width and height")
     if request.mask is None:
@@ -1185,6 +1213,7 @@ def update_mask(mask_id: str, request: UpdateMaskRequest, user: dict | None = No
         annotation_id=source.get("annotation_id"),
         version=str(source.get("version") or "v1_manual"),
         label=label,
+        label_type=label_type,
         mask_format="json",
         axis=axis,
         slice_index=int(slice_index),
@@ -1202,6 +1231,7 @@ def update_mask(mask_id: str, request: UpdateMaskRequest, user: dict | None = No
         **source,
         "label": label,
         "label_id": save_request.label_id,
+        "label_type": label_type,
         "axis": axis,
         "slice_index": int(slice_index),
         "width": int(width),
@@ -1333,6 +1363,7 @@ def promote_mask(mask_id: str, target_version: str, user: dict | None = None) ->
         "path": new_path,
         "version": target_version,
         "label": label,
+        "label_type": "dense" if target_version == "final" else (source.get("label_type") or "pseudo"),
         "mask_format": "nii.gz",
         "slice_index": None,
         "width": source.get("width"),
@@ -2004,6 +2035,7 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
         )
 
     label = _normalize_label(request.label)
+    output_label_type = _normalize_label_type(request.label_type, default="pseudo")
     depth, height, width = volume.array.shape[:3]
     masks = _load_masks()
     json_records = _json_mask_records(masks, request.case_id, request.image_id, source_version, label)
@@ -2081,6 +2113,7 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
         source_mask_ids=source_mask_ids,
         mask_stack=propagated,
         volume=volume,
+        label_type=output_label_type,
     )
     return LabelPropagationResponse(
         success=True,
@@ -2095,6 +2128,7 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
         origin=[float(value) for value in volume.origin],
         direction=[float(value) for value in volume.direction],
         mask=mask,
+        label_type=output_label_type,
     )
 
 
@@ -2148,12 +2182,22 @@ def _post_json_service(url: str, payload: dict[str, Any], timeout_seconds: float
 def _call_deepedit_service(request: DeepEditRefineRequest, current_mask: dict | None) -> dict[str, Any] | None:
     if not DEEPEDIT_SERVICE_URL:
         return None
-    return _post_json_service(
-        DEEPEDIT_SERVICE_URL,
-        _deepedit_payload(request, current_mask),
-        DEEPEDIT_SERVICE_TIMEOUT_SECONDS,
-        "DeepEdit",
-    )
+    try:
+        return _post_json_service(
+            DEEPEDIT_SERVICE_URL,
+            _deepedit_payload(request, current_mask),
+            DEEPEDIT_SERVICE_TIMEOUT_SECONDS,
+            "DeepEdit",
+        )
+    except HTTPException as exc:
+        # Service down / timeout / bad payload → fall back to random_walker instead of hard-failing refine.
+        if exc.status_code in {502, 503, 504}:
+            return {
+                "success": False,
+                "model_status": "service_unavailable",
+                "message": str(exc.detail),
+            }
+        raise
 
 
 def _remote_refinement_response(
@@ -2274,6 +2318,7 @@ def deepedit_refine(request: DeepEditRefineRequest) -> DeepEditRefineResponse:
             source_version=request.source_version,
             output_version=request.output_version,
             label=request.label,
+            label_type="pseudo",
             method="random_walker",
             fill_holes=True,
             keep_largest_component=False,
@@ -2487,6 +2532,7 @@ def rollback_mask(mask_id: str, user: dict | None = None) -> dict[str, Any]:
         "path": new_path,
         "version": target_version,
         "label": label,
+        "label_type": source.get("label_type") or "pseudo",
         "mask_format": "nii.gz",
         "slice_index": None,
         "width": source.get("width"),
@@ -2553,3 +2599,182 @@ def find_promotable_mask_for_case(case_id: str) -> dict[str, Any] | None:
         reverse=True,
     )
     return candidates[0]
+
+
+def _slice_binary_iou(a: np.ndarray, b: np.ndarray) -> float:
+    a_bin = a > 0
+    b_bin = b > 0
+    inter = int(np.count_nonzero(a_bin & b_bin))
+    union = int(np.count_nonzero(a_bin | b_bin))
+    if union == 0:
+        return 1.0
+    return float(inter / union)
+
+
+def _slice_component_count(slice_mask: np.ndarray) -> int:
+    try:
+        from scipy import ndimage as ndi
+    except ModuleNotFoundError:
+        return int(np.count_nonzero(slice_mask) > 0)
+    labeled, count = ndi.label(slice_mask > 0)
+    return int(count)
+
+
+def _binary_entropy_proxy(p: float) -> float:
+    p = float(min(max(p, 1e-6), 1.0 - 1e-6))
+    return float(-(p * np.log2(p) + (1.0 - p) * np.log2(1.0 - p)))
+
+
+def get_labeling_assist(
+    image_id: str,
+    *,
+    label: str = "label",
+    axis: str = "axial",
+    top_k: int = 5,
+    min_slices: int = 3,
+    source_version: str = "v1_manual",
+    preview_mask_id: str | None = None,
+) -> dict[str, Any]:
+    """Few-shot workload + lightweight active-learning slice recommendations."""
+    from backend.app.schemas.mask import ActiveLearningSliceItem, LabelingAssistResponse, LabelingWorkload
+
+    axis = _normalize_axis(axis)
+    label = _normalize_label(label)
+    top_k = max(1, min(int(top_k), 20))
+    min_slices = max(1, min(int(min_slices), 20))
+
+    image_record, volume = load_volume(image_id)
+    axis_volume = _axis_volume_array(volume.array, axis)
+    total_slices = int(axis_volume.shape[0])
+    case_id = str(image_record.get("case_id") or "")
+
+    masks = _load_masks()
+    json_records = _json_mask_records(masks, case_id, image_id, source_version, label)
+    sparse_by_axis, _ = _load_sparse_axis_masks(json_records, *volume.array.shape[:3])
+    labeled = sorted(int(index) for index in (sparse_by_axis.get(axis) or {}).keys())
+    labeled_set = set(labeled)
+
+    preview_record = None
+    if preview_mask_id:
+        preview_record = next((item for item in masks if item.get("mask_id") == preview_mask_id), None)
+    if preview_record is None:
+        for version in ("v3_preview", "v3_fusion", "v2_ai", "final"):
+            preview_record = _latest_mask_record(image_id, version)
+            if preview_record is not None:
+                break
+
+    preview_axis = None
+    has_preview = False
+    preview_id = None
+    if preview_record is not None and (
+        preview_record.get("mask_format") == "nii.gz" or str(preview_record.get("path") or "").endswith(".nii.gz")
+    ):
+        try:
+            _, _, preview_stack = _read_nifti_mask_array(str(preview_record["mask_id"]))
+            preview_axis = _axis_volume_array(preview_stack, axis)
+            has_preview = True
+            preview_id = str(preview_record["mask_id"])
+        except Exception:
+            preview_axis = None
+
+    recommendations: list[ActiveLearningSliceItem] = []
+    if has_preview and preview_axis is not None:
+        scores: list[tuple[float, ActiveLearningSliceItem]] = []
+        for slice_index in range(total_slices):
+            if slice_index in labeled_set:
+                continue
+            slice_mask = preview_axis[slice_index]
+            area = int(np.count_nonzero(slice_mask))
+            components = _slice_component_count(slice_mask)
+            iou_prev = _slice_binary_iou(preview_axis[slice_index - 1], slice_mask) if slice_index > 0 else None
+            iou_next = (
+                _slice_binary_iou(slice_mask, preview_axis[slice_index + 1]) if slice_index + 1 < total_slices else None
+            )
+            instability = 0.0
+            if iou_prev is not None:
+                instability += 1.0 - iou_prev
+            if iou_next is not None:
+                instability += 1.0 - iou_next
+            if iou_prev is not None and iou_next is not None:
+                instability *= 0.5
+            # Neighbor disagreement as soft probability proxy → binary entropy.
+            disagreement = instability
+            entropy = _binary_entropy_proxy(0.5 * disagreement) if disagreement > 0 else 0.0
+            component_score = min(1.0, components / 4.0)
+            area_norm = min(1.0, area / max(1.0, float(slice_mask.size) * 0.05))
+            score = 0.55 * instability + 0.25 * entropy + 0.15 * component_score + 0.05 * area_norm
+            if area == 0 and (iou_prev or 0) < 0.05 and (iou_next or 0) < 0.05:
+                score *= 0.15
+            reason = "boundary_instability" if instability >= 0.25 else ("multi_component" if components > 1 else "coverage_gap")
+            scores.append(
+                (
+                    score,
+                    ActiveLearningSliceItem(
+                        slice_index=slice_index,
+                        score=round(float(score), 4),
+                        reason=reason,
+                        components=components,
+                        area=area,
+                        iou_prev=None if iou_prev is None else round(float(iou_prev), 4),
+                        iou_next=None if iou_next is None else round(float(iou_next), 4),
+                        entropy=round(float(entropy), 4),
+                    ),
+                )
+            )
+        scores.sort(key=lambda item: item[0], reverse=True)
+        recommendations = [item for _, item in scores[:top_k]]
+    else:
+        # No preview yet: recommend midpoints of largest unlabeled gaps (or evenly spaced).
+        gap_candidates: list[tuple[int, int]] = []
+        if not labeled:
+            step = max(1, total_slices // max(min_slices + 1, 2))
+            for index in range(step, total_slices - 1, step):
+                gap_candidates.append((index, step))
+        else:
+            anchors = [-1, *labeled, total_slices]
+            for left, right in zip(anchors, anchors[1:]):
+                gap = right - left
+                if gap <= 1:
+                    continue
+                mid = (left + right) // 2
+                if mid not in labeled_set and 0 <= mid < total_slices:
+                    gap_candidates.append((mid, gap))
+        gap_candidates.sort(key=lambda item: item[1], reverse=True)
+        for slice_index, gap in gap_candidates[:top_k]:
+            recommendations.append(
+                ActiveLearningSliceItem(
+                    slice_index=slice_index,
+                    score=round(min(1.0, gap / max(total_slices, 1)), 4),
+                    reason="largest_gap",
+                    components=0,
+                    area=0,
+                )
+            )
+
+    labeled_count = len(labeled)
+    remaining_to_min = max(0, min_slices - labeled_count)
+    # Heuristic: dense labeling often needs ~12–15% of slices; few-shot stops near min_slices.
+    dense_target = max(min_slices, int(round(total_slices * 0.12)))
+    estimated_remaining_dense = max(0, dense_target - labeled_count)
+    workload = LabelingWorkload(
+        labeled_slices=labeled,
+        labeled_count=labeled_count,
+        total_slices=total_slices,
+        min_recommended=min_slices,
+        remaining_to_min=remaining_to_min,
+        estimated_remaining_dense=estimated_remaining_dense,
+        coverage_ratio=round(labeled_count / total_slices, 4) if total_slices else 0.0,
+    )
+    response = LabelingAssistResponse(
+        success=True,
+        image_id=image_id,
+        case_id=case_id or None,
+        axis=axis,
+        label=label,
+        workload=workload,
+        recommendations=recommendations,
+        ready_for_propagate=labeled_count >= min_slices,
+        has_preview=has_preview,
+        preview_mask_id=preview_id,
+    )
+    return response.model_dump()

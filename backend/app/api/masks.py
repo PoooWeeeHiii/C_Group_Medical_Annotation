@@ -9,6 +9,7 @@ from backend.app.schemas.mask import (
     DeleteMaskResponse,
     ExportMaskNiftiRequest,
     ExportMaskNiftiResponse,
+    LabelingAssistResponse,
     LabelPropagationRequest,
     LabelPropagationResponse,
     MaskDetailResponse,
@@ -25,6 +26,7 @@ from backend.app.services.mask_service import (
     deepedit_refine,
     delete_mask,
     export_mask_nifti,
+    get_labeling_assist,
     get_mask,
     get_mask_content,
     get_mask_metrics,
@@ -78,6 +80,30 @@ def export_image_mask_nifti(request: ExportMaskNiftiRequest) -> ExportMaskNiftiR
 @router.post("/label_propagate", response_model=LabelPropagationResponse)
 def propagate_image_label(request: LabelPropagationRequest) -> LabelPropagationResponse:
     return label_propagate(request)
+
+
+@router.get("/image/{image_id}/labeling_assist", response_model=LabelingAssistResponse)
+@router.get("/images/{image_id}/labeling_assist", response_model=LabelingAssistResponse)
+def read_labeling_assist(
+    image_id: str,
+    label: str = "label",
+    axis: str = "axial",
+    top_k: int = 5,
+    min_slices: int = 3,
+    source_version: str = "v1_manual",
+    preview_mask_id: str | None = None,
+) -> LabelingAssistResponse:
+    return LabelingAssistResponse(
+        **get_labeling_assist(
+            image_id,
+            label=label,
+            axis=axis,
+            top_k=top_k,
+            min_slices=min_slices,
+            source_version=source_version,
+            preview_mask_id=preview_mask_id,
+        )
+    )
 
 
 @router.post("/deepedit/refine", response_model=DeepEditRefineResponse)

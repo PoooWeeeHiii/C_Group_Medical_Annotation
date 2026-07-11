@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS masks (
         CHECK (version IN ('v1_manual', 'v2_ai', 'v3_preview', 'v3_fusion', 'final')),
     label TEXT NOT NULL DEFAULT 'label',
     label_id INTEGER,
+    -- coarse | scribble | dense | pseudo
+    label_type TEXT CHECK (label_type IS NULL OR label_type IN ('coarse', 'scribble', 'dense', 'pseudo')),
     mask_format TEXT NOT NULL DEFAULT 'nii.gz' CHECK (mask_format IN ('json', 'nii.gz', 'nrrd')),
     axis TEXT CHECK (axis IS NULL OR axis IN ('axial', 'coronal', 'sagittal')),
     slice_index INTEGER CHECK (slice_index IS NULL OR slice_index >= 0),

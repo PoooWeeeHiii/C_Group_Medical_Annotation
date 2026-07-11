@@ -65,20 +65,23 @@ label_platform/
 
 ## DeepEdit 真实模型服务
 
-真实 DeepEdit 推理以独立服务运行，主后端通过 `DEEPEDIT_SERVICE_URL` 调用它。
+1. 复制环境变量：`cp .env.example .env`（仓库已默认指向 `http://127.0.0.1:8010`）
+2. 将 TorchScript / MONAI 权重放到 `models/deepedit/`（勿提交 Git）
+3. 启动 DeepEdit 独立服务：
 
 ```bash
-export DEEPEDIT_MODEL_PATH=models/deepedit/model.ts
-export DEEPEDIT_DEVICE=auto
-uvicorn ai.deepedit_service:app --host 127.0.0.1 --port 8010
+bash scripts/start_deepedit.sh
 ```
 
-另一个终端启动主后端：
+4. 另开终端启动主后端（会自动读取项目根目录 `.env`）：
 
 ```bash
-export DEEPEDIT_SERVICE_URL=http://127.0.0.1:8010
-export DEEPEDIT_SERVICE_TIMEOUT_SECONDS=120
 uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-模型服务需要本地 TorchScript 权重和 PyTorch 环境；权重文件不要提交到 GitHub。
+说明：
+
+- 主后端通过 `DEEPEDIT_SERVICE_URL` 调用 `{url}/infer`。
+- 若服务未启动、权重缺失或推理失败，会自动 fallback 到 Random Walker，不中断标注闭环。
+- 健康检查：`curl -s http://127.0.0.1:8010/health`
+- 权重文件不要提交到 GitHub。

@@ -11,6 +11,7 @@ class MaskRecord(BaseModel):
     path: str
     version: str = "v1_manual"
     label: str = "label"
+    label_type: str | None = None
     mask_format: str = "nii.gz"
     axis: str | None = None
     slice_index: int | None = None
@@ -26,6 +27,7 @@ class SaveMaskRequest(BaseModel):
     annotation_id: str | None = None
     version: str = "v1_manual"
     label: str = Field(default="label", min_length=1)
+    label_type: str | None = None
     mask_format: str = "nii.gz"
     axis: str = "axial"
     slice_index: int | None = None
@@ -41,6 +43,7 @@ class SaveMaskRequest(BaseModel):
 class UpdateMaskRequest(BaseModel):
     label: str | None = None
     label_id: int | None = None
+    label_type: str | None = None
     axis: str | None = None
     slice_index: int | None = None
     width: int | None = None
@@ -155,6 +158,7 @@ class LabelPropagationRequest(BaseModel):
     source_version: str = "v1_manual"
     output_version: str = "v3_preview"
     label: str = "label"
+    label_type: str = "pseudo"
     method: str = "image_guided_distance"
     fill_holes: bool = True
     keep_largest_component: bool = False
@@ -184,6 +188,41 @@ class LabelPropagationResponse(BaseModel):
     origin: list[float]
     direction: list[float]
     mask: MaskRecord
+    label_type: str | None = "pseudo"
+
+
+class ActiveLearningSliceItem(BaseModel):
+    slice_index: int
+    score: float
+    reason: str
+    components: int = 0
+    area: int = 0
+    iou_prev: float | None = None
+    iou_next: float | None = None
+    entropy: float | None = None
+
+
+class LabelingWorkload(BaseModel):
+    labeled_slices: list[int] = Field(default_factory=list)
+    labeled_count: int = 0
+    total_slices: int = 0
+    min_recommended: int = 3
+    remaining_to_min: int = 0
+    estimated_remaining_dense: int = 0
+    coverage_ratio: float = 0.0
+
+
+class LabelingAssistResponse(BaseModel):
+    success: bool = True
+    image_id: str
+    case_id: str | None = None
+    axis: str = "axial"
+    label: str = "label"
+    workload: LabelingWorkload
+    recommendations: list[ActiveLearningSliceItem] = Field(default_factory=list)
+    ready_for_propagate: bool = False
+    has_preview: bool = False
+    preview_mask_id: str | None = None
 
 
 class DeepEditRefineRequest(BaseModel):
