@@ -60,7 +60,6 @@ Train split applies `augment.augment_pair()`; val/test do not.
 - Mask paths follow `dataset/labels/{case_id}/{version}/...` (PNG from Day2 or nii.gz from platform)
 - Split JSON matches `Dataset0001_split.json` from export API
 
-## Day4 handoff
+## Day4 已完成
 
-- Implement `UNet2D`, `loss.py`, and training loop in `train.py`
-- Save best checkpoint to `ai/checkpoints/Model0001.pt`
+见 [10_person_b_day4.md](10_person_b_day4.md)：`UNet2D`、`loss.py`、完整 `train.py` 训练循环。

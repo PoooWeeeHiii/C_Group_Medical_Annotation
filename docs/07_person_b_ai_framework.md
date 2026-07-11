@@ -14,11 +14,11 @@ ai/
   preprocess.py      # Day2: load/normalize/resize/crop/save 已实现
   augment.py         # Day2: 训练时 flip/rotate/brightness
   pipeline.py        # Day2: Lung 样例转换 + raw 上传后处理
-  train.py           # 训练入口骨架
+  train.py           # Day4: 完整训练循环
   predict.py         # 推理响应 schema（对接 /api/ai/predict）
-  loss.py            # Dice + BCE 接口
+  loss.py            # Day4: Dice + BCE 已实现
   metrics.py         # Dice / IoU 工具函数
-  models/unet.py     # U-Net 2D 类 stub
+  models/unet.py     # Day4: 2D U-Net encoder-decoder
   datasets/lung_dataset.py   # Day3: manifest + split + DataLoader
   checkpoints/       # gitignore，本地训练输出
   runs/              # gitignore，训练日志
@@ -76,7 +76,9 @@ python -c "from ai.metrics import dice_score; import numpy as np; print(dice_sco
 2. `scripts/convert_lung_examples.py` 将 Lung 样例导出到 `dataset/images` + `dataset/labels`
 3. `Dataset0001_manifest.json` 已更新 4 个 case 路径
 4. Day3 已完成：见 [09_person_b_day3.md](09_person_b_day3.md)
-5. Day4：`UNet2D` + 训练循环
+5. Day4 已完成：见 [10_person_b_day4.md](10_person_b_day4.md)（UNet2D + 训练循环）
+6. Day5 已完成：见 [11_person_b_day5.md](11_person_b_day5.md)（第一版 Model0001 完整训练）
+7. Day6：`predict.py` 推理 + 对接 Person A
 
 ## 17:00 与 Person A 确认项
 

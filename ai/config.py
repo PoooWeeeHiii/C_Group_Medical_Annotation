@@ -28,13 +28,18 @@ VERSION_FINAL = "final"
 MODEL_ARCH = "unet_2d"
 IN_CHANNELS = 1
 OUT_CHANNELS = 1
-LOSS_DICE_WEIGHT = 0.5
-LOSS_BCE_WEIGHT = 0.5
+UNET_BASE_CHANNELS = 32
+LOSS_DICE_WEIGHT = 0.7
+LOSS_BCE_WEIGHT = 0.3
 
-# Training hyperparameters (Day2+ fill)
+# Training hyperparameters
 EPOCHS = 50
-BATCH_SIZE = 8
+BATCH_SIZE = 4
 LEARNING_RATE = 1e-4
+WEIGHT_DECAY = 1e-5
+EARLY_STOP_PATIENCE = 15
+SLICE_RADIUS = 2
+
 IMAGE_SIZE = (256, 256)
 CT_HU_MIN = -1000
 CT_HU_MAX = 400
@@ -76,6 +81,11 @@ SPLEEN_NNUNET_PYTHON = os.environ.get(
     "SPLEEN_NNUNET_PYTHON",
     str(SPLEEN_NNUNET_ROOT / "venv_nnunet_cpu" / "Scripts" / "python.exe"),
 )
+
+
+def checkpoint_path(model_id: str = MODEL_ID) -> Path:
+    return CHECKPOINT_DIR / f"{model_id}.pt"
+
 
 # Example label path pattern:
 # dataset/labels/Case0001/v2_ai/Case0001_Image0001_Mask0001_v2_ai_spleen.nii.gz
