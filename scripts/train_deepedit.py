@@ -94,6 +94,24 @@ def _discover_pairs(root: Path, limit: int | None) -> list[tuple[Path, Path]]:
     return pairs
 
 
+def _discover_manifest_pairs(manifest_path: Path, limit: int | None) -> list[tuple[Path, Path, str]]:
+    """Load multi-organ CT/mask pairs from Person B DeepEdit manifest.json."""
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    root = manifest_path.parent
+    pairs: list[tuple[Path, Path, str]] = []
+    for rec in data.get("records") or []:
+        image = root / str(rec.get("image") or "")
+        label = root / str(rec.get("label") or "")
+        organ = str(rec.get("organ") or "organ")
+        if image.is_file() and label.is_file():
+            pairs.append((image, label, organ))
+    if not pairs:
+        raise SystemExit(f"No usable records in {manifest_path}")
+    if limit is not None:
+        pairs = pairs[:limit]
+    return pairs
+
+
 def _sample_points(mask: np.ndarray, count: int, *, foreground: bool, rng: random.Random) -> list[tuple[int, int, int]]:
     if foreground:
         coords = np.argwhere(mask > 0)
@@ -215,11 +233,17 @@ def _dice_bce_loss(logits, target):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Train DeepEdit from TotalSeg spleen")
+    parser = argparse.ArgumentParser(description="Train DeepEdit from TotalSeg spleen or multi-organ manifest")
     parser.add_argument("--totalseg-root", type=Path, default=DEFAULT_TOTALSEG)
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Multi-organ DeepEdit manifest.json (overrides --totalseg-root spleen dataset)",
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--limit", type=int, default=12, help="Max training cases")
+    parser.add_argument("--limit", type=int, default=12, help="Max training samples (cases or organ-records)")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--crop", type=int, nargs=3, default=[48, 96, 96], metavar=("D", "H", "W"))
@@ -227,6 +251,11 @@ def main() -> int:
     parser.add_argument("--neg-clicks", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Load existing --output checkpoint and continue training (few-shot / fusion loop)",
+    )
     args = parser.parse_args()
 
     try:
@@ -246,9 +275,19 @@ def main() -> int:
         device_name = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_name)
 
-    pairs = _discover_pairs(args.totalseg_root, args.limit)
-    print(f"Training on {len(pairs)} cases from {args.totalseg_root / 'nnUNet_raw' / SPLEEN_DATASET}")
-    print(f"Device={device} crop={tuple(args.crop)} epochs={args.epochs}")
+    dataset_tag = SPLEEN_DATASET
+    if args.manifest is not None:
+        manifest_path = args.manifest if args.manifest.is_absolute() else PROJECT_ROOT / args.manifest
+        triples = _discover_manifest_pairs(manifest_path, args.limit)
+        raw_pairs = [(a, b) for a, b, _ in triples]
+        organs = [c for _, _, c in triples]
+        dataset_tag = f"manifest:{manifest_path}"
+        print(f"Training on {len(raw_pairs)} records from {manifest_path}")
+    else:
+        raw_pairs = _discover_pairs(args.totalseg_root, args.limit)
+        organs = ["spleen"] * len(raw_pairs)
+        print(f"Training on {len(raw_pairs)} cases from {args.totalseg_root / 'nnUNet_raw' / SPLEEN_DATASET}")
+    print(f"Device={device} crop={tuple(args.crop)} epochs={args.epochs} resume={args.resume}")
 
     model = UNet(
         spatial_dims=3,
@@ -258,11 +297,22 @@ def main() -> int:
         strides=tuple(int(v) for v in config.get("strides", [2, 2, 2, 2])),
         num_res_units=int(config.get("num_res_units", 2)),
     ).to(device)
+
+    output = args.output if args.output.is_absolute() else PROJECT_ROOT / args.output
+    if args.resume:
+        ckpt_path = output if output.is_file() else PROJECT_ROOT / "models" / "deepedit" / "deepedit_unet.pth"
+        if not ckpt_path.is_file():
+            raise SystemExit(f"--resume requested but checkpoint missing: {ckpt_path}")
+        ckpt = torch.load(str(ckpt_path), map_location="cpu")
+        state = ckpt.get("state_dict") or ckpt
+        model.load_state_dict(state, strict=True)
+        print(f"Resumed weights from {ckpt_path}")
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # Preload volumes (small limit by default).
-    loaded: list[tuple[np.ndarray, np.ndarray]] = []
-    for image_path, label_path in pairs:
+    loaded: list[tuple[np.ndarray, np.ndarray, str]] = []
+    for (image_path, label_path), organ in zip(raw_pairs, organs):
         if args.limit is not None and len(loaded) >= args.limit:
             break
         ct = _read_nifti(image_path)
@@ -273,8 +323,8 @@ def main() -> int:
         if not np.any(gt > 0):
             print(f"Skip empty label: {label_path.name}")
             continue
-        loaded.append((ct, gt))
-        print(f"  loaded {image_path.name} shape={ct.shape}")
+        loaded.append((ct, gt, organ))
+        print(f"  loaded {organ} {image_path.name} shape={ct.shape}")
     if not loaded:
         raise SystemExit("No usable volumes after filtering")
 
@@ -286,7 +336,7 @@ def main() -> int:
         order = list(range(len(loaded)))
         rng.shuffle(order)
         for idx in order:
-            ct, gt = loaded[idx]
+            ct, gt, _organ = loaded[idx]
             channels, target = _build_sample(ct, gt, crop_dhw, rng, args.pos_clicks, args.neg_clicks)
             x = torch.from_numpy(channels[None]).to(device=device, dtype=torch.float32)
             y = torch.from_numpy(target[None]).to(device=device, dtype=torch.float32)
@@ -300,8 +350,10 @@ def main() -> int:
         avg = epoch_loss / max(steps, 1)
         print(f"epoch {epoch}/{args.epochs} loss={avg:.4f}")
 
-    output = args.output if args.output.is_absolute() else PROJECT_ROOT / args.output
     output.parent.mkdir(parents=True, exist_ok=True)
+    organ_counts: dict[str, int] = {}
+    for _, _, organ in loaded:
+        organ_counts[organ] = organ_counts.get(organ, 0) + 1
     payload = {
         "state_dict": model.state_dict(),
         "config": {
@@ -313,11 +365,13 @@ def main() -> int:
             "num_res_units": int(config.get("num_res_units", 2)),
         },
         "train_meta": {
-            "dataset": SPLEEN_DATASET,
+            "dataset": dataset_tag,
             "cases": len(loaded),
+            "organs": organ_counts,
             "epochs": args.epochs,
             "crop": list(crop_dhw),
             "totalseg_root": str(args.totalseg_root),
+            "resumed": bool(args.resume),
         },
     }
     torch.save(payload, str(output))
