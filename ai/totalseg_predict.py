@@ -5,8 +5,8 @@ process does not need to import totalsegmentator / nnUNet itself.
 
 Env:
   TOTALSEG_PYTHON   python with `pip install TotalSegmentator`
-  TOTALSEG_DEVICE   auto|cpu|gpu|cuda  (default auto)
-  TOTALSEG_FAST     true/false — use --fast (3mm) for CPU speed (default true on cpu)
+  TOTALSEG_DEVICE   auto|cpu|gpu|cuda  (default auto = prefer GPU, else CPU)
+  TOTALSEG_FAST     true/false — use --fast (3mm); default true on CPU, false on GPU
   TOTALSEG_TIMEOUT_SECONDS  default 1800
 """
 from __future__ import annotations
@@ -19,6 +19,8 @@ import numpy as np
 
 from ai.config import TOTALSEG_DEVICE, TOTALSEG_FAST, TOTALSEG_PYTHON, TOTALSEG_TIMEOUT_SECONDS
 
+_CUDA_PROBE_CACHE: bool | None = None
+
 # Map platform labels → TotalSegmentator class names (v2).
 LABEL_TO_ROI: dict[str, list[str]] = {
     "spleen": ["spleen"],
@@ -28,8 +30,39 @@ LABEL_TO_ROI: dict[str, list[str]] = {
     "肝": ["liver"],
     "肝脏": ["liver"],
     "kidney": ["kidney_left", "kidney_right"],
+    "肾": ["kidney_left", "kidney_right"],
+    "肾脏": ["kidney_left", "kidney_right"],
     "kidney_left": ["kidney_left"],
     "kidney_right": ["kidney_right"],
+    "heart": ["heart"],
+    "心": ["heart"],
+    "心脏": ["heart"],
+    "bone": [
+        "vertebrae_L5",
+        "vertebrae_L4",
+        "vertebrae_L3",
+        "vertebrae_L2",
+        "vertebrae_L1",
+        "vertebrae_T12",
+        "vertebrae_T11",
+        "vertebrae_T10",
+        "sacrum",
+        "hip_left",
+        "hip_right",
+    ],
+    "骨骼": [
+        "vertebrae_L5",
+        "vertebrae_L4",
+        "vertebrae_L3",
+        "vertebrae_L2",
+        "vertebrae_L1",
+        "vertebrae_T12",
+        "vertebrae_T11",
+        "vertebrae_T10",
+        "sacrum",
+        "hip_left",
+        "hip_right",
+    ],
     "pancreas": ["pancreas"],
     "stomach": ["stomach"],
     "gallbladder": ["gallbladder"],
@@ -41,6 +74,13 @@ LABEL_TO_ROI: dict[str, list[str]] = {
         "lung_lower_lobe_right",
     ],
     "肺": [
+        "lung_upper_lobe_left",
+        "lung_lower_lobe_left",
+        "lung_upper_lobe_right",
+        "lung_middle_lobe_right",
+        "lung_lower_lobe_right",
+    ],
+    "肺部": [
         "lung_upper_lobe_left",
         "lung_lower_lobe_left",
         "lung_upper_lobe_right",
@@ -88,19 +128,25 @@ def is_multi_organ_model(model_id: str) -> bool:
 def resolve_roi_subset(label: str, model_id: str = "") -> list[str] | None:
     """Return roi_subset list, or None to run full TotalSeg (all classes)."""
     mid = (model_id or "").strip().lower()
+    key = (label or "").strip().lower()
+
+    if key in {"all", "total", "multi", "*", "全部", "全部标注"}:
+        if mid in {"totalseg_organs", "totalseg_multi"} or key == "organs":
+            return list(ORGANS_ROI)
+        return None
+    if key == "organs":
+        return list(ORGANS_ROI)
+
+    # Specific organ requests always take priority over multi-organ model ids.
+    if key in LABEL_TO_ROI:
+        return list(LABEL_TO_ROI[key])
+    if key in {"heart", "心", "心脏"}:
+        return ["heart"]
+
     if mid in {"totalseg_total", "totalseg_all"}:
         return None
     if mid in {"totalseg_organs", "totalseg_multi"}:
         return list(ORGANS_ROI)
-
-    key = (label or "").strip().lower()
-    if key in {"all", "total", "multi", "organs"}:
-        return list(ORGANS_ROI) if key == "organs" else None
-    if key in LABEL_TO_ROI:
-        return list(LABEL_TO_ROI[key])
-    for organ, rois in LABEL_TO_ROI.items():
-        if organ in mid or organ in key:
-            return list(rois)
     return ["spleen"]
 
 
@@ -126,16 +172,36 @@ def ensure_totalseg_ready() -> Path:
     return python
 
 
-def _resolve_device() -> str:
-    value = (TOTALSEG_DEVICE or "auto").strip().lower()
-    if value in {"auto", ""}:
-        try:
-            import torch
+def _totalseg_cuda_available(python: Path) -> bool:
+    """Probe CUDA inside TOTALSEG_PYTHON (not the FastAPI process torch)."""
+    global _CUDA_PROBE_CACHE
+    if _CUDA_PROBE_CACHE is not None:
+        return _CUDA_PROBE_CACHE
+    try:
+        result = subprocess.run(
+            [
+                str(python),
+                "-c",
+                "import torch; print('1' if torch.cuda.is_available() else '0')",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=str(Path(__file__).resolve().parents[1]),
+        )
+        _CUDA_PROBE_CACHE = result.returncode == 0 and "1" in (result.stdout or "")
+    except Exception:
+        _CUDA_PROBE_CACHE = False
+    return bool(_CUDA_PROBE_CACHE)
 
-            return "gpu" if torch.cuda.is_available() else "cpu"
-        except Exception:
-            return "cpu"
-    if value in {"cuda", "gpu"}:
+
+def _resolve_device(python: Path | None = None) -> str:
+    """Prefer GPU when available; otherwise CPU. Forced cpu always stays cpu."""
+    value = (TOTALSEG_DEVICE or "auto").strip().lower()
+    if value in {"cpu"}:
+        return "cpu"
+    py = Path(python or TOTALSEG_PYTHON)
+    if _totalseg_cuda_available(py):
         return "gpu"
     return "cpu"
 
@@ -146,7 +212,24 @@ def _use_fast(device: str) -> bool:
         return True
     if raw in {"0", "false", "no", "off"}:
         return False
+    # GPU: full quality by default; CPU: fast mode to keep runtime acceptable
     return device == "cpu"
+
+
+def _looks_like_gpu_failure(detail: str) -> bool:
+    text = str(detail or "").lower()
+    needles = (
+        "cuda",
+        "cublas",
+        "cudnn",
+        "out of memory",
+        "oom",
+        "nvidia",
+        "no kernel image",
+        "gpu",
+        "device-side assert",
+    )
+    return any(token in text for token in needles)
 
 
 def _write_nifti(array: np.ndarray, spacing: tuple[float, float, float], out_path: Path) -> None:
@@ -282,7 +365,7 @@ print('totalseg_done')
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(f"TotalSegmentator failed: {detail[-2000:]}")
+        raise RuntimeError(f"TotalSegmentator failed on device={device}: {detail[-2000:]}")
 
 
 def predict_totalseg_volume(
@@ -316,18 +399,32 @@ def predict_totalseg_organs(
     model_id: str = "totalseg_spleen",
 ) -> dict[str, np.ndarray]:
     """Return {organ_name: binary_mask} for all non-empty organs in this run."""
+    import shutil
+
     python = ensure_totalseg_ready()
     rois = resolve_roi_subset(label, model_id)
-    device = _resolve_device()
+    device = _resolve_device(python)
     fast = _use_fast(device)
     target_shape = tuple(int(v) for v in volume.shape[:3])
+    print(f"[totalseg] label={label!r} model={model_id!r} device={device} fast={fast} rois={rois}")
 
     with tempfile.TemporaryDirectory(prefix="totalseg_predict_") as tmp:
         tmp_path = Path(tmp)
         input_path = tmp_path / "ct.nii.gz"
         output_dir = tmp_path / "seg"
         _write_nifti(volume, spacing, input_path)
-        _run_totalseg_subprocess(python, input_path, output_dir, rois, device, fast)
+        try:
+            _run_totalseg_subprocess(python, input_path, output_dir, rois, device, fast)
+        except RuntimeError as exc:
+            # GPU preferred but failed at runtime → fall back to CPU once.
+            if device == "gpu" and _looks_like_gpu_failure(str(exc)):
+                print(f"[totalseg] GPU failed, falling back to CPU: {exc}")
+                shutil.rmtree(output_dir, ignore_errors=True)
+                device = "cpu"
+                fast = _use_fast(device)
+                _run_totalseg_subprocess(python, input_path, output_dir, rois, device, fast)
+            else:
+                raise
 
         allowed = set(rois) if rois is not None else None
         organs = _collect_organ_masks(
@@ -349,4 +446,4 @@ def predict_totalseg_organs(
                 if np.any(merged):
                     name = rois[0] if len(rois) == 1 else (label or "organ")
                     return {name: merged.astype(np.uint8)}
-        raise RuntimeError(f"TotalSegmentator produced no mask files (rois={rois})")
+        raise RuntimeError(f"TotalSegmentator produced no mask files (rois={rois}, device={device})")

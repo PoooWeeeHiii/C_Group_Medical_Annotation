@@ -139,6 +139,9 @@ class ExportMaskNiftiRequest(BaseModel):
     image_id: str
     version: str = "v1_manual"
     label: str = "label"
+    # True: stack all labels of this version into one multiclass 3D volume.
+    match_any_label: bool = False
+    output_label: str | None = None
 
 
 class ExportMaskNiftiResponse(BaseModel):

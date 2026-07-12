@@ -1118,6 +1118,45 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   }
 }
 .tool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+.tool-undo-redo {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.ai-predict-row {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  margin-top: 2px;
+}
+.ai-predict-field {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.ai-predict-field select {
+  width: 100%;
+  min-height: 44px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(2, 12, 24, 0.65);
+  color: var(--text);
+  padding: 0 12px;
+}
+.ai-predict-button {
+  min-height: 48px;
+  width: 100%;
+  color: var(--text);
+  border-color: rgba(0, 229, 176, 0.55);
+  background: rgba(0, 229, 176, 0.16);
+  font-weight: 600;
+}
+.ai-predict-button:hover {
+  border-color: rgba(0, 229, 176, 0.85);
+  background: rgba(0, 229, 176, 0.24);
+}
 .tool-button {
   min-height: 46px;
   width: 100%;
@@ -1129,6 +1168,12 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   border-color: rgba(0, 229, 176, 0.72);
   background: rgba(0, 229, 176, 0.14);
   box-shadow: inset 0 0 0 1px rgba(0, 229, 176, 0.2);
+}
+.tool-button[data-annotation-tool="undo"],
+.tool-button[data-annotation-tool="redo"] {
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1;
 }
 .annotation-state-line {
   display: grid;
@@ -1166,30 +1211,46 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 .annotation-mode-panel,
 .few-shot-panel {
   display: grid;
-  gap: 8px;
-  margin-top: 12px;
-  padding: 10px 12px;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px 14px 16px;
   color: var(--muted);
   font-size: 12px;
   border: 1px solid rgba(56, 163, 255, 0.28);
-  border-radius: 8px;
+  border-radius: 10px;
   background: rgba(56, 163, 255, 0.06);
 }
 .few-shot-panel {
   border-color: rgba(255, 176, 32, 0.35);
   background: rgba(255, 176, 32, 0.06);
 }
+.few-shot-panel .param-header {
+  margin-bottom: 2px;
+}
+.few-shot-panel .param-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 36px;
+}
+.few-shot-panel .param-row input {
+  width: 72px;
+  min-height: 34px;
+  text-align: center;
+}
 .workload-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 10px;
 }
 .workload-grid div {
   display: grid;
-  gap: 2px;
-  padding: 8px;
+  gap: 6px;
+  padding: 12px 12px;
   border-radius: 8px;
   background: rgba(5, 14, 26, 0.45);
+  min-height: 64px;
 }
 .workload-grid span {
   color: var(--muted);
@@ -1197,12 +1258,28 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 }
 .workload-grid strong {
   color: var(--text);
-  font-size: 16px;
+  font-size: 18px;
+  line-height: 1.1;
+}
+.few-shot-actions {
+  display: grid;
+  gap: 10px;
+  margin-top: 2px;
 }
 .al-recommend-list {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 176, 32, 0.18);
+}
+.al-recommend-list > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.al-recommend-chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
 }
 .al-slice-chip {
@@ -1210,8 +1287,8 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
-  min-height: 36px;
-  padding: 6px 10px;
+  min-height: 40px;
+  padding: 8px 12px;
   color: var(--text);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1227,7 +1304,7 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 }
 .annotation-mode-panel small,
 .few-shot-panel small {
-  line-height: 1.45;
+  line-height: 1.5;
 }
 .segmented-control button {
   min-height: 32px;
@@ -1391,37 +1468,50 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 }
 .magic-wand-controls {
   display: grid;
-  gap: 10px;
-  margin-top: 12px;
-  padding: 12px;
+  gap: 14px;
+  margin-top: 14px;
+  padding: 14px 14px 16px;
   border: 1px solid rgba(0, 194, 255, 0.24);
-  border-radius: 8px;
+  border-radius: 10px;
   background: rgba(4, 14, 26, 0.56);
 }
 .magic-control-row {
   display: grid;
-  grid-template-columns: 76px 1fr;
-  gap: 10px;
+  grid-template-columns: 72px 1fr;
+  gap: 12px;
   align-items: center;
   color: var(--muted);
   font-size: 12px;
 }
+.magic-control-row.threshold-row {
+  grid-template-columns: 72px 1fr auto;
+  align-items: center;
+}
 .magic-control-row select {
   min-width: 0;
-  min-height: 34px;
+  min-height: 38px;
   color: var(--text);
   background: rgba(5, 14, 26, 0.8);
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 0 8px;
+  padding: 0 10px;
 }
 .magic-control-row input[type="range"] {
   min-width: 0;
+  width: 100%;
 }
 .magic-control-row strong {
-  grid-column: 2;
   color: var(--text);
   font-size: 12px;
+  white-space: nowrap;
+  min-width: 64px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.magic-wand-controls .label-picker-hint {
+  margin: 0;
+  padding-top: 2px;
+  line-height: 1.5;
 }
 .action-stack button {
   width: 100%;
@@ -1458,6 +1548,55 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 .muted { color: var(--muted); font-size: 12px; }
 .label-row { display: grid; grid-template-columns: 24px 1fr; align-items: center; gap: 10px; min-height: 34px; color: #dbeaf4; }
 .label-picker { margin: 12px 0 4px; }
+.label-select-field {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.label-select-row {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 10px;
+  align-items: center;
+}
+.label-select-row select {
+  width: 100%;
+  min-height: 40px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(2, 12, 24, 0.65);
+  color: var(--text);
+  padding: 0 10px;
+}
+.label-picker-hint {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.brush-size-controls {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.brush-size-row {
+  display: grid;
+  grid-template-columns: 72px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+.brush-size-row input[type="range"] {
+  width: 100%;
+}
+.brush-size-row strong {
+  min-width: 40px;
+  text-align: right;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
 .label-picker-header {
   display: flex;
   justify-content: space-between;
@@ -1615,6 +1754,86 @@ button.label-pick.active {
   border-radius: 8px;
   background: #000;
   transform: scaleX(-1);
+}
+.gesture-video-wrap {
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.gesture-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.gesture-frame-guide {
+  position: absolute;
+  inset: 12% 18%;
+  border: 2px dashed rgba(0, 229, 176, 0.75);
+  border-radius: 12px;
+  pointer-events: none;
+  box-shadow: inset 0 0 24px rgba(0, 229, 176, 0.12);
+}
+.gesture-coach {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(0, 20, 36, 0.55);
+}
+.gesture-coach.ok {
+  border-color: rgba(0, 229, 176, 0.45);
+}
+.gesture-coach.warn {
+  border-color: rgba(255, 176, 32, 0.45);
+}
+.gesture-coach strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+.gesture-coach p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.gesture-progress-wrap {
+  display: grid;
+  gap: 4px;
+}
+.gesture-progress-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted);
+}
+.gesture-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.gesture-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--blue), var(--green));
+  transition: width 0.12s linear;
+}
+.gesture-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.gesture-actions .primary-button,
+.gesture-actions .ghost-button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.gesture-live {
+  font-size: 12px;
+  color: var(--text);
 }
 .gesture-status {
   color: var(--green);

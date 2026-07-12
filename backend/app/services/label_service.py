@@ -10,11 +10,14 @@ from backend.app.services.sqlite_service import connect, ensure_sqlite_ready
 
 DEFAULT_LABELS: list[dict[str, Any]] = [
     {"label_id": 0, "name": "background", "display_name": "背景", "color": "#1c2938", "sort_order": 0},
-    {"label_id": 1, "name": "liver", "display_name": "肝脏", "color": "#00e5b0", "sort_order": 1},
-    {"label_id": 2, "name": "kidney", "display_name": "肾脏", "color": "#38a3ff", "sort_order": 2},
-    {"label_id": 3, "name": "lung", "display_name": "肺部", "color": "#ffb020", "sort_order": 3},
-    {"label_id": 4, "name": "tumor", "display_name": "肿瘤", "color": "#ff4d4f", "sort_order": 4},
-    {"label_id": 5, "name": "spleen", "display_name": "脾脏", "color": "#b66dff", "sort_order": 5},
+    {"label_id": 1, "name": "liver", "display_name": "肝", "color": "#00e5b0", "sort_order": 2},
+    {"label_id": 2, "name": "kidney", "display_name": "肾", "color": "#38a3ff", "sort_order": 5},
+    {"label_id": 3, "name": "lung", "display_name": "肺", "color": "#ffb020", "sort_order": 4},
+    {"label_id": 4, "name": "tumor", "display_name": "肿瘤", "color": "#ff4d4f", "sort_order": 7},
+    {"label_id": 5, "name": "spleen", "display_name": "脾", "color": "#b66dff", "sort_order": 3},
+    {"label_id": 6, "name": "heart", "display_name": "心", "color": "#ff6b8a", "sort_order": 1},
+    {"label_id": 7, "name": "bone", "display_name": "骨", "color": "#e2e8f0", "sort_order": 6},
+    {"label_id": 8, "name": "other", "display_name": "其他", "color": "#94a3b8", "sort_order": 8},
 ]
 
 
@@ -76,11 +79,61 @@ def ensure_label_schema(connection=None) -> None:
                         now,
                     ),
                 )
+        else:
+            _sync_builtin_labels(connection)
         if owns:
             connection.commit()
     finally:
         if owns:
             connection.close()
+
+
+def _sync_builtin_labels(connection) -> None:
+    """补齐内置类别并刷新显示名/颜色/排序，不改已有 name→id 映射。"""
+    now = _now_iso()
+    existing_rows = connection.execute("SELECT * FROM labels").fetchall()
+    by_name = {str(row["name"]): dict(row) for row in existing_rows}
+    used_ids = {int(row["label_id"]) for row in existing_rows}
+    next_id = (max(used_ids) + 1) if used_ids else 1
+
+    for item in DEFAULT_LABELS:
+        name = str(item["name"])
+        row = by_name.get(name)
+        if row:
+            connection.execute(
+                """
+                UPDATE labels
+                SET display_name = ?, color = ?, sort_order = ?, update_time = ?
+                WHERE name = ?
+                """,
+                (
+                    str(item["display_name"]),
+                    str(item["color"]),
+                    int(item["sort_order"]),
+                    now,
+                    name,
+                ),
+            )
+            continue
+        preferred = int(item["label_id"])
+        label_id = preferred if preferred not in used_ids else next_id
+        if label_id == next_id:
+            next_id += 1
+        used_ids.add(label_id)
+        connection.execute(
+            """
+            INSERT INTO labels (label_id, name, display_name, color, sort_order, enabled, create_time)
+            VALUES (?, ?, ?, ?, ?, 1, ?)
+            """,
+            (
+                label_id,
+                name,
+                str(item["display_name"]),
+                str(item["color"]),
+                int(item["sort_order"]),
+                now,
+            ),
+        )
 
 
 def list_labels(*, enabled_only: bool = False, include_background: bool = True) -> list[dict[str, Any]]:

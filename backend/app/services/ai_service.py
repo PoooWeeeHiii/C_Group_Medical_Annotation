@@ -26,9 +26,69 @@ def _safe_id(value: str) -> str:
     return normalized or "model"
 
 
+def _is_multi_label_request(label: str) -> bool:
+    key = str(label or "").strip().lower()
+    return key in {"", "label", "all", "total", "multi", "organs", "*", "全部", "全部标注"}
+
+
+def _merge_mask_dict(parts: list[np.ndarray]) -> np.ndarray | None:
+    if not parts:
+        return None
+    merged = np.asarray(parts[0], dtype=np.uint8).copy()
+    for part in parts[1:]:
+        merged = np.maximum(merged, np.asarray(part, dtype=np.uint8))
+    return merged
+
+
+def _collapse_organs_to_label(organ_masks: dict[str, np.ndarray], label: str) -> dict[str, np.ndarray]:
+    """Collapse TotalSeg class names (e.g. lung lobes) into platform labels like lung."""
+    if not organ_masks:
+        return {}
+    key = str(label or "").strip().lower()
+    aliases = {
+        "lung": ("lung", "肺", "肺部"),
+        "kidney": ("kidney", "肾", "肾脏"),
+        "liver": ("liver", "肝", "肝脏"),
+        "spleen": ("spleen", "脾", "脾脏"),
+        "heart": ("heart", "心", "心脏"),
+        "bone": ("bone", "骨骼", "vertebrae", "rib", "hip", "sacrum"),
+        "tumor": ("tumor", "tumour", "肿瘤"),
+    }
+    # Exact key hit
+    if key in organ_masks and np.any(organ_masks[key]):
+        return {key: (np.asarray(organ_masks[key]) > 0).astype(np.uint8)}
+
+    for canonical, names in aliases.items():
+        if key not in names and key != canonical:
+            continue
+        matched = [
+            mask
+            for name, mask in organ_masks.items()
+            if any(token in str(name).lower() for token in names)
+        ]
+        merged = _merge_mask_dict(matched)
+        if merged is not None and np.any(merged):
+            return {canonical: (merged > 0).astype(np.uint8)}
+
+    # Fallback: merge everything under requested label name
+    merged = _merge_mask_dict(list(organ_masks.values()))
+    if merged is None or not np.any(merged):
+        return {}
+    out_name = key if key and key not in {"label"} else next(iter(organ_masks))
+    return {out_name: (merged > 0).astype(np.uint8)}
+
+
 def _is_spleen_request(label: str, model_id: str) -> bool:
     target = f"{label} {model_id}".lower()
     return "spleen" in target or "脾" in target
+
+
+def _is_tumor_request(label: str, model_id: str = "") -> bool:
+    target = f"{label} {model_id}".lower()
+    return any(
+        token in target
+        for token in ("tumor", "tumour", "肿瘤", "suspected_tumor", "tumor_residual")
+    )
 
 
 def _is_totalseg_request(model_id: str, label: str = "") -> bool:
@@ -260,14 +320,55 @@ def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
             organ_masks = {label: mask_stack}
             model_status = "platform_unet"
             backend_name = "platform_unet"
+        elif _is_tumor_request(label, model_id):
+            # 疑似肿瘤：TotalSeg 器官并集 → 体内残差软组织连通域（heuristic，非诊断）
+            from ai.tumor_heuristic import predict_suspected_tumor
+
+            organ_model = model_id
+            if not _is_totalseg_request(organ_model, "organs"):
+                organ_model = "totalseg_organs"
+            # Prefer the ~24-class organs subset for speed unless user asked for full total.
+            organ_label = "total" if "total" in organ_model.lower() and "organs" not in organ_model.lower() else "organs"
+            totalseg_organs = _run_totalseg_organs(
+                volume,
+                volume.spacing,
+                label=organ_label,
+                model_id=organ_model,
+            )
+            if not totalseg_organs:
+                raise HTTPException(status_code=422, detail="TotalSegmentator produced empty organ masks for tumor heuristic")
+            tumor_mask, tumor_meta = predict_suspected_tumor(
+                volume.array,
+                totalseg_organs,
+                volume.spacing,
+            )
+            if not np.any(tumor_mask):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "疑似肿瘤启发式未找到候选连通域（体内−器官残差为空）。"
+                        "可换 total 模型或检查 CT 体位/窗宽。"
+                    ),
+                )
+            label = "tumor"
+            mask_stack = tumor_mask
+            organ_masks = {"tumor": tumor_mask}
+            model_id = "tumor_residual_heuristic"
+            model_status = "tumor_residual_heuristic"
+            backend_name = "tumor_residual_heuristic"
+            n_comp = int(tumor_meta.get("component_count") or 0)
+            vol_ml = float(tumor_meta.get("volume_ml") or 0.0)
+            fallback_reason = (
+                f"疑似肿瘤启发式（非诊断结果）：器官残差软组织 · {n_comp} 个候选 · 约 {vol_ml:.1f} ml"
+            )
         elif _is_totalseg_request(model_id, label):
             organ_masks = _run_totalseg_organs(volume, volume.spacing, label=label, model_id=model_id)
             model_status = "totalsegmentator"
             backend_name = "totalsegmentator"
-            if is_multi_organ_model(model_id):
-                # Keep all non-empty organs; primary preview prefers spleen then first.
-                if not organ_masks:
-                    raise HTTPException(status_code=422, detail="TotalSegmentator produced empty masks")
+            if not organ_masks:
+                raise HTTPException(status_code=422, detail="TotalSegmentator produced empty masks")
+            # 「全部」才保留多器官；指定肺/肝等时收成单一平台标签（肺叶→lung）
+            if is_multi_organ_model(model_id) and _is_multi_label_request(label):
                 if "spleen" in organ_masks:
                     primary_label = "spleen"
                 elif label in organ_masks:
@@ -277,30 +378,14 @@ def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
                 label = primary_label
                 mask_stack = organ_masks[primary_label]
             else:
-                # Single-organ / merged request
-                if label in organ_masks:
-                    mask_stack = organ_masks[label]
-                    organ_masks = {label: mask_stack}
-                elif str(label).lower() == "lung" or model_id.endswith("_lung"):
-                    lobe_masks = [mask for name, mask in organ_masks.items() if str(name).startswith("lung_")]
-                    if not lobe_masks:
-                        raise HTTPException(status_code=422, detail="TotalSegmentator produced empty lung masks")
-                    merged = lobe_masks[0].copy()
-                    for part in lobe_masks[1:]:
-                        merged = np.maximum(merged, part)
-                    label = "lung"
-                    mask_stack = merged
-                    organ_masks = {"lung": merged}
-                elif len(organ_masks) == 1:
-                    label, mask_stack = next(iter(organ_masks.items()))
-                else:
-                    # Merge all returned ROIs into one mask under requested label
-                    merged = None
-                    for part in organ_masks.values():
-                        merged = part if merged is None else np.maximum(merged, part)
-                    assert merged is not None
-                    mask_stack = merged
-                    organ_masks = {label: merged}
+                organ_masks = _collapse_organs_to_label(organ_masks, label)
+                if not organ_masks:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"TotalSegmentator produced empty mask for label={label!r}（肺部需检出肺叶 ROI 后合并）",
+                    )
+                label, mask_stack = next(iter(organ_masks.items()))
+                organ_masks = {label: mask_stack}
         elif _is_spleen_request(label, model_id):
             mask_stack = _run_local_spleen_nnunet(volume.array, volume.spacing)
             if mask_stack is not None:
@@ -478,7 +563,11 @@ def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
             image_id=request.image_id,
             version="v2_ai",
             label=organ_label,
-            encoding=f"ai_inference:{model_id}:{model_status}",
+            encoding=(
+                f"ai_inference:{model_id}:{model_status}:suspected_heuristic"
+                if model_status == "tumor_residual_heuristic"
+                else f"ai_inference:{model_id}:{model_status}"
+            ),
             source_mask_ids=[],
             mask_stack=classed,
             volume=volume,

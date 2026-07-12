@@ -12,6 +12,12 @@ const state = {
   restoredMaskSlices: {},
   sliceValueCache: {},
   propagatedSliceLoads: {},
+  /** 重做清空后，禁止自动把已保存/AI 叠加结果写回 2D 画布 */
+  suppressCanvasMaskRestore: {},
+  /** 打开图像时不自动把 AI/传播结果叠到 2D 标注画布（避免“自带标注”） */
+  autoOverlayOnCanvas: false,
+  /** 打开图像时不自动恢复已保存的 JSON Mask 到画布（需手动点「加载」） */
+  autoRestoreSavedMasks: false,
   maskQualityById: {},
   volumeMeta: {},
   volumeErrors: {},
@@ -29,6 +35,9 @@ const state = {
   annotationLabel: "liver",
   annotationLabelId: 1,
   eraseCurrentClassOnly: true,
+  brushRadius: Number(localStorage.getItem("label_brush_radius")) || 4,
+  eraseRadius: Number(localStorage.getItem("label_erase_radius")) || 10,
+  brushCursorPoint: null,
   annotationDrawing: false,
   annotationLastPoint: null,
   annotationShapeStart: null,
@@ -41,8 +50,8 @@ const state = {
     roiMargin: 24,
     minVoxels: 64,
   },
-  magicWandPreset: "soft",
-  magicWandThreshold: 45,
+  magicWandPreset: "liver",
+  magicWandThreshold: 35,
   magicWandMaxPixels: 180000,
   sliceMasks: {},
   pointAnnotations: {},
@@ -56,6 +65,7 @@ const state = {
   recoveringAnnotation: false,
   models: [],
   selectedModelId: "",
+  aiPredictTarget: localStorage.getItem("label_ai_predict_target") || "all",
   inferencePreview: null,
   lastCompareResult: null,
   reviewQueue: [],
@@ -105,11 +115,14 @@ const roleText = {
 
 const DEFAULT_LABEL_CATALOG = [
   { label_id: 0, name: "background", display_name: "背景", color: "#1c2938", sort_order: 0, enabled: true },
-  { label_id: 1, name: "liver", display_name: "肝脏", color: "#00e5b0", sort_order: 1, enabled: true },
-  { label_id: 2, name: "kidney", display_name: "肾脏", color: "#38a3ff", sort_order: 2, enabled: true },
-  { label_id: 3, name: "lung", display_name: "肺部", color: "#ffb020", sort_order: 3, enabled: true },
-  { label_id: 4, name: "tumor", display_name: "肿瘤", color: "#ff4d4f", sort_order: 4, enabled: true },
-  { label_id: 5, name: "spleen", display_name: "脾脏", color: "#b66dff", sort_order: 5, enabled: true },
+  { label_id: 6, name: "heart", display_name: "心", color: "#ff6b8a", sort_order: 1, enabled: true },
+  { label_id: 1, name: "liver", display_name: "肝", color: "#00e5b0", sort_order: 2, enabled: true },
+  { label_id: 5, name: "spleen", display_name: "脾", color: "#b66dff", sort_order: 3, enabled: true },
+  { label_id: 3, name: "lung", display_name: "肺", color: "#ffb020", sort_order: 4, enabled: true },
+  { label_id: 2, name: "kidney", display_name: "肾", color: "#38a3ff", sort_order: 5, enabled: true },
+  { label_id: 7, name: "bone", display_name: "骨", color: "#e2e8f0", sort_order: 6, enabled: true },
+  { label_id: 4, name: "tumor", display_name: "肿瘤", color: "#ff4d4f", sort_order: 7, enabled: true },
+  { label_id: 8, name: "other", display_name: "其他", color: "#94a3b8", sort_order: 8, enabled: true },
 ];
 
 function effectiveLabelCatalog({ includeBackground = true, enabledOnly = true } = {}) {
@@ -137,7 +150,7 @@ function labelColor(labelId) {
 function labelDisplayText(labelId) {
   const item = labelById(labelId);
   if (!item) return `${labelId}`;
-  return `${item.label_id} ${item.display_name || item.name}`;
+  return item.display_name || item.name;
 }
 
 function setActiveAnnotationLabel(labelId) {
@@ -145,6 +158,12 @@ function setActiveAnnotationLabel(labelId) {
   const item = labelById(id);
   state.annotationLabelId = id;
   state.annotationLabel = item?.name || `label_${id}`;
+  const presetKey = LABEL_TO_MAGIC_PRESET[state.annotationLabel];
+  const preset = presetKey ? magicWandPresets[presetKey] : null;
+  if (preset) {
+    state.magicWandPreset = presetKey;
+    state.magicWandThreshold = preset.threshold;
+  }
 }
 
 function canManageUsers() {
@@ -171,18 +190,63 @@ const annotationTools = [
   ["rectangle", "矩形ROI"],
   ["point", "点标注"],
   ["magic", "智能选择"],
-  ["undo", "撤销"],
-  ["redo", "重做"],
+  ["undo", "←"],
+  ["redo", "→"],
+  ["clearAll", "重做"],
   ["clear", "清空"],
 ];
 
+const annotationToolTitles = {
+  undo: "撤销上一步",
+  redo: "恢复（撤销后回溯）",
+  clearAll: "清空全部切片的手动标注",
+  clear: "清空当前切片标注",
+};
+
+/**
+ * 智能选择容差（种子点 HU ± threshold）。
+ * range 文案来自常见 CT 参考 HU（非增强为主，个体/机型/期相会有偏差）：
+ * - 心：心肌/血池约 30~60 HU
+ * - 肝：实质约 45~65 HU
+ * - 脾：实质约 40~60 HU
+ * - 肺：实质约 -900~-500 HU（与软组织对比大，容差更大）
+ * - 肾：皮质/实质约 30~50 HU
+ * - 骨：皮质/松质约 200~1000+ HU
+ * - 肿瘤：密度差异大，默认中等容差，建议再微调
+ */
 const magicWandPresets = {
-  lung: { label: "肺部 / 空气边界", threshold: 100, range: "80~120" },
-  bone: { label: "骨骼", threshold: 180, range: "120~250" },
-  soft: { label: "软组织", threshold: 45, range: "25~50" },
-  vessel: { label: "血管 / 实质器官", threshold: 45, range: "30~60" },
-  brain: { label: "脑窗", threshold: 25, range: "15~35" },
-  custom: { label: "自定义", threshold: 45, range: "10~200" },
+  heart: { label: "心", threshold: 40, range: "参考30~60" },
+  liver: { label: "肝", threshold: 35, range: "参考45~65" },
+  spleen: { label: "脾", threshold: 35, range: "参考40~60" },
+  lung: { label: "肺", threshold: 100, range: "参考-900~-500" },
+  kidney: { label: "肾", threshold: 35, range: "参考30~50" },
+  bone: { label: "骨骼", threshold: 180, range: "参考200~1000+" },
+  tumor: { label: "肿瘤", threshold: 50, range: "异质，建议微调" },
+  soft: { label: "软组织通用", threshold: 45, range: "参考25~50" },
+  custom: { label: "自定义", threshold: 45, range: "10~250" },
+};
+
+const AI_PREDICT_TARGETS = [
+  { value: "all", label: "全部器官" },
+  { value: "heart", label: "心" },
+  { value: "liver", label: "肝" },
+  { value: "spleen", label: "脾" },
+  { value: "lung", label: "肺" },
+  { value: "kidney", label: "肾" },
+  { value: "bone", label: "骨骼" },
+  { value: "tumor", label: "疑似肿瘤" },
+  { value: "other", label: "其他" },
+];
+
+const LABEL_TO_MAGIC_PRESET = {
+  heart: "heart",
+  liver: "liver",
+  spleen: "spleen",
+  lung: "lung",
+  kidney: "kidney",
+  bone: "bone",
+  tumor: "tumor",
+  other: "soft",
 };
 
 const sliceAxes = {
@@ -445,7 +509,9 @@ async function loadImageMasks(imageId, { force = false } = {}) {
     try {
       const data = await apiGet(`/api/image/${imageId}/masks`);
       state.masksByImage[imageId] = data.items || data.masks || [];
-      await restoreSavedMaskContents(imageId, state.masksByImage[imageId]);
+      if (state.autoRestoreSavedMasks && !state.suppressCanvasMaskRestore[imageId]) {
+        await restoreSavedMaskContents(imageId, state.masksByImage[imageId]);
+      }
     } catch (error) {
       console.warn("Mask 列表加载失败，已按空列表处理：", error);
       state.masksByImage[imageId] = [];
@@ -1033,6 +1099,11 @@ async function saveCurrentMask(event) {
   }
 }
 
+function allowCanvasMaskRestore(imageId = activeImage()?.image_id) {
+  if (imageId) delete state.suppressCanvasMaskRestore[imageId];
+  state.autoOverlayOnCanvas = true;
+}
+
 async function loadMaskForEditing(maskId) {
   const image = activeImage();
   if (!image || !maskId) return;
@@ -1049,6 +1120,7 @@ async function loadMaskForEditing(maskId) {
     const axis = sliceAxes[content.axis || mask.axis] ? (content.axis || mask.axis) : "axial";
     if (!width || !height) throw new Error("Mask 尺寸无效");
 
+    allowCanvasMaskRestore(image.image_id);
     state.volumeViewMode = "2d";
     state.activeAxis = axis;
     setCurrentSliceIndex(sliceIndex, axis);
@@ -1152,17 +1224,35 @@ async function runFewShotPropagate(event) {
     showToast("请先选择病例和图像");
     return;
   }
-  const labeled = localLabeledAxialSlices(image);
-  if (labeled.length < state.fewShotMinSlices) {
-    showToast(`请至少标注 ${state.fewShotMinSlices} 层轴位切片（当前 ${labeled.length}）`);
-    return;
-  }
 
   button.disabled = true;
   const previousText = button.textContent;
-  button.textContent = "保存并传播中...";
+  button.textContent = "检查标注中...";
   try {
-    await saveAllAnnotatedMasks(item, image);
+    // 先把本地未保存的切片写入服务器（若本地为空则跳过）
+    const localLabeled = localLabeledAxialSlices(image);
+    if (localLabeled.length) {
+      button.textContent = "保存并传播中...";
+      try {
+        await saveAllAnnotatedMasks(item, image);
+      } catch (error) {
+        // 本地可能只有空壳，不阻断：传播本身读的是服务器 v1_manual
+        console.warn("传播前保存本地标注跳过：", error);
+      }
+    }
+
+    // 与向导面板一致：以服务器已保存轴位层数为准
+    const assist = await refreshLabelingAssist({ silent: true });
+    const serverCount = Number(assist?.workload?.labeled_count);
+    const localCount = localLabeledAxialSlices(image).length;
+    const labeledCount = Number.isFinite(serverCount) ? serverCount : localCount;
+    if (labeledCount < state.fewShotMinSlices) {
+      showToast(
+        `请至少标注 ${state.fewShotMinSlices} 层轴位切片并保存（服务器已保存 ${labeledCount} 层，本地 ${localCount} 层）`,
+      );
+      return;
+    }
+
     button.textContent = "一键传播中...";
     const data = await create3DMaskPreview(item, image);
     if (!data) throw new Error("传播失败");
@@ -1174,7 +1264,8 @@ async function runFewShotPropagate(event) {
     state.volumeViewMode = "3d";
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
-    showToast(`少量标注传播完成：${data.mask_id}（label_type=pseudo）`);
+    allowCanvasMaskRestore(image.image_id);
+    showToast(`少量标注传播完成：${data.mask_id}（基于已保存 ${labeledCount} 层轴位标注）`);
     render();
   } catch (error) {
     showToast(error.message || "一键传播失败");
@@ -1269,7 +1360,8 @@ async function runAIPredict(event) {
   }
 
   await loadModels();
-  const model = selectedModel();
+  const request = resolveAiPredictRequest();
+  const model = request.model;
   if (!model) {
     showToast("暂无可用模型，请先在推理中心确认模型注册表");
     return;
@@ -1277,20 +1369,27 @@ async function runAIPredict(event) {
 
   button.disabled = true;
   const previousText = button.textContent;
-  button.textContent = "预测中...";
+  button.textContent = `预测${request.targetLabel}中...`;
   const isHeavy = String(model.label || "").toLowerCase().includes("spleen") ||
     String(model.model_id || "").toLowerCase().includes("spleen") ||
     String(model.model_id || "").toLowerCase().includes("totalseg") ||
-    String(model.backend || "").toLowerCase().includes("totalsegmentator");
+    String(model.model_id || "").toLowerCase().includes("tumor") ||
+    String(model.backend || "").toLowerCase().includes("totalsegmentator") ||
+    String(model.backend || "").toLowerCase().includes("tumor_residual") ||
+    request.target === "all" ||
+    request.target === "tumor";
   if (isHeavy) {
-    showToast("正在运行 AI 推理（TotalSeg / nnU-Net），CPU 可能需要数分钟，请耐心等待...");
+    const tumorHint = request.target === "tumor"
+      ? "疑似肿瘤启发式：先跑器官再取残差，非诊断结果；CPU 可能需数分钟…"
+      : `正在预测「${request.targetLabel}」（TotalSeg / nnU-Net），CPU 可能需要数分钟…`;
+    showToast(tumorHint);
   }
   try {
     const data = await apiPost("/api/ai/predict", {
       case_id: item.case_id,
       image_id: image.image_id,
       model_id: model.model_id,
-      label: model.label || state.annotationLabel || "label",
+      label: request.label,
       allow_baseline: false,
     }, { timeoutMs: isHeavy ? 30 * 60 * 1000 : 120 * 1000 });
     await loadImageMasks(image.image_id, { force: true });
@@ -1305,6 +1404,7 @@ async function runAIPredict(event) {
     state.volumeViewMode = "3d";
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
+    allowCanvasMaskRestore(image.image_id);
     state.inferencePreview = {
       case_id: item.case_id,
       image_id: image.image_id,
@@ -1314,13 +1414,18 @@ async function runAIPredict(event) {
       model_status: data.model_status,
       backend: data.backend,
     };
-    if (model.label) state.annotationLabel = model.label;
+    if (request.target !== "all") {
+      const catalogItem = effectiveLabelCatalog({ includeBackground: false, enabledOnly: true })
+        .find((entry) => entry.name === request.target);
+      if (catalogItem) setActiveAnnotationLabel(catalogItem.label_id);
+      else state.annotationLabel = request.target;
+    }
     const statusText = data.model_status || data.backend || "unknown";
     const hasAll = Array.isArray(data.organ_labels) && data.organ_labels.includes("全部标注");
     showToast(
       hasAll
-        ? `AI 预测完成 [${statusText}]：已生成「全部标注」分色结果 · ${data.organ_count || 1} 个器官`
-        : `AI 预测完成 [${statusText}]：${data.organ_count || 1} 个器官 · ${data.mask_id} · ${data.model_id}`,
+        ? `AI 预测完成 [${statusText}]：已生成「全部标注」· ${data.organ_count || 1} 个器官`
+        : `AI 预测完成 [${statusText}]：${request.targetLabel} · ${data.mask_id}`,
     );
     if (data.fallback_reason) {
       showToast(`注意：${data.fallback_reason}`);
@@ -1357,6 +1462,7 @@ async function loadV2AiTo2D(event) {
     state.active3DMaskId = aiMask.mask_id;
     state.volumeViewMode = "2d";
     state.propagatedSliceLoads = {};
+    allowCanvasMaskRestore(image.image_id);
     if (aiMask.label) state.annotationLabel = aiMask.label;
     const quality = await loadMaskQuality(aiMask.mask_id).catch(() => null);
     const range = quality?.slice_range;
@@ -1593,6 +1699,7 @@ async function runSmart3DRefine(event) {
     state.volumeViewMode = "3d";
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
+    allowCanvasMaskRestore(image.image_id);
     showToast(`DeepEdit 神经网络修正完成：${data.mask_id} · ${data.model_status || data.refinement_mode}`);
     render();
   } catch (error) {
@@ -1653,6 +1760,7 @@ async function runGraphCutRefine(event) {
     state.volumeViewMode = "3d";
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
+    allowCanvasMaskRestore(image.image_id);
     showToast(`图割修正完成（Random Walker · ${state.annotationLabel}#${state.annotationLabelId}）：${data.mask_id}`);
     render();
   } catch (error) {
@@ -1672,31 +1780,45 @@ async function renderAnnotationMaskIn3D(event) {
     return;
   }
 
-  const masks = await loadImageMasks(image.image_id, { force: true });
-  const hasManualJson = masks.some((mask) => (
-    mask.version === "v1_manual" &&
-    (mask.mask_format === "json" || String(mask.path || "").endsWith(".json"))
-  ));
-  if (!hasManualJson) {
-    showToast("请先回到 2D 切片，画好标注并点击“保存 Mask”");
-    return;
-  }
-
   button.disabled = true;
   const previousText = button.textContent;
-  button.textContent = "生成高亮实体...";
+  button.textContent = "保存并生成 3D…";
   try {
-    const data = await create3DMaskPreview(item, image);
-    if (!data?.mask_id) {
-      throw new Error("3D Mask 未生成");
+    try {
+      await saveAllAnnotatedMasks(item, image);
+    } catch (error) {
+      console.warn("自动保存未完成切片标注：", error);
     }
+    const masks = await loadImageMasks(image.image_id, { force: true });
+    const hasManualJson = masks.some((mask) => (
+      mask.version === "v1_manual" &&
+      (mask.mask_format === "json" || String(mask.path || "").endsWith(".json"))
+    ));
+    if (!hasManualJson) {
+      showToast("请先在 2D 画好标注并点击「保存 Mask」；2D JSON 不能直接出现在 3D 下拉框里");
+      return;
+    }
+
+    // Stack all saved 2D JSON slices into one NIfTI for true “自己标注” highlight
+    // (not AI propagation). Dropdown only lists nii.gz masks.
+    button.textContent = "堆叠 2D→3D…";
+    const data = await apiPost("/api/export_mask_nifti", {
+      case_id: item.case_id,
+      image_id: image.image_id,
+      version: "v1_manual",
+      label: "*",
+      match_any_label: true,
+      output_label: "全部标注",
+    });
+    if (!data?.mask_id) throw new Error("3D Mask 未生成");
     state.active3DMaskId = data.mask_id;
     await loadImageMasks(image.image_id, { force: true });
     await loadCaseVersions(item.case_id, { force: true });
     state.volumeViewMode = "3d";
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
-    showToast(`已高亮显示当前标注：${data.mask_id}`);
+    allowCanvasMaskRestore(image.image_id);
+    showToast(`已把你的 2D 标注堆成 3D 高亮：${data.mask_id}（可在下拉框选择）`);
     render();
   } catch (error) {
     showToast(error.message || "当前标注高亮失败");
@@ -1746,6 +1868,7 @@ async function start3DImageRender(event) {
     state.volumeViewMode = "3d";
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
+    allowCanvasMaskRestore(image.image_id);
     showToast(state.active3DMaskId ? "正在渲染 3D 图像并高亮当前标注" : "正在渲染 3D 图像");
     render();
   } catch (error) {
@@ -2040,26 +2163,42 @@ function activeImage() {
   return images.find((image) => image.image_id === state.activeImageId) || images[0] || null;
 }
 
-function labelList() {
+function labelListOptions() {
   return effectiveLabelCatalog({ includeBackground: false, enabledOnly: true })
     .map((item) => {
       const id = Number(item.label_id);
-      const active = state.annotationLabelId === id;
-      return `<button type="button" class="label-row label-pick ${active ? "active" : ""}" data-pick-label="${id}" title="选择标注类别">
-        <span class="swatch" style="background:${escapeHtml(item.color)}"></span>${escapeHtml(labelDisplayText(id))}
-      </button>`;
+      const selected = state.annotationLabelId === id ? "selected" : "";
+      return `<option value="${id}" ${selected} data-color="${escapeHtml(item.color)}">${escapeHtml(labelDisplayText(id))}</option>`;
     })
     .join("");
 }
 
 function renderLabelPicker() {
+  const color = labelColor(state.annotationLabelId);
   return `
     <div class="label-picker">
-      <div class="label-picker-header">
+      <label class="label-select-field">
         <span>标注类别</span>
-        <strong>${escapeHtml(state.annotationLabel)} #${state.annotationLabelId}</strong>
+        <div class="label-select-row">
+          <span class="swatch" id="activeLabelSwatch" style="background:${escapeHtml(color)}" title="${escapeHtml(color)}"></span>
+          <select id="annotationLabelSelect" title="选择当前标注类别">
+            ${labelListOptions()}
+          </select>
+        </div>
+      </label>
+      <div class="brush-size-controls">
+        <div class="brush-size-row">
+          <label for="brushRadius">画笔粗细</label>
+          <input id="brushRadius" type="range" min="1" max="40" step="1" value="${state.brushRadius}" />
+          <strong id="brushRadiusValue">${state.brushRadius}px</strong>
+        </div>
+        <div class="brush-size-row">
+          <label for="eraseRadius">橡皮粗细</label>
+          <input id="eraseRadius" type="range" min="1" max="60" step="1" value="${state.eraseRadius}" />
+          <strong id="eraseRadiusValue">${state.eraseRadius}px</strong>
+        </div>
       </div>
-      <div class="label-picker-grid">${labelList()}</div>
+      <p class="label-picker-hint">画笔/智能选择等会按当前类别写入，颜色与色块一致。</p>
       <label class="erase-mode-row">
         <input type="checkbox" id="eraseCurrentClassOnly" ${state.eraseCurrentClassOnly ? "checked" : ""} />
         橡皮擦仅清除当前类别
@@ -2249,19 +2388,97 @@ function renderVersionList(versions) {
 
 function renderToolButtons() {
   const allowed = annotationToolsForMode();
-  const toolButtons = allowed
-    .map(([tool, label]) => `<button class="tool-button ${state.annotationTool === tool ? "active" : ""}" data-annotation-tool="${tool}">${label}</button>`)
-    .join("");
-  return `${toolButtons}<button class="tool-button" data-ai-predict>AI预测</button>`;
+  const parts = [];
+  let emittedUndoRedo = false;
+  for (const [tool, label] of allowed) {
+    if (tool === "undo" || tool === "redo") {
+      if (emittedUndoRedo) continue;
+      emittedUndoRedo = true;
+      const undo = allowed.find(([key]) => key === "undo");
+      const redo = allowed.find(([key]) => key === "redo");
+      const pair = [undo, redo].filter(Boolean).map(([key, text]) => {
+        const title = annotationToolTitles[key] || text;
+        return `<button class="tool-button" data-annotation-tool="${key}" title="${title}" aria-label="${title}">${text}</button>`;
+      }).join("");
+      parts.push(`<div class="tool-undo-redo">${pair}</div>`);
+      continue;
+    }
+    const title = annotationToolTitles[tool] || label;
+    parts.push(
+      `<button class="tool-button ${state.annotationTool === tool ? "active" : ""}" data-annotation-tool="${tool}" title="${title}" aria-label="${title}">${label}</button>`,
+    );
+  }
+  return `${parts.join("")}${renderAiPredictControl()}`;
+}
+
+function renderAiPredictControl() {
+  const current = state.aiPredictTarget || "all";
+  const options = AI_PREDICT_TARGETS.map((item) => (
+    `<option value="${escapeHtml(item.value)}" ${current === item.value ? "selected" : ""}>${escapeHtml(item.label)}</option>`
+  )).join("");
+  return `
+    <div class="ai-predict-row">
+      <label class="ai-predict-field" for="aiPredictTarget">
+        <span>AI预测目标</span>
+        <select id="aiPredictTarget" title="选择要预测的器官">
+          ${options}
+        </select>
+      </label>
+      <button type="button" class="tool-button ai-predict-button" data-ai-predict>开始AI预测</button>
+    </div>
+  `;
+}
+
+function resolveAiPredictRequest() {
+  const target = String(state.aiPredictTarget || "all").trim().toLowerCase() || "all";
+  const targetMeta = AI_PREDICT_TARGETS.find((item) => item.value === target);
+  let model = selectedModel();
+  const totalsegModels = state.models.filter((item) => /totalseg|totalsegmentator/i.test(String(item.model_id || item.backend || "")));
+  const isBuiltinDemo = (item) => {
+    const id = String(item?.model_id || "").toLowerCase();
+    const backend = String(item?.backend || "").toLowerCase();
+    return id.startsWith("builtin_") || backend.includes("builtin_ct_threshold");
+  };
+  const matchesTarget = (item) => {
+    const id = String(item.model_id || "").toLowerCase();
+    const label = String(item.label || "").toLowerCase();
+    return id.includes(target) || label === target || label.includes(target);
+  };
+  if (target === "all") {
+    const multi = totalsegModels.find((item) => {
+      const id = String(item.model_id || "").toLowerCase();
+      return /totalseg_(total|all|organs|multi)/.test(id) || id.endsWith("_total") || id.endsWith("_organs");
+    }) || totalsegModels[0];
+    if (multi) model = multi;
+  } else if (target === "tumor") {
+    // 疑似肿瘤：走器官残差启发式（后端会先跑 TotalSeg organs）
+    const heuristic = state.models.find((item) => String(item.model_id || "").toLowerCase() === "tumor_residual_heuristic");
+    const organsModel = totalsegModels.find((item) => {
+      const id = String(item.model_id || "").toLowerCase();
+      return id.includes("organs") || id.endsWith("_organs");
+    });
+    model = heuristic || organsModel || totalsegModels[0] || model;
+  } else {
+    // 单器官优先 TotalSeg / 真实后端；不要命中 builtin_bone / builtin_lung（无真实权重）
+    const namedTotalseg = totalsegModels.find(matchesTarget);
+    const namedReal = state.models.find((item) => matchesTarget(item) && !isBuiltinDemo(item));
+    model = namedTotalseg || namedReal || totalsegModels[0] || model;
+  }
+  return {
+    target,
+    targetLabel: targetMeta?.label || target,
+    model,
+    label: target === "all" ? "all" : target,
+  };
 }
 
 function annotationToolsForMode() {
   if (state.annotationMode === "coarse") {
-    const allowed = new Set(["rectangle", "magic", "undo", "redo", "clear"]);
+    const allowed = new Set(["rectangle", "magic", "undo", "redo", "clearAll", "clear"]);
     return annotationTools.filter(([tool]) => allowed.has(tool));
   }
   if (state.annotationMode === "scribble") {
-    const allowed = new Set(["brush", "erase", "smartErase", "point", "undo", "redo", "clear"]);
+    const allowed = new Set(["brush", "erase", "smartErase", "point", "undo", "redo", "clearAll", "clear"]);
     return annotationTools.filter(([tool]) => allowed.has(tool));
   }
   return annotationTools;
@@ -2335,19 +2552,21 @@ function renderFewShotWizard(image, volume) {
         <div><span>距最少还差</span><strong>${remaining}</strong></div>
         <div><span>预估精标剩余</span><strong>${estimated}</strong></div>
       </div>
-      <div class="action-stack" style="margin-top:10px">
+      <div class="few-shot-actions action-stack">
         <button class="primary-button" data-few-shot-propagate ${image && canAnnotate() && ready ? "" : "disabled"}>
           ${ready ? "一键传播 → v3_preview" : `还需标 ${remaining} 层`}
         </button>
         <button class="ghost-button" data-refresh-labeling-assist ${image ? "" : "disabled"}>刷新推荐</button>
       </div>
       <div class="al-recommend-list">
-        <span>下一层推荐（不稳定连通域 / 熵代理）</span>
-        ${recommendations.length ? recommendations.map((item) => `
-          <button type="button" class="al-slice-chip" data-jump-slice="${item.slice_index}" title="${escapeHtml(item.reason)} score=${item.score}">
-            层 ${item.slice_index + 1}<small>${escapeHtml(item.reason)}</small>
-          </button>
-        `).join("") : `<small>保存稀疏标注后点击「刷新推荐」</small>`}
+        <span>下一层推荐</span>
+        <div class="al-recommend-chips">
+          ${recommendations.length ? recommendations.map((item) => `
+            <button type="button" class="al-slice-chip" data-jump-slice="${item.slice_index}" title="${escapeHtml(item.reason)} score=${item.score}">
+              层 ${item.slice_index + 1}<small>${escapeHtml(item.reason)}</small>
+            </button>
+          `).join("") : `<small>保存几层标注后点「刷新推荐」，系统会提示优先标哪几层。</small>`}
+        </div>
       </div>
     </div>
   `;
@@ -2359,7 +2578,7 @@ function annotationToolLabel(tool = state.annotationTool) {
 
 function renderMagicWandControls() {
   const options = Object.entries(magicWandPresets)
-    .map(([key, preset]) => `<option value="${key}" ${state.magicWandPreset === key ? "selected" : ""}>${preset.label} (${preset.range})</option>`)
+    .map(([key, preset]) => `<option value="${key}" ${state.magicWandPreset === key ? "selected" : ""}>${preset.label}（${preset.range}）</option>`)
     .join("");
   return `
     <div class="magic-wand-controls">
@@ -2367,11 +2586,12 @@ function renderMagicWandControls() {
         <label for="magicPreset">智能场景</label>
         <select id="magicPreset">${options}</select>
       </div>
-      <div class="magic-control-row">
+      <div class="magic-control-row threshold-row">
         <label for="magicThreshold">智能阈值</label>
-        <input id="magicThreshold" type="range" min="10" max="200" step="1" value="${state.magicWandThreshold}" />
+        <input id="magicThreshold" type="range" min="10" max="250" step="1" value="${state.magicWandThreshold}" />
         <strong id="magicThresholdValue">HU ± ${state.magicWandThreshold}</strong>
       </div>
+      <p class="label-picker-hint">点选后按「种子 HU ± 阈值」生长；换标注类别会自动匹配场景。</p>
     </div>
   `;
 }
@@ -2539,12 +2759,14 @@ function render3DViewer(item, image, volume, masks = []) {
       <div>
         <span>3D Mask 选中高亮</span>
         <strong>${active3DMask ? `${active3DMask.mask_id} · ${active3DMask.version}` : "暂无 3D Mask"}</strong>
-        <label class="mask-select-row" for="active3DMaskSelect">选择 Mask</label>
+        <label class="mask-select-row" for="active3DMaskSelect">选择 Mask（仅 nii.gz）</label>
         <select id="active3DMaskSelect" ${niftiMasks.length ? "" : "disabled"}>${maskOptions}</select>
-        <code>${active3DMask ? active3DMask.path : "主路径：2D 稀疏标注 → 传播 → 2D 回看修正；3D 负责可视化与闭环，不做体素画笔"}</code>
+        <code>${active3DMask
+          ? active3DMask.path
+          : "手动画的是 2D JSON，不能直接出现在此列表。请点右侧按钮：把已保存的 2D 标注堆成 3D 后再选。"}</code>
         ${renderMaskQualitySummary(active3DMask)}
       </div>
-      <button class="primary-button" data-render-annotation-3d ${canRender ? "" : "disabled"}>高亮显示当前标注</button>
+      <button class="primary-button" data-render-annotation-3d ${canRender ? "" : "disabled"}>用我的2D标注生成3D高亮</button>
     </div>
   `;
   return `
@@ -2781,6 +3003,10 @@ function setAnnotationTool(tool) {
     clearAnnotationCanvas();
     return;
   }
+  if (tool === "clearAll") {
+    clearAllManualAnnotations();
+    return;
+  }
   if (tool === "undo") {
     undoAnnotation();
     return;
@@ -2898,6 +3124,96 @@ function clearAnnotationCanvas() {
   state.annotationPolygonPreviewPoint = null;
   state.annotationPreviewRect = null;
   showToast("当前切片标注已清空");
+}
+
+/** 「重做」：清空当前图像全部切片的手动标注（需确认），并阻止自动叠加回灌。 */
+async function clearAllManualAnnotations() {
+  const image = activeImage();
+  if (!image) {
+    showToast("请先打开图像");
+    return;
+  }
+  const imageId = image.image_id;
+  const maskCount = Object.keys(state.sliceMasks[imageId] || {}).length;
+  const pointSlices = Object.values(state.pointAnnotations[imageId] || {});
+  const pointCount = pointSlices.reduce((sum, pts) => sum + (pts?.length || 0), 0);
+  const negCount = Object.values(state.negativeScribbles[imageId] || {}).reduce(
+    (sum, pts) => sum + (pts?.length || 0),
+    0,
+  );
+  const savedJsonMasks = (state.masksByImage[imageId] || []).filter((mask) => (
+    mask.version === "v1_manual"
+    && (mask.mask_format === "json" || String(mask.path || "").endsWith(".json"))
+  ));
+  const hasOverlay = Boolean(latestOverlay3DMask(state.masksByImage[imageId] || []));
+  if (!maskCount && !pointCount && !negCount && !savedJsonMasks.length && !hasOverlay) {
+    showToast("当前没有可清空的手动标注");
+    return;
+  }
+  const ok = window.confirm(
+    "确认清空当前图像全部切片的标注？\n"
+    + "将清除所有切片画布内容，并停止自动叠加已保存/AI 结果到 2D 画布。\n"
+    + (savedJsonMasks.length ? `同时删除服务器上 ${savedJsonMasks.length} 条已保存的 v1_manual 切片 Mask。\n` : "")
+    + "此操作后无法通过「←」撤销恢复。",
+  );
+  if (!ok) return;
+
+  // 本地：每个切片清零并移除
+  const imageMasks = state.sliceMasks[imageId] || {};
+  for (const sliceKey of Object.keys(imageMasks)) {
+    const mask = imageMasks[sliceKey];
+    if (mask?.data) mask.data.fill(0);
+  }
+  state.sliceMasks[imageId] = {};
+  state.pointAnnotations[imageId] = {};
+  state.negativeScribbles[imageId] = {};
+  state.undoStack = [];
+  state.redoStack = [];
+  state.annotationDrawing = false;
+  state.annotationLastPoint = null;
+  state.annotationShapeStart = null;
+  state.annotationPolygonPoints = [];
+  state.annotationPolygonPreviewPoint = null;
+  state.annotationPreviewRect = null;
+  state.suppressCanvasMaskRestore[imageId] = true;
+  state.autoOverlayOnCanvas = false;
+  delete state.restoredMaskSlices[imageId];
+
+  // 清除该图像相关的自动回灌缓存，避免换层时再次写入
+  for (const key of Object.keys(state.propagatedSliceLoads)) {
+    if (key.startsWith(`${imageId}:`)) delete state.propagatedSliceLoads[key];
+  }
+  for (const mask of state.masksByImage[imageId] || []) {
+    delete state.loadedMaskContents[mask.mask_id];
+  }
+
+  // 删除服务器上已保存的手动 JSON 切片，避免刷新后又恢复
+  let deleted = 0;
+  for (const mask of savedJsonMasks) {
+    try {
+      await apiDelete(`/api/mask/${mask.mask_id}`);
+      deleted += 1;
+      delete state.loadedMaskContents[mask.mask_id];
+    } catch (error) {
+      console.warn(`删除 Mask 失败：${mask.mask_id}`, error);
+    }
+  }
+  if (deleted) {
+    try {
+      await loadImageMasks(imageId, { force: true });
+    } catch (error) {
+      console.warn("刷新 Mask 列表失败：", error);
+    }
+  }
+
+  renderCurrentSliceMask();
+  updateAnnotationMaskStats();
+  showToast(
+    deleted
+      ? `已清空全部切片标注，并删除 ${deleted} 条已保存 Mask`
+      : "已清空全部切片标注（已禁用自动叠加回灌）",
+  );
+  render();
 }
 
 function clampViewerZoom(value) {
@@ -3036,14 +3352,73 @@ function pointerToImagePoint(event) {
   };
 }
 
+function activePaintRadius(tool = state.annotationTool) {
+  const isEraser = tool === "erase";
+  const input = $(isEraser ? "#eraseRadius" : "#brushRadius");
+  const fromDom = input ? Number(input.value) : NaN;
+  const fromState = Number(isEraser ? state.eraseRadius : state.brushRadius);
+  const fallback = isEraser ? 10 : 4;
+  const max = isEraser ? 60 : 40;
+  const value = Number.isFinite(fromDom) ? fromDom : (Number.isFinite(fromState) ? fromState : fallback);
+  return clamp(value, 1, max);
+}
+
+function setPaintRadius(kind, rawValue) {
+  const isEraser = kind === "erase";
+  const max = isEraser ? 60 : 40;
+  const fallback = isEraser ? 10 : 4;
+  const value = clamp(Number(rawValue) || fallback, 1, max);
+  if (isEraser) state.eraseRadius = value;
+  else state.brushRadius = value;
+  try {
+    localStorage.setItem(isEraser ? "label_erase_radius" : "label_brush_radius", String(value));
+  } catch {
+    /* ignore quota */
+  }
+  const input = $(isEraser ? "#eraseRadius" : "#brushRadius");
+  const label = $(isEraser ? "#eraseRadiusValue" : "#brushRadiusValue");
+  if (input && input.value !== String(value)) input.value = String(value);
+  if (label) label.textContent = `${value}px`;
+  if (state.brushCursorPoint) renderCurrentSliceMask();
+}
+
+function bindBrushSizeControlsOnce() {
+  if (document.body.dataset.brushSizeBound === "1") return;
+  document.body.dataset.brushSizeBound = "1";
+  document.addEventListener("input", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.id === "brushRadius") setPaintRadius("brush", target.value);
+    if (target.id === "eraseRadius") setPaintRadius("erase", target.value);
+  });
+  document.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.id === "brushRadius") setPaintRadius("brush", target.value);
+    if (target.id === "eraseRadius") setPaintRadius("erase", target.value);
+  });
+}
+
+function syncBrushSizeControlsFromState() {
+  setPaintRadius("brush", state.brushRadius);
+  setPaintRadius("erase", state.eraseRadius);
+}
+
 function annotationStrokeStyle() {
   const color = labelColor(state.annotationLabelId);
   return color;
 }
 
 function hexToRgb(hex) {
-  const normalized = String(hex || "#00e5b0").replace("#", "");
-  const value = Number.parseInt(normalized.length === 3 ? normalized.split("").map((char) => char + char).join("") : normalized, 16);
+  const raw = String(hex || "#00e5b0").trim();
+  const normalized = raw.startsWith("#") ? raw.slice(1) : raw;
+  const expanded = normalized.length === 3
+    ? normalized.split("").map((char) => char + char).join("")
+    : normalized;
+  if (!/^[0-9a-fA-F]{6}$/.test(expanded)) {
+    return { r: 0, g: 229, b: 176 };
+  }
+  const value = Number.parseInt(expanded, 16);
   return {
     r: (value >> 16) & 255,
     g: (value >> 8) & 255,
@@ -3228,6 +3603,7 @@ async function saveAllAnnotatedMasks(item, image) {
 }
 
 async function restoreSavedMaskContents(imageId, masks) {
+  if (state.suppressCanvasMaskRestore[imageId]) return;
   const jsonMasks = [...(masks || [])]
     .filter((mask) => mask.mask_format === "json" || String(mask.path || "").endsWith(".json"))
     .sort((a, b) => String(a.create_time || "").localeCompare(String(b.create_time || "")));
@@ -3264,6 +3640,10 @@ async function restoreSavedMaskContents(imageId, masks) {
 }
 
 async function restorePropagatedSliceMask(imageId) {
+  if (!state.autoOverlayOnCanvas || state.suppressCanvasMaskRestore[imageId]) {
+    renderCurrentSliceMask();
+    return;
+  }
   const image = activeImage();
   const canvas = $("#annotationCanvas");
   if (!image || image.image_id !== imageId || !canvas || !canvas.width || !canvas.height) return;
@@ -3363,7 +3743,7 @@ function undoAnnotation() {
 function redoAnnotation() {
   const next = state.redoStack.pop();
   if (!next) {
-    showToast("没有可重做的操作");
+    showToast("没有可恢复的操作（请先用 ← 撤销）");
     return;
   }
   const current = currentSliceSnapshot();
@@ -3381,6 +3761,7 @@ function renderCurrentSliceMask() {
     drawPointAnnotations(context);
     drawRectanglePreview(context);
     drawPolygonPreview(context);
+    drawBrushSizeCursor(context);
     updateAnnotationMaskStats();
     return;
   }
@@ -3389,18 +3770,35 @@ function renderCurrentSliceMask() {
   for (let index = 0; index < mask.data.length; index += 1) {
     const labelId = mask.data[index];
     if (!labelId) continue;
-    const color = hexToRgb(labelColor(labelId) || annotationStrokeStyle());
+    const color = hexToRgb(labelColor(labelId));
     const offset = index * 4;
     imageData.data[offset] = color.r;
     imageData.data[offset + 1] = color.g;
     imageData.data[offset + 2] = color.b;
-    imageData.data[offset + 3] = 150;
+    // 提高不透明度，避免半透明叠在 CT 上后色相看起来和色块不一致
+    imageData.data[offset + 3] = 210;
   }
   context.putImageData(imageData, 0, 0);
   drawPointAnnotations(context);
   drawRectanglePreview(context);
   drawPolygonPreview(context);
+  drawBrushSizeCursor(context);
   updateAnnotationMaskStats();
+}
+
+function drawBrushSizeCursor(context) {
+  if (!context || !state.brushCursorPoint) return;
+  if (state.annotationTool !== "brush" && state.annotationTool !== "erase") return;
+  const radius = activePaintRadius(state.annotationTool);
+  context.save();
+  context.strokeStyle = state.annotationTool === "erase" ? "rgba(255, 77, 79, 0.95)" : "rgba(255, 255, 255, 0.95)";
+  context.fillStyle = state.annotationTool === "erase" ? "rgba(255, 77, 79, 0.12)" : "rgba(0, 229, 176, 0.12)";
+  context.lineWidth = 1.5;
+  context.beginPath();
+  context.arc(state.brushCursorPoint.x, state.brushCursorPoint.y, radius, 0, Math.PI * 2);
+  context.fill();
+  context.stroke();
+  context.restore();
 }
 
 function drawPointAnnotations(context) {
@@ -3561,7 +3959,7 @@ function recordSmartEraseRegion(selectedIndices, width, seedPoint) {
 function paintMaskLine(from, to, tool = state.annotationTool) {
   if (!from || !to) return;
   const isEraser = tool === "erase";
-  const radius = isEraser ? 10 : 4;
+  const radius = activePaintRadius(tool);
   const labelId = isEraser ? 0 : state.annotationLabelId;
   const distance = Math.hypot(to.x - from.x, to.y - from.y);
   const steps = Math.max(1, Math.ceil(distance / Math.max(1, radius * 0.6)));
@@ -3907,6 +4305,12 @@ function handleAnnotationPointerMove(event) {
   }
   const point = pointerToImagePoint(event);
   if (point) updateAnnotationCoordinate(point);
+  if ((state.annotationTool === "brush" || state.annotationTool === "erase") && point) {
+    state.brushCursorPoint = point;
+    if (!state.annotationDrawing) {
+      renderCurrentSliceMask();
+    }
+  }
   if (state.annotationTool === "polygon" && state.annotationPolygonPoints.length && point) {
     state.annotationPolygonPreviewPoint = point;
     renderCurrentSliceMask();
@@ -4992,6 +5396,14 @@ function render() {
       render();
     });
   });
+  const annotationLabelSelect = $("#annotationLabelSelect");
+  if (annotationLabelSelect) {
+    annotationLabelSelect.addEventListener("change", () => {
+      setActiveAnnotationLabel(annotationLabelSelect.value);
+      render();
+    });
+  }
+  syncBrushSizeControlsFromState();
   const eraseCurrentClassOnly = $("#eraseCurrentClassOnly");
   if (eraseCurrentClassOnly) {
     eraseCurrentClassOnly.addEventListener("change", () => {
@@ -5105,10 +5517,20 @@ function render() {
   if (fusionMaskButton) {
     fusionMaskButton.addEventListener("click", approveFusionMask);
   }
-  const aiPredictButton = $("[data-ai-predict]");
-  if (aiPredictButton) {
-    aiPredictButton.addEventListener("click", runAIPredict);
+  const aiPredictTarget = $("#aiPredictTarget");
+  if (aiPredictTarget) {
+    aiPredictTarget.addEventListener("change", () => {
+      state.aiPredictTarget = aiPredictTarget.value || "all";
+      try {
+        localStorage.setItem("label_ai_predict_target", state.aiPredictTarget);
+      } catch {
+        /* ignore */
+      }
+    });
   }
+  document.querySelectorAll("[data-ai-predict]").forEach((button) => {
+    button.addEventListener("click", runAIPredict);
+  });
   const loadV2AiButton = $("[data-load-v2-ai]");
   if (loadV2AiButton) {
     loadV2AiButton.addEventListener("click", loadV2AiTo2D);
@@ -5147,6 +5569,7 @@ function render() {
       state.active3DMaskId = active3DMaskSelect.value || null;
       state.volumeLoadingKey = null;
       state.propagatedSliceLoads = {};
+      allowCanvasMaskRestore();
       render();
     });
   }
@@ -5350,7 +5773,7 @@ async function startVolumeViewer(image) {
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/volume_viewer.js?v=gesture-20260712`);
+    const module = await import(`/frontend/volume_viewer.js?v=lung-vtk-fix-20260712`);
     if (maskId) {
       loadMaskQuality(maskId)
         .then(() => updateMaskQualitySummary(maskId))
@@ -5408,6 +5831,9 @@ function bindNavigation() {
 async function init() {
   $("#currentDate").textContent = new Date().toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
   bindNavigation();
+  bindBrushSizeControlsOnce();
+  state.brushRadius = clamp(Number(localStorage.getItem("label_brush_radius")) || 4, 1, 40);
+  state.eraseRadius = clamp(Number(localStorage.getItem("label_erase_radius")) || 10, 1, 60);
   window.addEventListener("resize", () => resizeAnnotationCanvas());
   await restoreSession();
   await refreshLabels();

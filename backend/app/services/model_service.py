@@ -68,6 +68,17 @@ BUILTIN_MODELS: list[dict[str, Any]] = [
         "builtin": True,
     },
     {
+        "model_id": "tumor_residual_heuristic",
+        "version": "heuristic_v1",
+        "label": "tumor",
+        "display_name": "疑似肿瘤（器官残差启发式）",
+        "backend": "tumor_residual_heuristic",
+        "description": "先跑 TotalSeg 器官，再对体内−器官−骨−肺的软组织残差取连通域。仅辅助标注，非诊断结果。",
+        "dice": None,
+        "path": None,
+        "builtin": True,
+    },
+    {
         "model_id": "spleen_nnunetv2_task506",
         "version": "task506_2d",
         "label": "spleen",

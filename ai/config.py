@@ -86,8 +86,8 @@ TOTALSEG_PYTHON = os.environ.get(
     "TOTALSEG_PYTHON",
     str(SPLEEN_NNUNET_ROOT / "venv_nnunet_cpu" / "Scripts" / "python.exe"),
 )
-TOTALSEG_DEVICE = os.environ.get("TOTALSEG_DEVICE", "auto")
-TOTALSEG_FAST = os.environ.get("TOTALSEG_FAST", "")  # empty = auto (fast on CPU)
+TOTALSEG_DEVICE = os.environ.get("TOTALSEG_DEVICE", "auto")  # auto: prefer GPU via TOTALSEG_PYTHON, else CPU
+TOTALSEG_FAST = os.environ.get("TOTALSEG_FAST", "")  # empty = auto (fast on CPU, full on GPU)
 TOTALSEG_TIMEOUT_SECONDS = int(os.environ.get("TOTALSEG_TIMEOUT_SECONDS", "1800"))
 
 # Example label path pattern:

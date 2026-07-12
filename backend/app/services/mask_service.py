@@ -447,9 +447,10 @@ def get_mask_volume_data(mask_id: str, max_dim: int = 176) -> dict[str, Any]:
     unique_labels = sorted({int(v) for v in np.unique(raw) if int(v) > 0})
     label_name = str(record.get("label") or "").strip().lower()
     is_named_multi = label_name in {"全部标注", "all_labels", "multiclass", "all", "alllabels"}
-    multiclass = is_named_multi or (
-        bool(unique_labels) and max(unique_labels) > 1 and set(unique_labels) != {255}
-    )
+    # Single-organ AI masks store voxels as label_id (e.g. lung=3), not 0/1.
+    # That must NOT be treated as multiclass — otherwise 3D forces WebGL volume
+    # and skips VTK mesh highlight.
+    multiclass = is_named_multi or (len(unique_labels) > 1 and set(unique_labels) != {255})
     if multiclass:
         downsampled, strides = _downsample_mask_volume(raw, max_dim=max_dim, preserve_labels=True)
         texture_values = downsampled.astype(np.uint8, copy=False)
@@ -1484,11 +1485,20 @@ def export_mask_nifti(request: ExportMaskNiftiRequest) -> ExportMaskNiftiRespons
             detail=f"Unsupported mask version: {version}. Use one of {sorted(VALID_MASK_VERSIONS)}",
         )
     label = _normalize_label(request.label)
+    match_any = bool(request.match_any_label or label in {"*", "all", "全部标注"})
+    output_label = str(request.output_label or "").strip() or ("全部标注" if match_any else label)
     depth, height, width = volume.array.shape[:3]
     mask_stack = np.zeros((depth, height, width), dtype=np.uint8)
 
     masks = _load_masks()
-    json_records = _json_mask_records(masks, request.case_id, request.image_id, version, label)
+    json_records = _json_mask_records(
+        masks,
+        request.case_id,
+        request.image_id,
+        version,
+        label,
+        match_any_label=match_any,
+    )
     if not json_records:
         raise HTTPException(status_code=404, detail="No saved JSON slice masks found for this image/version/label")
 
@@ -1499,16 +1509,20 @@ def export_mask_nifti(request: ExportMaskNiftiRequest) -> ExportMaskNiftiRespons
         for slice_index, slice_mask in sparse_slices.items():
             _merge_axis_slice_into_volume(mask_stack, axis, slice_index, slice_mask)
 
+    if not np.any(mask_stack):
+        raise HTTPException(status_code=422, detail="Stacked 2D annotations produced an empty 3D mask")
+
     mask, mask_path = _append_3d_mask_record(
         masks=masks,
         request_case_id=request.case_id,
         image_id=request.image_id,
         version=version,
-        label=label,
-        encoding="3d_nifti",
+        label=output_label,
+        encoding="3d_nifti_from_json_slices",
         source_mask_ids=source_mask_ids,
         mask_stack=mask_stack,
         volume=volume,
+        label_type="dense",
     )
     return ExportMaskNiftiResponse(
         success=True,

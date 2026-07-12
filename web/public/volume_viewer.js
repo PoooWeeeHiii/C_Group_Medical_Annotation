@@ -1606,13 +1606,30 @@ function renderWithWebGL({
   gesturePanel.innerHTML = `
     <button type="button" class="ghost-button" data-gesture-toggle>开启手势控制</button>
     <div class="gesture-body hidden" data-gesture-body>
-      <video class="gesture-video" data-gesture-video playsinline muted></video>
+      <div class="gesture-video-wrap">
+        <video class="gesture-video" data-gesture-video playsinline muted></video>
+        <canvas class="gesture-overlay" data-gesture-overlay></canvas>
+        <div class="gesture-frame-guide" aria-hidden="true"></div>
+      </div>
       <div class="gesture-status" data-gesture-status>摄像头未开启</div>
+      <div class="gesture-coach" data-gesture-coach>
+        <strong data-coach-title>准备中</strong>
+        <p data-coach-tip>点击上方按钮开启摄像头后，按步骤操作。</p>
+      </div>
+      <div class="gesture-progress-wrap">
+        <div class="gesture-progress-label"><span>校准进度</span><span data-calibrate-pct>0%</span></div>
+        <div class="gesture-progress-track"><div class="gesture-progress-bar" data-calibrate-bar></div></div>
+      </div>
+      <div class="gesture-actions">
+        <button type="button" class="primary-button" data-gesture-guide>开始引导校准</button>
+        <button type="button" class="ghost-button" data-gesture-instant>一键设为中心</button>
+        <button type="button" class="ghost-button hidden" data-gesture-cancel-cal>取消校准</button>
+      </div>
+      <div class="gesture-live" data-gesture-live>当前手势：-</div>
       <div class="gesture-hint">
-        <div>张开手掌静止 ≈1s：校准中心</div>
-        <div>舒展手指：向体内推进 · 收缩：向体外拉远</div>
-        <div>OK/握拳：选中光标下器官 · 比耶：隔离/取消隔离</div>
-        <div>竖大拇指：重置视角</div>
+        <div><b>引导校准：</b>手进绿框 → 五指张开 → 静止约 0.5 秒</div>
+        <div><b>一键设为中心：</b>手在画面中时，立刻把当前位置设为中心</div>
+        <div>舒展手指：向体内 · 收缩：向体外 · OK/握拳：选中 · 比耶：隔离 · 👍：重置</div>
       </div>
       <div class="gesture-organ" data-gesture-organ>悬停器官：-</div>
       <div class="gesture-selected" data-gesture-selected>已选中：无</div>
@@ -1659,6 +1676,99 @@ function renderWithWebGL({
     }
   }
 
+  function updateCoachUi(frame) {
+    const coach = frame.coach || {};
+    const titleEl = gesturePanel.querySelector("[data-coach-title]");
+    const tipEl = gesturePanel.querySelector("[data-coach-tip]");
+    const liveEl = gesturePanel.querySelector("[data-gesture-live]");
+    const pctEl = gesturePanel.querySelector("[data-calibrate-pct]");
+    const barEl = gesturePanel.querySelector("[data-calibrate-bar]");
+    const cancelBtn = gesturePanel.querySelector("[data-gesture-cancel-cal]");
+    const guideBtn = gesturePanel.querySelector("[data-gesture-guide]");
+    const coachBox = gesturePanel.querySelector("[data-gesture-coach]");
+    if (titleEl) titleEl.textContent = coach.title || "准备中";
+    if (tipEl) tipEl.textContent = coach.tip || "";
+    if (liveEl) {
+      liveEl.textContent = frame.present
+        ? `当前手势：${frame.gestureText || frame.gesture || "-"} · 伸展 ${frame.extendedCount ?? "-"}/4 指`
+        : "当前手势：未检测到手";
+    }
+    const progress = Number(frame.calibrateProgress || 0);
+    if (pctEl) pctEl.textContent = `${Math.round(progress * 100)}%`;
+    if (barEl) barEl.style.width = `${Math.round(progress * 100)}%`;
+    if (coachBox) coachBox.classList.toggle("ok", Boolean(coach.ok));
+    if (coachBox) coachBox.classList.toggle("warn", !coach.ok);
+    if (cancelBtn) cancelBtn.classList.toggle("hidden", !frame.calibrateMode);
+    if (guideBtn) guideBtn.textContent = frame.calibrateMode ? "校准进行中…" : "开始引导校准";
+  }
+
+  function drawHandOverlay(landmarks) {
+    const videoEl = gesturePanel.querySelector("[data-gesture-video]");
+    const overlay = gesturePanel.querySelector("[data-gesture-overlay]");
+    if (!videoEl || !overlay) return;
+    const width = videoEl.clientWidth || 240;
+    const height = videoEl.clientHeight || 180;
+    if (overlay.width !== width || overlay.height !== height) {
+      overlay.width = width;
+      overlay.height = height;
+    }
+    const ctx = overlay.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, width, height);
+    if (!landmarks) return;
+    const edges = [
+      [0, 1], [1, 2], [2, 3], [3, 4],
+      [0, 5], [5, 6], [6, 7], [7, 8],
+      [0, 9], [9, 10], [10, 11], [11, 12],
+      [0, 13], [13, 14], [14, 15], [15, 16],
+      [0, 17], [17, 18], [18, 19], [19, 20],
+      [5, 9], [9, 13], [13, 17],
+    ];
+    ctx.strokeStyle = "rgba(0, 229, 176, 0.9)";
+    ctx.fillStyle = "rgba(0, 194, 255, 0.95)";
+    ctx.lineWidth = 2;
+    for (const [a, b] of edges) {
+      const pa = landmarks[a];
+      const pb = landmarks[b];
+      if (!pa || !pb) continue;
+      ctx.beginPath();
+      ctx.moveTo((1 - pa.x) * width, pa.y * height);
+      ctx.lineTo((1 - pb.x) * width, pb.y * height);
+      ctx.stroke();
+    }
+    for (const point of landmarks) {
+      ctx.beginPath();
+      ctx.arc((1 - point.x) * width, point.y * height, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function syncCalibrateButtons() {
+    const inCal = Boolean(gestureController?.isCalibrateMode?.());
+    gesturePanel.querySelector("[data-gesture-cancel-cal]")?.classList.toggle("hidden", !inCal);
+  }
+
+  gesturePanel.querySelector("[data-gesture-guide]").addEventListener("click", () => {
+    if (!gestureController?.isRunning()) {
+      gesturePanel.querySelector("[data-gesture-status]").textContent = "请先开启手势控制";
+      return;
+    }
+    gestureController.beginCalibration();
+    syncCalibrateButtons();
+  });
+  gesturePanel.querySelector("[data-gesture-instant]").addEventListener("click", () => {
+    if (!gestureController?.isRunning()) {
+      gesturePanel.querySelector("[data-gesture-status]").textContent = "请先开启手势控制";
+      return;
+    }
+    const ok = gestureController.calibrateNow();
+    if (ok) syncCalibrateButtons();
+  });
+  gesturePanel.querySelector("[data-gesture-cancel-cal]").addEventListener("click", () => {
+    gestureController?.cancelCalibration?.();
+    syncCalibrateButtons();
+  });
+
   gesturePanel.querySelector("[data-gesture-toggle]").addEventListener("click", async () => {
     const button = gesturePanel.querySelector("[data-gesture-toggle]");
     const body = gesturePanel.querySelector("[data-gesture-body]");
@@ -1668,13 +1778,14 @@ function renderWithWebGL({
       cursorEl.classList.add("hidden");
       body.classList.add("hidden");
       button.textContent = "开启手势控制";
+      drawHandOverlay(null);
       return;
     }
     button.disabled = true;
     button.textContent = "加载手势模型…";
     try {
       if (!gestureController) {
-        const module = await import(`/frontend/hand_gesture.js?v=gesture-20260712`);
+        const module = await import(`/frontend/hand_gesture.js?v=gesture-guide-20260712`);
         gestureController = await module.createHandGestureController({
           onStatus: (text) => {
             if (statusEl) statusEl.textContent = text;
@@ -1684,6 +1795,10 @@ function renderWithWebGL({
             if (videoEl && frame.video && videoEl.srcObject !== frame.video.srcObject) {
               videoEl.srcObject = frame.video.srcObject;
             }
+            updateCoachUi(frame);
+            drawHandOverlay(frame.landmarks || null);
+            syncCalibrateButtons();
+
             if (!frame.present) {
               cursorEl.classList.add("hidden");
               return;
@@ -1693,16 +1808,16 @@ function renderWithWebGL({
             cursorEl.style.top = `${frame.cursor.y * 100}%`;
             cursorEl.dataset.gesture = frame.gesture || "move";
 
-            // Depth: openAmount 1 → inside (smaller camDist), 0 → outside.
-            const targetDist = 3.2 - frame.openAmount * 2.55;
-            viewerState.camDist = viewerState.camDist * 0.82 + targetDist * 0.18;
-            viewerState.meshScale = Math.min(1.85, Math.max(0.28, 1.2 / viewerState.camDist));
-
-            // Mild yaw follow when hand moves horizontally.
-            const dx = frame.cursor.x - lastHandX;
-            lastHandX = frame.cursor.x;
-            if (Math.abs(dx) > 0.002 && frame.gesture !== "pinch") {
-              viewerState.yaw += dx * 1.4;
+            // Depth control pauses during guided calibration so user can hold still.
+            if (!frame.calibrateMode) {
+              const targetDist = 3.2 - frame.openAmount * 2.55;
+              viewerState.camDist = viewerState.camDist * 0.82 + targetDist * 0.18;
+              viewerState.meshScale = Math.min(1.85, Math.max(0.28, 1.2 / viewerState.camDist));
+              const dx = frame.cursor.x - lastHandX;
+              lastHandX = frame.cursor.x;
+              if (Math.abs(dx) > 0.002 && frame.gesture !== "pinch") {
+                viewerState.yaw += dx * 1.4;
+              }
             }
 
             const hoverId = pickMaskLabelAtCursor(
@@ -1719,12 +1834,8 @@ function renderWithWebGL({
               hoverSince = now;
             }
             viewerState.hoveredLabelId = hoverId;
-            // Sticky label after brief dwell.
-            if (hoverId && now - hoverSince > 350) {
-              cursorEl.classList.add("dwell");
-            } else {
-              cursorEl.classList.remove("dwell");
-            }
+            if (hoverId && now - hoverSince > 350) cursorEl.classList.add("dwell");
+            else cursorEl.classList.remove("dwell");
 
             if (frame.selectPulse && hoverId > 0) {
               viewerState.selectedLabelId = hoverId;
@@ -1763,6 +1874,7 @@ function renderWithWebGL({
       body.classList.remove("hidden");
       await gestureController.start();
       button.textContent = "关闭手势控制";
+      if (statusEl) statusEl.textContent = "已开启。推荐：点「开始引导校准」或「一键设为中心」";
     } catch (error) {
       if (statusEl) statusEl.textContent = `手势启动失败：${error.message || error}`;
       button.textContent = "开启手势控制";
