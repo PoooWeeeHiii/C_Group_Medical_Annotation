@@ -1583,3 +1583,108 @@ button.label-pick.active {
   .volume-stage { width: 300px; height: 300px; }
   .volume-cube { width: 230px; height: 230px; }
 }
+
+/* Hand gesture 3D control */
+.gesture-panel {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 8;
+  width: min(280px, calc(100% - 24px));
+  display: grid;
+  gap: 8px;
+  pointer-events: auto;
+}
+.gesture-panel > .ghost-button {
+  width: fit-content;
+  background: rgba(5, 14, 26, 0.82);
+}
+.gesture-body {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(5, 14, 26, 0.88);
+  backdrop-filter: blur(10px);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+.gesture-video {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #000;
+  transform: scaleX(-1);
+}
+.gesture-status {
+  color: var(--green);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.gesture-hint {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+  display: grid;
+  gap: 2px;
+}
+.gesture-organ,
+.gesture-selected {
+  font-size: 12px;
+  color: var(--text);
+}
+.gesture-cursor {
+  position: absolute;
+  z-index: 9;
+  width: 22px;
+  height: 22px;
+  margin-left: -11px;
+  margin-top: -11px;
+  pointer-events: none;
+  transform: translate3d(0, 0, 0);
+}
+.gesture-cursor-ring {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 229, 176, 0.95);
+  box-shadow: 0 0 14px rgba(0, 229, 176, 0.55);
+  background: rgba(0, 229, 176, 0.18);
+}
+.gesture-cursor[data-gesture="pinch"] .gesture-cursor-ring {
+  border-color: #ffb020;
+  box-shadow: 0 0 14px rgba(255, 176, 32, 0.55);
+}
+.gesture-cursor[data-gesture="select"] .gesture-cursor-ring,
+.gesture-cursor[data-gesture="fist"] .gesture-cursor-ring {
+  border-color: #ff4d4f;
+  box-shadow: 0 0 16px rgba(255, 77, 79, 0.6);
+}
+.gesture-cursor.calibrating .gesture-cursor-ring {
+  animation: gesturePulse 0.8s ease-in-out infinite;
+}
+.gesture-cursor.dwell .gesture-cursor-ring {
+  transform: scale(1.25);
+}
+.gesture-cursor-label {
+  position: absolute;
+  left: 26px;
+  top: -2px;
+  white-space: nowrap;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(2, 10, 20, 0.92);
+  border: 1px solid var(--line-strong);
+  color: var(--text);
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.gesture-cursor-label.visible {
+  opacity: 1;
+}
+@keyframes gesturePulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.65; }
+}

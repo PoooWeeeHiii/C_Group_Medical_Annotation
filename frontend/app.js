@@ -5350,7 +5350,7 @@ async function startVolumeViewer(image) {
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/volume_viewer.js?v=multiclass-zoom-20260712`);
+    const module = await import(`/frontend/volume_viewer.js?v=gesture-20260712`);
     if (maskId) {
       loadMaskQuality(maskId)
         .then(() => updateMaskQualitySummary(maskId))
@@ -5375,6 +5375,10 @@ async function startVolumeViewer(image) {
       ),
     });
     container.dataset.ready = "true";
+    container.addEventListener("gesture-organ-select", (event) => {
+      const name = event.detail?.name || `label_${event.detail?.labelId}`;
+      showToast(`手势选中器官：${name}`);
+    });
   } catch (error) {
     container.dataset.ready = "false";
     container.innerHTML = `<div class="volume-status error">3D 体渲染加载失败：${error.message}</div>`;
