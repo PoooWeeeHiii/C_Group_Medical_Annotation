@@ -1,33 +1,50 @@
-"""Loss: Dice + BCE — Day4."""
+"""Segmentation losses for platform U-Net."""
 from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
 
-from ai.config import LOSS_BCE_WEIGHT, LOSS_DICE_WEIGHT
 
-
-def dice_loss(pred: torch.Tensor, target: torch.Tensor, smooth: float = 1e-6) -> torch.Tensor:
-    prob = torch.sigmoid(pred)
-    prob = prob.reshape(prob.size(0), -1)
-    target = target.reshape(target.size(0), -1)
-    inter = (prob * target).sum(dim=1)
-    denom = prob.sum(dim=1) + target.sum(dim=1)
-    dice = (2 * inter + smooth) / (denom + smooth)
+def dice_loss(logits: torch.Tensor, target: torch.Tensor, *, num_classes: int | None = None, eps: float = 1e-6) -> torch.Tensor:
+    """Multi-class soft Dice on logits (N,C,H,W) vs target class indices (N,H,W)."""
+    if logits.ndim != 4:
+        raise ValueError("logits must be NCHW")
+    if num_classes is None:
+        num_classes = int(logits.shape[1])
+    probs = torch.softmax(logits, dim=1)
+    if target.ndim == 4 and target.shape[1] == 1:
+        target = target[:, 0]
+    target = target.long()
+    one_hot = F.one_hot(target.clamp(min=0, max=num_classes - 1), num_classes=num_classes)
+    one_hot = one_hot.permute(0, 3, 1, 2).float()
+    dims = (0, 2, 3)
+    intersection = torch.sum(probs * one_hot, dims)
+    cardinality = torch.sum(probs + one_hot, dims)
+    dice = (2.0 * intersection + eps) / (cardinality + eps)
+    # Skip background channel in mean when possible.
+    if num_classes > 1:
+        return 1.0 - dice[1:].mean()
     return 1.0 - dice.mean()
 
 
-def bce_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    positive = target.sum()
-    negative = target.numel() - positive
-    pos_weight = torch.clamp(negative / (positive + 1e-6), min=1.0, max=50.0)
-    return F.binary_cross_entropy_with_logits(pred, target, pos_weight=pos_weight)
+def bce_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Binary case: logits (N,1,H,W) or (N,2,H,W); target (N,H,W) with {0,1}."""
+    if logits.shape[1] == 1:
+        tgt = target.float()
+        if tgt.ndim == 3:
+            tgt = tgt.unsqueeze(1)
+        return F.binary_cross_entropy_with_logits(logits, tgt)
+    # Use CE for 2-class
+    return F.cross_entropy(logits, target.long())
 
 
 def combined_loss(
-    pred: torch.Tensor,
+    logits: torch.Tensor,
     target: torch.Tensor,
-    dice_weight: float = LOSS_DICE_WEIGHT,
-    bce_weight: float = LOSS_BCE_WEIGHT,
+    *,
+    dice_weight: float = 0.5,
+    ce_weight: float = 0.5,
 ) -> torch.Tensor:
-    return dice_weight * dice_loss(pred, target) + bce_weight * bce_loss(pred, target)
+    ce = F.cross_entropy(logits, target.long())
+    dsc = dice_loss(logits, target)
+    return ce_weight * ce + dice_weight * dsc

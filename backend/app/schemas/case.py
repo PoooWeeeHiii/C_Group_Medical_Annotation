@@ -10,6 +10,7 @@ class CaseRecord(BaseModel):
     create_time: str
     source_group: str = "local"
     status: str = "unannotated"
+    reject_note: str | None = None
 
 
 class CaseListItem(CaseRecord):

@@ -4,6 +4,8 @@ from backend.app.schemas.image import ImageDetailResponse
 from backend.app.services.case_service import get_image
 from backend.app.services.medical_image_service import (
     export_volume_file,
+    get_slice_values,
+    get_image_surface_mesh,
     get_volume_metadata,
     get_volume_render_data,
     render_projection_png,
@@ -41,6 +43,29 @@ def read_volume_render_data(
     )
 
 
+@router.get("/image/{image_id}/surface-mesh")
+def read_image_surface_mesh(
+    image_id: str,
+    protocol: str = "bone",
+    max_dim: int = 176,
+    min_component_voxels: int = 512,
+    max_components: int = 3,
+    max_triangles: int = 120000,
+    target_reduction: float = 0.50,
+    smooth_iterations: int = 6,
+) -> dict:
+    return get_image_surface_mesh(
+        image_id=image_id,
+        protocol=protocol,
+        max_dim=max_dim,
+        min_component_voxels=min_component_voxels,
+        max_components=max_components,
+        max_triangles=max_triangles,
+        target_reduction=target_reduction,
+        smooth_iterations=smooth_iterations,
+    )
+
+
 @router.get("/image/{image_id}/vtk-volume")
 def read_legacy_volume_render_data(
     image_id: str,
@@ -66,6 +91,16 @@ def read_image_slice(image_id: str, slice_index: int, window: str = "auto"):
 @router.get("/image/{image_id}/slice/{axis}/{slice_index}.png")
 def read_image_axis_slice(image_id: str, axis: str, slice_index: int, window: str = "auto"):
     return render_slice_png(image_id=image_id, slice_index=slice_index, window=window, axis=axis)
+
+
+@router.get("/image/{image_id}/slice/{slice_index}/values")
+def read_image_slice_values(image_id: str, slice_index: int):
+    return get_slice_values(image_id=image_id, slice_index=slice_index, axis="axial")
+
+
+@router.get("/image/{image_id}/slice/{axis}/{slice_index}/values")
+def read_image_axis_slice_values(image_id: str, axis: str, slice_index: int):
+    return get_slice_values(image_id=image_id, slice_index=slice_index, axis=axis)
 
 
 @router.get("/image/{image_id}/projection/{axis}.png")

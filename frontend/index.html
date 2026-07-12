@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>医学影像标注平台</title>
-    <link rel="stylesheet" href="/frontend/styles.css?v=research-ct-viewer-20260701" />
+    <link rel="stylesheet" href="/frontend/styles.css?v=gesture-20260712" />
   </head>
   <body>
     <div class="app-shell">
@@ -49,7 +49,10 @@
             <h1 id="pageTitle">数据总览</h1>
           </div>
           <div class="topbar-actions">
+            <div class="date-pill" id="userPill">未登录</div>
             <div class="date-pill" id="currentDate"></div>
+            <button class="ghost-button" id="loginButton">登录</button>
+            <button class="ghost-button hidden" id="logoutButton">退出</button>
             <button class="ghost-button" id="refreshButton">刷新</button>
           </div>
         </header>
@@ -58,8 +61,21 @@
       </main>
     </div>
 
+    <div id="loginOverlay" class="login-overlay">
+      <form id="loginForm" class="login-card">
+        <h2>登录标注平台</h2>
+        <p>演示账号：annotator / reviewer / admin，密码均为对应名 + 123</p>
+        <label>用户名<input id="loginUsername" name="username" value="annotator" required /></label>
+        <label>密码<input id="loginPassword" name="password" type="password" value="annotator123" required /></label>
+        <div class="login-actions">
+          <button class="primary-button" type="submit">登录</button>
+          <button class="ghost-button" type="button" id="loginDismiss">稍后</button>
+        </div>
+      </form>
+    </div>
+
     <div id="toast" class="toast" role="status"></div>
 
-    <script src="/frontend/app.js?v=annotation-fallback-20260701"></script>
+    <script src="/frontend/app.js?v=gesture-20260712"></script>
   </body>
 </html>

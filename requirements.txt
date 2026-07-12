@@ -6,23 +6,27 @@ sqlalchemy
 
 # Medical image processing
 numpy
+scipy
 pydicom
 SimpleITK
 opencv-python
 pillow
+vtk
 highdicom
 pynrrd
+nibabel
 
 # AI baseline
 torch
 torchvision
 monai
 scikit-learn
+scikit-image
 # Optional for in-process spleen inference:
 # nnunetv2
 # Otherwise configure SPLEEN_NNUNET_PYTHON to an env that already has nnunetv2.
 
 # Utilities
 python-multipart
+python-dotenv
 pytest
-

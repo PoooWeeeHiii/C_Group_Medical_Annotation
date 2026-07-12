@@ -1,4 +1,4 @@
-"""2D U-Net for lung nodule segmentation — Day4."""
+"""2D U-Net for platform training / inference."""
 from __future__ import annotations
 
 import torch
@@ -6,88 +6,52 @@ import torch.nn as nn
 
 
 class DoubleConv(nn.Module):
-    """Two consecutive 3x3 conv blocks: Conv -> BN -> ReLU -> Conv -> BN -> ReLU."""
-
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.block(x)
-
-
-class Down(nn.Module):
-    """Encoder step: max-pool then double conv."""
-
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.pool_conv = nn.Sequential(
-            nn.MaxPool2d(2),
-            DoubleConv(in_channels, out_channels),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.pool_conv(x)
-
-
-class Up(nn.Module):
-    """Decoder step: upsample, concat skip, double conv."""
-
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-        self.conv = DoubleConv(in_channels, out_channels)
-
-    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
-        x = self.up(x)
-        if x.shape[-2:] != skip.shape[-2:]:
-            diff_y = skip.shape[-2] - x.shape[-2]
-            diff_x = skip.shape[-1] - x.shape[-1]
-            x = nn.functional.pad(
-                x,
-                [diff_x // 2, diff_x - diff_x // 2, diff_y // 2, diff_y - diff_y // 2],
-            )
-        x = torch.cat([skip, x], dim=1)
-        return self.conv(x)
+        return self.net(x)
 
 
 class UNet2D(nn.Module):
-    """
-    Standard 2D U-Net.
-
-    Input : [B, 1, H, W] normalized CT slice
-    Output: [B, 1, H, W] logits (apply sigmoid for probability map)
-    """
-
-    def __init__(self, in_channels: int = 1, out_channels: int = 1, base_channels: int = 64):
+    def __init__(self, in_channels: int = 1, out_channels: int = 2, base: int = 32):
         super().__init__()
-        c = base_channels
-        self.in_conv = DoubleConv(in_channels, c)
-        self.down1 = Down(c, c * 2)
-        self.down2 = Down(c * 2, c * 4)
-        self.down3 = Down(c * 4, c * 8)
-        self.bottleneck = Down(c * 8, c * 16)
-        self.up1 = Up(c * 16, c * 8)
-        self.up2 = Up(c * 8, c * 4)
-        self.up3 = Up(c * 4, c * 2)
-        self.up4 = Up(c * 2, c)
-        self.out_conv = nn.Conv2d(c, out_channels, kernel_size=1)
+        self.enc1 = DoubleConv(in_channels, base)
+        self.enc2 = DoubleConv(base, base * 2)
+        self.enc3 = DoubleConv(base * 2, base * 4)
+        self.enc4 = DoubleConv(base * 4, base * 8)
+        self.pool = nn.MaxPool2d(2)
+        self.bottleneck = DoubleConv(base * 8, base * 16)
+        self.up4 = nn.ConvTranspose2d(base * 16, base * 8, 2, stride=2)
+        self.dec4 = DoubleConv(base * 16, base * 8)
+        self.up3 = nn.ConvTranspose2d(base * 8, base * 4, 2, stride=2)
+        self.dec3 = DoubleConv(base * 8, base * 4)
+        self.up2 = nn.ConvTranspose2d(base * 4, base * 2, 2, stride=2)
+        self.dec2 = DoubleConv(base * 4, base * 2)
+        self.up1 = nn.ConvTranspose2d(base * 2, base, 2, stride=2)
+        self.dec1 = DoubleConv(base * 2, base)
+        self.head = nn.Conv2d(base, out_channels, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x1 = self.in_conv(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.bottleneck(x4)
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
-        return self.out_conv(x)
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        e3 = self.enc3(self.pool(e2))
+        e4 = self.enc4(self.pool(e3))
+        b = self.bottleneck(self.pool(e4))
+        d4 = self.up4(b)
+        d4 = self.dec4(torch.cat([d4, e4], dim=1))
+        d3 = self.up3(d4)
+        d3 = self.dec3(torch.cat([d3, e3], dim=1))
+        d2 = self.up2(d3)
+        d2 = self.dec2(torch.cat([d2, e2], dim=1))
+        d1 = self.up1(d2)
+        d1 = self.dec1(torch.cat([d1, e1], dim=1))
+        return self.head(d1)
