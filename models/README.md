@@ -70,3 +70,39 @@ Output contract:
 ```
 
 Large weights remain local or on a private server/object storage. Do not commit them.
+
+### Bootstrap + TotalSeg training (spleen DeepEdit)
+
+```powershell
+# 1) Init contract-aligned weights (optional if you will train immediately)
+D:\hm_2_spleen\venv_nnunet_cpu\Scripts\python.exe scripts\export_deepedit_init_checkpoint.py
+
+# 2) Train from Dataset606_TotalSeg_Spleen under TOTALSEG_ROOT
+$env:TOTALSEG_ROOT = "D:\hm_2_totalseg"
+D:\hm_2_spleen\venv_nnunet_cpu\Scripts\python.exe scripts\train_deepedit.py --limit 12 --epochs 5 --crop 48 96 96
+
+# 3) Start DeepEdit service (Windows)
+.\scripts\start_deepedit.ps1
+# health: curl http://127.0.0.1:8010/health  → model_loaded=true
+```
+
+## AI Predict: TotalSegmentator
+
+Platform model IDs (select in UI):
+
+- `totalseg_organs` — **推荐**：一次约 24 个器官，每个器官一条 `v2_ai` mask
+- `totalseg_total` — 全量 100+ 结构（更慢）
+- `totalseg_spleen` / `totalseg_liver` / `totalseg_lung` — 单器官
+
+```powershell
+# Install once into the inference env
+D:\hm_2_spleen\venv_nnunet_cpu\Scripts\python.exe -m pip install TotalSegmentator
+
+# .env
+TOTALSEG_PYTHON=D:\hm_2_spleen\venv_nnunet_cpu\Scripts\python.exe
+TOTALSEG_DEVICE=auto
+# TOTALSEG_FAST=true   # recommended on CPU
+```
+
+First prediction downloads official weights. This is **inference**, separate from using TotalSeg zip as DeepEdit training data.
+

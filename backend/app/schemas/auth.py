@@ -28,3 +28,23 @@ class MeResponse(BaseModel):
 class UserListResponse(BaseModel):
     success: bool = True
     items: list[UserPublic]
+
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=64)
+    password: str = Field(min_length=6, max_length=128)
+    role: str = Field(default="annotator")
+
+
+class UserUpdateRequest(BaseModel):
+    username: str | None = Field(default=None, min_length=2, max_length=64)
+    role: str | None = None
+
+
+class UserPasswordRequest(BaseModel):
+    password: str = Field(min_length=6, max_length=128)
+
+
+class UserResponse(BaseModel):
+    success: bool = True
+    user: UserPublic

@@ -182,12 +182,119 @@ def _collect_split_records(
     return records
 
 
+PLATFORM_LABEL_MAP = {
+    "background": 0,
+    "liver": 1,
+    "kidney": 2,
+    "kidney_left": 2,
+    "kidney_right": 2,
+    "lung": 3,
+    "tumor": 4,
+    "spleen": 5,
+    "label": 1,
+    "multiclass": -1,  # already multiclass ids in volume
+}
+
+
+def _platform_label_map() -> dict[str, int]:
+    mapping = dict(PLATFORM_LABEL_MAP)
+    try:
+        from backend.app.services.label_service import label_name_to_id_map
+
+        mapping.update(label_name_to_id_map())
+        mapping["label"] = mapping.get("liver", 1)
+        mapping["multiclass"] = -1
+    except Exception:
+        pass
+    return mapping
+
+
 def _label_map(records: list[dict]) -> dict:
+    platform = _platform_label_map()
     labels = sorted({str(record.get("label") or "label") for record in records})
-    return {
-        "background": 0,
-        **{label: index + 1 for index, label in enumerate(labels)},
-    }
+    mapping = {"background": 0}
+    for label in labels:
+        if label == "multiclass":
+            continue
+        mapping[label] = int(platform.get(label, len(mapping)))
+    # Ensure stable known organs even if not present
+    for name, value in platform.items():
+        if value > 0 and name not in mapping and name not in {"label", "multiclass", "kidney_left", "kidney_right"}:
+            mapping[name] = value
+    return mapping
+
+
+def _ensure_nifti_mask(source_path: Path, target_path: Path, label_value: int = 1, *, preserve_multiclass: bool = False):
+    try:
+        import SimpleITK as sitk
+    except ModuleNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="SimpleITK is required to materialize nnU-Net export") from exc
+
+    image = sitk.ReadImage(str(source_path))
+    array = sitk.GetArrayFromImage(image)
+    if preserve_multiclass or label_value < 0:
+        out_array = array.astype(np.uint8)
+    else:
+        out_array = (array > 0).astype(np.uint8) * int(label_value)
+    out = sitk.GetImageFromArray(out_array)
+    out.CopyInformation(image)
+    _write_sitk_image(out, target_path)
+    return out
+
+
+def _merge_multiclass_masks(
+    mask_records: list[dict],
+    label_to_id: dict[str, int],
+    reference_image,
+) -> tuple[object, dict[int, int]]:
+    """Merge one or more mask NIfTI files into a single multiclass volume."""
+    try:
+        import SimpleITK as sitk
+    except ModuleNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="SimpleITK is required to materialize nnU-Net export") from exc
+
+    ref_array = sitk.GetArrayFromImage(reference_image)
+    merged = np.zeros(ref_array.shape[:3], dtype=np.uint8)
+    class_counts: dict[int, int] = {}
+
+    for record in mask_records:
+        mask_src = _resolve_project_path(str(record.get("mask_path") or ""))
+        if mask_src is None or not mask_src.exists():
+            continue
+        image = sitk.ReadImage(str(mask_src))
+        array = sitk.GetArrayFromImage(image).astype(np.uint8)
+        if array.shape != merged.shape:
+            # Nearest-neighbor resample onto reference
+            resampled = sitk.Resample(
+                image,
+                reference_image,
+                sitk.Transform(),
+                sitk.sitkNearestNeighbor,
+                0,
+                sitk.sitkUInt8,
+            )
+            array = sitk.GetArrayFromImage(resampled).astype(np.uint8)
+
+        label_name = str(record.get("label") or "label")
+        if label_name == "multiclass" or (array.max() > 1 and len(np.unique(array)) > 2):
+            # Keep existing class ids; do not overwrite non-zero with zeros.
+            mask = array > 0
+            merged[mask] = array[mask]
+        else:
+            label_value = int(label_to_id.get(label_name, record.get("label_id") or 1))
+            if label_value <= 0:
+                label_value = 1
+            mask = array > 0
+            merged[mask] = np.uint8(label_value)
+
+    for value in np.unique(merged):
+        vid = int(value)
+        if vid > 0:
+            class_counts[vid] = int(np.count_nonzero(merged == vid))
+
+    out = sitk.GetImageFromArray(merged)
+    out.CopyInformation(reference_image)
+    return out, class_counts
 
 
 def _read_sitk_image(path: Path):
@@ -252,21 +359,6 @@ def _ensure_nifti_image(source_path: Path, target_path: Path, *, image_id: str |
     return image
 
 
-def _ensure_nifti_mask(source_path: Path, target_path: Path, label_value: int = 1):
-    try:
-        import SimpleITK as sitk
-    except ModuleNotFoundError as exc:
-        raise HTTPException(status_code=500, detail="SimpleITK is required to materialize nnU-Net export") from exc
-
-    image = sitk.ReadImage(str(source_path))
-    array = sitk.GetArrayFromImage(image)
-    binary = (array > 0).astype(np.uint8) * int(label_value)
-    out = sitk.GetImageFromArray(binary)
-    out.CopyInformation(image)
-    _write_sitk_image(out, target_path)
-    return out
-
-
 def _spacing_of(image) -> list[float]:
     return [float(value) for value in image.GetSpacing()[:3]]
 
@@ -322,45 +414,48 @@ def _materialize_nnunet(
     for folder in ("imagesTr", "labelsTr", "imagesTs", "labelsTs"):
         (export_root / folder).mkdir(parents=True, exist_ok=True)
 
-    report = DatasetExportReport(export_dir=path_for_api(export_root, PROJECT_ROOT))
-    label_to_id = {str(k): int(v) for k, v in label_map.items() if k != "background"}
+    report = DatasetExportReport(export_dir=path_for_api(export_root, PROJECT_ROOT), multiclass=True)
+    label_to_id = {str(k): int(v) for k, v in label_map.items() if k != "background" and int(v) > 0}
 
+    # Group records by case/image so multiple organ masks become one multiclass NIfTI.
+    groups: dict[tuple[str, str, str, str], list[dict]] = {}
     for record in records:
-        case_id = str(record["case_id"])
-        image_id = str(record["image_id"])
-        mask_id = str(record["mask_id"])
-        nnunet_id = str(record["nnunet_id"])
-        is_test = record["split"] == "test"
+        key = (
+            str(record["case_id"]),
+            str(record["image_id"]),
+            str(record["nnunet_id"]),
+            str(record["split"]),
+        )
+        groups.setdefault(key, []).append(record)
+
+    for (case_id, image_id, nnunet_id, split), group in groups.items():
+        is_test = split == "test"
         image_dir = export_root / ("imagesTs" if is_test else "imagesTr")
         label_dir = export_root / ("labelsTs" if is_test else "labelsTr")
         image_out = image_dir / f"{nnunet_id}_0000.nii.gz"
         label_out = label_dir / f"{nnunet_id}.nii.gz"
+        primary = group[0]
+        mask_id = str(primary["mask_id"])
 
-        image_src = _resolve_project_path(str(record.get("image_path") or ""))
-        mask_src = _resolve_project_path(str(record.get("mask_path") or ""))
+        image_src = _resolve_project_path(str(primary.get("image_path") or ""))
         if image_src is None or not image_src.exists():
             report.missing_masks.append(
                 MissingMaskItem(case_id=case_id, image_id=image_id, version=version, reason="image_file_missing")
             )
             report.skipped_count += 1
             continue
-        if mask_src is None or not mask_src.exists():
-            report.missing_masks.append(
-                MissingMaskItem(case_id=case_id, image_id=image_id, version=version, reason="mask_file_missing")
-            )
-            report.skipped_count += 1
-            continue
 
         try:
             image = _ensure_nifti_image(image_src, image_out, image_id=image_id)
-            label_value = label_to_id.get(str(record.get("label") or "label"), 1)
-            mask = _ensure_nifti_mask(mask_src, label_out, label_value=label_value)
-            check = _check_spacing(image, mask, case_id=case_id, image_id=image_id, mask_id=mask_id)
+            mask_image, class_counts = _merge_multiclass_masks(group, label_to_id, image)
+            _write_sitk_image(mask_image, label_out)
+            for class_id, count in class_counts.items():
+                key = str(class_id)
+                report.class_voxel_counts[key] = int(report.class_voxel_counts.get(key, 0)) + int(count)
+            check = _check_spacing(image, mask_image, case_id=case_id, image_id=image_id, mask_id=mask_id)
             report.spacing_checks.append(check)
-            record["spacing_check"] = check.status
-            if check.status != "ok":
-                # Keep files but mark warning; nnU-Net will fail later if shape mismatches.
-                pass
+            for record in group:
+                record["spacing_check"] = check.status
             report.materialized_files.append(path_for_api(image_out, PROJECT_ROOT))
             report.materialized_files.append(path_for_api(label_out, PROJECT_ROOT))
             report.success_count += 1
@@ -379,25 +474,22 @@ def _materialize_nnunet(
 
     # dataset.json — nnU-Net v2 style
     labels_payload = {"background": 0, **{name: idx for name, idx in label_to_id.items()}}
-    training_count = sum(1 for record in records if record["split"] in {"train", "val"} and record.get("spacing_check") != "pending")
-    # Prefer counting successfully written train/val pairs.
     training_count = len(list((export_root / "imagesTr").glob("*_0000.nii.gz")))
     dataset_json = {
         "name": name or dataset_id,
-        "description": f"Exported from label_platform version={version}",
+        "description": f"Exported from label_platform version={version} (multiclass)",
         "channel_names": {"0": "CT"},
         "labels": labels_payload,
         "numTraining": training_count,
         "file_ending": ".nii.gz",
         "overwrite_image_reader_writer": "SimpleITKIO",
+        "multiclass": True,
     }
     dataset_json_path = export_root / "dataset.json"
     _write_json(dataset_json_path, dataset_json)
 
-    # splits_final.json — train/val identifiers (without _0000 suffix)
     train_nnunet_ids = sorted({str(r["nnunet_id"]) for r in records if r["split"] == "train"})
     val_nnunet_ids = sorted({str(r["nnunet_id"]) for r in records if r["split"] == "val"})
-    # Also include original case lists for readability.
     splits_final = [
         {
             "train": train_nnunet_ids,

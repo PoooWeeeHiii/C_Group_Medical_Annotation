@@ -180,6 +180,8 @@ def _json_mask_records(
     image_id: str,
     version: str,
     label: str,
+    *,
+    match_any_label: bool = False,
 ) -> list[dict]:
     records = [
         mask
@@ -187,7 +189,7 @@ def _json_mask_records(
         if mask.get("case_id") == case_id
         and mask.get("image_id") == image_id
         and mask.get("version") == version
-        and mask.get("label") == label
+        and (match_any_label or mask.get("label") == label)
         and (mask.get("mask_format") == "json" or str(mask.get("path", "")).endswith(".json"))
     ]
     records.sort(key=lambda item: str(item.get("create_time") or ""))
@@ -216,15 +218,19 @@ def _merge_axis_slice_into_volume(
     slice_index: int,
     axis_mask: np.ndarray,
 ) -> None:
-    binary = (axis_mask > 0).astype(np.uint8, copy=False)
+    values = axis_mask.astype(np.uint8, copy=False)
+    painted = values > 0
     if axis == "axial":
-        mask_stack[slice_index] = np.maximum(mask_stack[slice_index], binary)
+        target = mask_stack[slice_index]
+        target[painted] = values[painted]
         return
     if axis == "coronal":
-        mask_stack[:, slice_index, :] = np.maximum(mask_stack[:, slice_index, :], binary)
+        target = mask_stack[:, slice_index, :]
+        target[painted] = values[painted]
         return
     if axis == "sagittal":
-        mask_stack[:, :, slice_index] = np.maximum(mask_stack[:, :, slice_index], binary)
+        target = mask_stack[:, :, slice_index]
+        target[painted] = values[painted]
         return
     raise HTTPException(status_code=400, detail=f"Unsupported slice axis: {axis}")
 
@@ -341,6 +347,7 @@ def _append_3d_mask_record(
     volume,
     annotation_id: str | None = None,
     label_type: str = "pseudo",
+    label_id: int | None = None,
 ) -> tuple[MaskRecord, str]:
     depth, height, width = mask_stack.shape[:3]
     mask_id = next_sqlite_entity_id("Mask", "masks", "mask_id")
@@ -362,6 +369,7 @@ def _append_3d_mask_record(
         "path": mask_path,
         "version": version,
         "label": label,
+        "label_id": label_id,
         "label_type": _normalize_label_type(label_type, default="pseudo"),
         "mask_format": "nii.gz",
         "slice_index": None,
@@ -379,22 +387,31 @@ def _append_3d_mask_record(
     return MaskRecord(**record), mask_path
 
 
-def _downsample_mask_volume(array: np.ndarray, max_dim: int) -> tuple[np.ndarray, tuple[int, int, int]]:
+def _downsample_mask_volume(
+    array: np.ndarray,
+    max_dim: int,
+    *,
+    preserve_labels: bool = False,
+) -> tuple[np.ndarray, tuple[int, int, int]]:
     max_dim = max(64, min(max_dim, 192))
     depth, height, width = array.shape[:3]
     stride_z = max(1, int(np.ceil(depth / max_dim)))
     stride_y = max(1, int(np.ceil(height / max_dim)))
     stride_x = max(1, int(np.ceil(width / max_dim)))
-    binary = (array > 0).astype(np.uint8, copy=False)
+    source = np.asarray(array)
+    if preserve_labels:
+        values = np.clip(source, 0, 255).astype(np.uint8, copy=False)
+    else:
+        values = (source > 0).astype(np.uint8, copy=False)
     if stride_z == stride_y == stride_x == 1:
-        return binary, (stride_z, stride_y, stride_x)
+        return values, (stride_z, stride_y, stride_x)
 
     out_depth = int(np.ceil(depth / stride_z))
     out_height = int(np.ceil(height / stride_y))
     out_width = int(np.ceil(width / stride_x))
     padded_shape = (out_depth * stride_z, out_height * stride_y, out_width * stride_x)
     padded = np.zeros(padded_shape, dtype=np.uint8)
-    padded[:depth, :height, :width] = binary
+    padded[:depth, :height, :width] = values
     pooled = padded.reshape(out_depth, stride_z, out_height, stride_y, out_width, stride_x).max(axis=(1, 3, 5))
     return pooled.astype(np.uint8, copy=False), (stride_z, stride_y, stride_x)
 
@@ -426,10 +443,24 @@ def get_mask_volume_data(mask_id: str, max_dim: int = 176) -> dict[str, Any]:
     array = sitk.GetArrayFromImage(image)
     if array.ndim == 2:
         array = array.reshape((1, array.shape[0], array.shape[1]))
-    values = (array > 0).astype(np.uint8)
-    full_voxel_count = int(np.count_nonzero(values))
-    downsampled, strides = _downsample_mask_volume(values, max_dim=max_dim)
-    texture_values = (downsampled > 0).astype(np.uint8) * 255
+    raw = np.clip(np.asarray(array), 0, 255).astype(np.uint8, copy=False)
+    unique_labels = sorted({int(v) for v in np.unique(raw) if int(v) > 0})
+    label_name = str(record.get("label") or "").strip().lower()
+    is_named_multi = label_name in {"全部标注", "all_labels", "multiclass", "all", "alllabels"}
+    multiclass = is_named_multi or (
+        bool(unique_labels) and max(unique_labels) > 1 and set(unique_labels) != {255}
+    )
+    if multiclass:
+        downsampled, strides = _downsample_mask_volume(raw, max_dim=max_dim, preserve_labels=True)
+        texture_values = downsampled.astype(np.uint8, copy=False)
+        full_voxel_count = int(np.count_nonzero(raw))
+        unique_labels = sorted({int(v) for v in np.unique(downsampled) if int(v) > 0})
+    else:
+        binary = (raw > 0).astype(np.uint8)
+        downsampled, strides = _downsample_mask_volume(binary, max_dim=max_dim, preserve_labels=False)
+        texture_values = (downsampled > 0).astype(np.uint8) * np.uint8(255)
+        full_voxel_count = int(np.count_nonzero(binary))
+        unique_labels = [1] if full_voxel_count else []
     depth, height, width = downsampled.shape[:3]
     spacing = tuple(float(value) for value in image.GetSpacing()[:3])
     stride_z, stride_y, stride_x = strides
@@ -440,6 +471,9 @@ def get_mask_volume_data(mask_id: str, max_dim: int = 176) -> dict[str, Any]:
         "image_id": record.get("image_id"),
         "version": record.get("version"),
         "label": record.get("label"),
+        "label_id": record.get("label_id"),
+        "multiclass": bool(multiclass),
+        "unique_labels": unique_labels,
         "dimensions": [width, height, depth],
         "spacing": [spacing[0] * stride_x, spacing[1] * stride_y, spacing[2] * stride_z],
         "origin": [float(value) for value in image.GetOrigin()[:3]],
@@ -2036,13 +2070,33 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
 
     label = _normalize_label(request.label)
     output_label_type = _normalize_label_type(request.label_type, default="pseudo")
+    label_id = int(request.label_id) if request.label_id is not None else None
     depth, height, width = volume.array.shape[:3]
     masks = _load_masks()
-    json_records = _json_mask_records(masks, request.case_id, request.image_id, source_version, label)
+    match_any = bool(request.match_any_label or label_id is not None or label in {"*", "all", "multiclass"})
+    json_records = _json_mask_records(
+        masks,
+        request.case_id,
+        request.image_id,
+        source_version,
+        label,
+        match_any_label=match_any,
+    )
+    if not json_records and match_any:
+        # Fall back to exact label match if any-label found nothing unexpected
+        json_records = _json_mask_records(masks, request.case_id, request.image_id, source_version, label)
     if not json_records:
         raise HTTPException(status_code=404, detail="No saved sparse JSON masks found for label propagation")
 
     sparse_slices_by_axis, source_mask_ids = _load_sparse_axis_masks(json_records, depth, height, width)
+    if label_id is not None and label_id > 0:
+        for axis_name, axis_slices in sparse_slices_by_axis.items():
+            for slice_index, axis_mask in list(axis_slices.items()):
+                filtered = (axis_mask == label_id).astype(np.uint8)
+                if np.any(filtered):
+                    axis_slices[slice_index] = filtered
+                else:
+                    del axis_slices[slice_index]
     if not any(sparse_slices_by_axis.values()):
         raise HTTPException(status_code=404, detail="No readable sparse masks found for label propagation")
 
@@ -2097,6 +2151,8 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
         for slice_index, slice_mask in negative_slices.items():
             axis_result[slice_index][slice_mask > 0] = 0
         propagated = np.maximum(propagated, _axis_result_to_volume(axis_result, axis))
+    if label_id is not None and label_id > 0:
+        propagated = (propagated > 0).astype(np.uint8) * np.uint8(label_id)
     if request.method == "random_walker":
         encoding = "label_propagation_random_walker_graph"
     elif request.image_guidance or request.method == "image_guided_distance":
@@ -2114,6 +2170,7 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
         mask_stack=propagated,
         volume=volume,
         label_type=output_label_type,
+        label_id=label_id,
     )
     return LabelPropagationResponse(
         success=True,
@@ -2306,6 +2363,30 @@ def deepedit_refine(request: DeepEditRefineRequest) -> DeepEditRefineResponse:
     if response is not None:
         return response
 
+    remote_status = ""
+    remote_message = ""
+    if isinstance(remote_result, dict):
+        remote_status = str(remote_result.get("model_status") or "")
+        remote_message = str(remote_result.get("message") or "")
+
+    if request.require_neural:
+        if not DEEPEDIT_SERVICE_URL:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "DeepEdit neural service is not configured (DEEPEDIT_SERVICE_URL). "
+                    "Start the DeepEdit service, or use「图割修正」(/api/label_propagate) instead."
+                ),
+            )
+        detail = remote_message or remote_status or "DeepEdit service did not return a usable mask"
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"DeepEdit neural refine unavailable: {detail}. "
+                "Check the DeepEdit service /health and weights, or use「图割修正」."
+            ),
+        )
+
     positive_points = list(request.positive_points or [])
     negative_points = list(request.negative_points or [])
     positive_points.extend(_scribble_prompt_points(request.scribbles, "positive"))
@@ -2338,8 +2419,9 @@ def deepedit_refine(request: DeepEditRefineRequest) -> DeepEditRefineResponse:
         refinement_mode="deepedit_fallback_random_walker",
         model_status="fallback_no_deepedit_model",
         model_message=(
-            "DEEPEDIT_SERVICE_URL is not configured; used graph-based random_walker refinement "
-            "with positive/negative prompts saved in the request contract."
+            remote_message
+            or "DeepEdit neural path unavailable; used graph-based random_walker "
+            "(require_neural=false). Prefer「图割修正」for this mode."
         ),
     )
 

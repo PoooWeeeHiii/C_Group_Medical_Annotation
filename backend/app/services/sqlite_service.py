@@ -67,6 +67,12 @@ def init_sqlite_database() -> None:
         connection.executescript(SCHEMA_SQL_PATH.read_text(encoding="utf-8"))
         _ensure_preview_version_supported(connection)
         _ensure_auth_schema(connection)
+        try:
+            from backend.app.services.label_service import ensure_label_schema
+
+            ensure_label_schema(connection)
+        except Exception:
+            pass
 
 
 def _table_sql(connection: sqlite3.Connection, table: str) -> str:

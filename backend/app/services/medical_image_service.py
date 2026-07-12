@@ -226,6 +226,46 @@ def _load_with_simpleitk(path: Path) -> VolumeData:
     return VolumeData(array=array, spacing=spacing, origin=origin, direction=direction, source="SimpleITK")
 
 
+def _load_with_nibabel(path: Path) -> VolumeData:
+    """Fallback for NIfTI files SimpleITK rejects (e.g. non-orthonormal direction)."""
+    import nibabel as nib
+
+    nii = nib.load(str(path))
+    array = np.asanyarray(nii.dataobj)
+    if array.ndim == 3:
+        # nibabel XYZ -> SimpleITK/platform ZYX
+        array = np.transpose(array, (2, 1, 0))
+    elif array.ndim == 2:
+        array = array.reshape((1, array.shape[1], array.shape[0]))
+    array = np.asarray(array, dtype=np.float32)
+    zooms = [float(v) for v in nii.header.get_zooms()[:3]]
+    # After transpose to ZYX, spacing order for VolumeData follows SimpleITK (x,y,z).
+    if len(zooms) == 3:
+        spacing = (zooms[0], zooms[1], zooms[2])
+    else:
+        spacing = (1.0, 1.0, 1.0)
+    affine = nii.affine
+    origin = (float(affine[0, 3]), float(affine[1, 3]), float(affine[2, 3]))
+    direction = (
+        float(affine[0, 0]),
+        float(affine[0, 1]),
+        float(affine[0, 2]),
+        float(affine[1, 0]),
+        float(affine[1, 1]),
+        float(affine[1, 2]),
+        float(affine[2, 0]),
+        float(affine[2, 1]),
+        float(affine[2, 2]),
+    )
+    return VolumeData(
+        array=array,
+        spacing=spacing,
+        origin=origin,
+        direction=_direction_3d(direction),
+        source="nibabel",
+    )
+
+
 def _load_volume_from_path(path: Path) -> VolumeData:
     try:
         return _load_with_simpleitk(path)
@@ -241,6 +281,9 @@ def _load_volume_from_path(path: Path) -> VolumeData:
             return _load_nrrd_path(path)
         if path.suffix.lower() == ".zip":
             return _load_zip_nrrd(path)
+        name = path.name.lower()
+        if name.endswith(".nii") or name.endswith(".nii.gz"):
+            return _load_with_nibabel(path)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Cannot read medical volume: {exc}") from exc
 

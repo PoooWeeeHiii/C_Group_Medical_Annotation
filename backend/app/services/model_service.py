@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
@@ -11,6 +12,61 @@ from backend.app.services.sqlite_service import connect, ensure_sqlite_ready, ge
 
 
 BUILTIN_MODELS: list[dict[str, Any]] = [
+    {
+        "model_id": "totalseg_organs",
+        "version": "totalsegmentator_v2",
+        "label": "organs",
+        "display_name": "多器官 TotalSegmentator (Organs ~24)",
+        "backend": "totalsegmentator",
+        "description": "一次预测约 24 个腹部/胸部器官（脾肝肾肺叶等），每个器官单独存一条 v2_ai mask。推荐默认。",
+        "dice": None,
+        "path": None,
+        "builtin": True,
+    },
+    {
+        "model_id": "totalseg_total",
+        "version": "totalsegmentator_v2",
+        "label": "total",
+        "display_name": "全量 TotalSegmentator (100+ 结构)",
+        "backend": "totalsegmentator",
+        "description": "一次跑 TotalSeg 全部分类（骨骼/肌肉等也包含），每个非空结构一条 mask。最慢，CPU 建议开 TOTALSEG_FAST。",
+        "dice": None,
+        "path": None,
+        "builtin": True,
+    },
+    {
+        "model_id": "totalseg_spleen",
+        "version": "totalsegmentator_v2",
+        "label": "spleen",
+        "display_name": "脾脏 TotalSegmentator",
+        "backend": "totalsegmentator",
+        "description": "官方 TotalSegmentator（roi_subset=spleen）。需 TOTALSEG_PYTHON 已安装 TotalSegmentator；首次会下载权重。",
+        "dice": None,
+        "path": None,
+        "builtin": True,
+    },
+    {
+        "model_id": "totalseg_liver",
+        "version": "totalsegmentator_v2",
+        "label": "liver",
+        "display_name": "肝脏 TotalSegmentator",
+        "backend": "totalsegmentator",
+        "description": "官方 TotalSegmentator（roi_subset=liver）。",
+        "dice": None,
+        "path": None,
+        "builtin": True,
+    },
+    {
+        "model_id": "totalseg_lung",
+        "version": "totalsegmentator_v2",
+        "label": "lung",
+        "display_name": "肺部 TotalSegmentator",
+        "backend": "totalsegmentator",
+        "description": "官方 TotalSegmentator（五叶肺合并为一个 lung mask）。",
+        "dice": None,
+        "path": None,
+        "builtin": True,
+    },
     {
         "model_id": "spleen_nnunetv2_task506",
         "version": "task506_2d",
@@ -98,8 +154,12 @@ def ensure_builtin_models() -> None:
             "description": item["description"],
             "builtin": True,
             "external_ready": bool(os.getenv("SPLEEN_NNUNET_PREDICT_COMMAND"))
-            if "spleen" in item["model_id"]
-            else False,
+            if "spleen" in item["model_id"] and item.get("backend") != "totalsegmentator"
+            else (
+                bool(os.getenv("TOTALSEG_PYTHON") or True)
+                if item.get("backend") == "totalsegmentator"
+                else False
+            ),
         }
         if existing is None:
             upsert_record(
@@ -141,7 +201,15 @@ def _model_public(record: dict[str, Any]) -> dict[str, Any]:
     backend = str(metrics.get("backend") or (builtin_meta or {}).get("backend") or "registered")
     description = str(metrics.get("description") or (builtin_meta or {}).get("description") or "")
     external_ready = bool(metrics.get("external_ready"))
-    if "spleen" in model_id.lower():
+    if backend == "totalsegmentator":
+        python_path = os.getenv("TOTALSEG_PYTHON") or str(
+            Path(os.getenv("SPLEEN_NNUNET_ROOT", r"D:\hm_2_spleen"))
+            / "venv_nnunet_cpu"
+            / "Scripts"
+            / "python.exe"
+        )
+        external_ready = Path(python_path).exists()
+    elif "spleen" in model_id.lower() and backend != "totalsegmentator":
         external_ready = bool(os.getenv("SPLEEN_NNUNET_PREDICT_COMMAND"))
     return {
         "model_id": model_id,

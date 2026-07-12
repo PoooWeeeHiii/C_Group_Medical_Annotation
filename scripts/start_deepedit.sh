@@ -11,8 +11,9 @@ if [[ -f "$ROOT/.env" ]]; then
   set +a
 fi
 
-export DEEPEDIT_MODEL_PATH="${DEEPEDIT_MODEL_PATH:-models/deepedit/model.ts}"
-export DEEPEDIT_MODEL_FORMAT="${DEEPEDIT_MODEL_FORMAT:-torchscript}"
+export DEEPEDIT_MODEL_PATH="${DEEPEDIT_MODEL_PATH:-models/deepedit/deepedit_unet.pth}"
+export DEEPEDIT_MODEL_FORMAT="${DEEPEDIT_MODEL_FORMAT:-monai_unet_checkpoint}"
+export DEEPEDIT_CONFIG_PATH="${DEEPEDIT_CONFIG_PATH:-models/deepedit/config.json}"
 export DEEPEDIT_DEVICE="${DEEPEDIT_DEVICE:-auto}"
 export DEEPEDIT_THRESHOLD="${DEEPEDIT_THRESHOLD:-0.5}"
 

@@ -8,6 +8,8 @@ class AIPredictRequest(BaseModel):
     image_id: str
     model_id: str | None = None
     label: str = Field(default="label", min_length=1)
+    # Default: refuse silent HU-threshold baseline. Opt in only for demos.
+    allow_baseline: bool = False
 
 
 class AIPredictResponse(BaseModel):
@@ -21,6 +23,12 @@ class AIPredictResponse(BaseModel):
     mask_path: str
     mask: MaskRecord
     message: str = "ai predict success"
+    organ_count: int = 1
+    organ_labels: list[str] = Field(default_factory=list)
+    organ_mask_ids: list[str] = Field(default_factory=list)
+    model_status: str = "unknown"
+    backend: str | None = None
+    fallback_reason: str | None = None
 
 
 class AiHealthResponse(BaseModel):

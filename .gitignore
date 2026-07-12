@@ -78,3 +78,7 @@ database/*.db-wal
 outputs/
 tmp/
 temp/
+_cases.json
+web/dist/
+web/tsconfig.tsbuildinfo
+

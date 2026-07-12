@@ -196,6 +196,13 @@ async def create_case_from_upload(
     patient_id: str | None = None,
     modality: str | None = None,
 ) -> UploadResponse:
+    from backend.app.services.gold_label_service import (
+        attach_gold_labels_for_case,
+        classify_upload_path,
+        find_ct_and_labels_in_zip_extract,
+        is_label_filename,
+    )
+
     ensure_project_dirs()
 
     uploads: list[UploadFile] = []
@@ -228,27 +235,92 @@ async def create_case_from_upload(
     for item in uploads:
         saved_paths.append(await save_upload_file(item, case_raw_dir))
 
-    # Multiple DICOM slices → keep them in one folder; image path points to first .dcm
-    # so SimpleITK ImageSeriesReader can discover the whole series via path.parent.
-    if len(saved_paths) > 1:
-        if not all(_looks_like_dicom_name(path.name) for path in saved_paths):
-            raise HTTPException(
-                status_code=400,
-                detail="多文件上传目前仅支持同一 DICOM 序列（多个 .dcm）。体积数据请使用单个 .nii/.nrrd/.zip。",
-            )
+    label_paths: list[Path] = []
+    rtstruct_paths: list[Path] = []
+    dicom_series_dir: Path | None = None
+    primary_path: Path | None = None
+    width, height, slice_count = 0, 0, None
+    file_format = "unknown"
+    filename = ""
+
+    classified = [(path, classify_upload_path(path)) for path in saved_paths]
+    ct_paths = [p for p, k in classified if k == "ct"]
+    label_paths = [p for p, k in classified if k in {"label", "dicom_seg"}]
+    rtstruct_paths = [p for p, k in classified if k == "rtstruct"]
+    dicom_paths = [p for p, k in classified if k == "dicom"]
+    archive_paths = [p for p, k in classified if k == "archive"]
+
+    # Multi-file: CT volume + gold labels / RTSTRUCT
+    if len(saved_paths) > 1 and (ct_paths or dicom_paths) and (label_paths or rtstruct_paths or len(dicom_paths) > 1):
+        if ct_paths:
+            primary_path = ct_paths[0]
+            width, height, slice_count = _infer_dimensions(primary_path)
+            file_format = _infer_format(primary_path)
+            filename = primary_path.name
+        elif dicom_paths:
+            if not all(_looks_like_dicom_name(path.name) or classify_upload_path(path) in {"dicom", "rtstruct", "dicom_seg"} for path in saved_paths):
+                # Allow mixed DICOM + RTSTRUCT / SEG
+                pass
+            series_only = [p for p in dicom_paths]
+            if not series_only and not ct_paths:
+                raise HTTPException(status_code=400, detail="未找到可用的 CT / DICOM 序列")
+            primary_path = series_only[0] if series_only else saved_paths[0]
+            width, height, slice_count = _infer_dicom_dimensions(primary_path) or (0, 0, None)
+            if slice_count is None:
+                slice_count = len(series_only) or None
+            file_format = "dcm"
+            filename = f"{len(series_only)}_dicom_slices"
+            dicom_series_dir = primary_path.parent
+        else:
+            raise HTTPException(status_code=400, detail="多文件上传需要包含 CT 体积或 DICOM 序列")
+    elif len(saved_paths) > 1 and all(_looks_like_dicom_name(path.name) for path in saved_paths):
         primary_path = next((path for path in saved_paths if path.suffix.lower() in {".dcm", ".dicom"}), saved_paths[0])
         width, height, slice_count = _infer_dicom_dimensions(primary_path) or (0, 0, None)
         if slice_count is None:
             slice_count = len(saved_paths)
         file_format = "dcm"
-        image_path = primary_path
         filename = f"{len(saved_paths)}_dicom_slices"
+        dicom_series_dir = primary_path.parent
     else:
         primary_path = saved_paths[0]
-        width, height, slice_count = _infer_dimensions(primary_path)
-        file_format = _infer_format(primary_path)
-        image_path = primary_path
-        filename = primary_path.name
+        # Zip may contain CT + label
+        if _infer_format(primary_path) == "zip":
+            extract_dir = case_raw_dir / "_extracted"
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with ZipFile(primary_path) as archive:
+                archive.extractall(extract_dir)
+            ct_inside, labels_inside = find_ct_and_labels_in_zip_extract(extract_dir)
+            if ct_inside is not None:
+                primary_path = ct_inside
+                label_paths.extend(labels_inside)
+                # Also discover RTSTRUCT inside zip
+                for path in extract_dir.rglob("*"):
+                    if path.is_file() and classify_upload_path(path) == "rtstruct":
+                        rtstruct_paths.append(path)
+                width, height, slice_count = _infer_dimensions(primary_path)
+                file_format = _infer_format(primary_path)
+                filename = primary_path.name
+                if file_format == "dcm" or _looks_like_dicom_name(primary_path.name):
+                    dicom_series_dir = primary_path.parent
+            else:
+                width, height, slice_count = _infer_dimensions(saved_paths[0])
+                file_format = "zip"
+                filename = saved_paths[0].name
+                primary_path = saved_paths[0]
+        elif is_label_filename(primary_path.name) and classify_upload_path(primary_path) == "label":
+            raise HTTPException(
+                status_code=400,
+                detail="请同时上传 CT 图像与标签文件（或包含二者的 zip），不能只上传 label。",
+            )
+        else:
+            width, height, slice_count = _infer_dimensions(primary_path)
+            file_format = _infer_format(primary_path)
+            filename = primary_path.name
+            if classify_upload_path(primary_path) == "label":
+                raise HTTPException(status_code=400, detail="请上传 CT，并将 label 作为附加文件一起选择")
+
+    assert primary_path is not None
+    image_path = primary_path
 
     case_record = {
         "case_id": case_id,
@@ -272,6 +344,29 @@ async def create_case_from_upload(
     upsert_record("cases", case_record)
     upsert_record("images", image_record)
 
+    attached: list[dict] = []
+    if label_paths or rtstruct_paths:
+        try:
+            attached = attach_gold_labels_for_case(
+                case_id=case_id,
+                image_id=image_id,
+                label_paths=label_paths,
+                rtstruct_paths=rtstruct_paths,
+                dicom_series_dir=dicom_series_dir,
+            )
+            if attached:
+                case_record["status"] = "annotated"
+                upsert_record("cases", case_record)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"病例已创建，但金标准标签挂载失败: {exc}") from exc
+
+    mask_ids = [str(item.get("mask_id")) for item in attached if item.get("mask_id")]
+    message = "upload success"
+    if mask_ids:
+        message = f"upload success; attached {len(mask_ids)} gold mask(s)"
+
     return UploadResponse(
         success=True,
         case_id=case_id,
@@ -279,7 +374,10 @@ async def create_case_from_upload(
         patient_id=case_patient_id,
         modality=case_modality,
         path=image_record["path"],
-        width=width,
-        height=height,
-        message="upload success",
+        width=width or 0,
+        height=height or 0,
+        message=message,
+        attached_masks=attached,
+        attached_mask_ids=mask_ids,
+        attached_mask_count=len(mask_ids),
     )

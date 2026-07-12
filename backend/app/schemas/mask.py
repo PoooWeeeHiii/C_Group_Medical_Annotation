@@ -11,6 +11,7 @@ class MaskRecord(BaseModel):
     path: str
     version: str = "v1_manual"
     label: str = "label"
+    label_id: int | None = None
     label_type: str | None = None
     mask_format: str = "nii.gz"
     axis: str | None = None
@@ -173,6 +174,8 @@ class LabelPropagationRequest(BaseModel):
     connected_component_max_components: int = 8
     positive_points: list[list[float]] = []
     negative_points: list[list[float]] = []
+    label_id: int | None = None
+    match_any_label: bool = False
 
 
 class LabelPropagationResponse(BaseModel):
@@ -242,6 +245,8 @@ class DeepEditRefineRequest(BaseModel):
     scribbles: list[dict[str, Any]] = []
     interaction: dict[str, Any] = {}
     confirmed_slices: list[int] = []
+    # Default: neural DeepEdit only. Use /api/label_propagate for graph-cut.
+    require_neural: bool = True
 
 
 class DeepEditRefineResponse(LabelPropagationResponse):

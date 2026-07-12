@@ -43,6 +43,8 @@ class DatasetExportReport(BaseModel):
     spacing_checks: list[SpacingCheckItem] = Field(default_factory=list)
     materialized_files: list[str] = Field(default_factory=list)
     export_dir: str | None = None
+    multiclass: bool = True
+    class_voxel_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class DatasetExportResponse(BaseModel):

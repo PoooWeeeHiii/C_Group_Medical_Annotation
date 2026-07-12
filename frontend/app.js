@@ -26,8 +26,9 @@ const state = {
   activeSlices: { axial: 0, coronal: 0, sagittal: 0 },
   activeWindow: "auto",
   annotationTool: "brush",
-  annotationLabel: "label",
+  annotationLabel: "liver",
   annotationLabelId: 1,
+  eraseCurrentClassOnly: true,
   annotationDrawing: false,
   annotationLastPoint: null,
   annotationShapeStart: null,
@@ -71,6 +72,16 @@ const state = {
   fewShotMinSlices: 3,
   labelingAssist: null,
   exportLabelSet: "dense", // dense | weak
+  // 2D viewer zoom / pan (display only; annotation stays in image pixels)
+  viewerZoom: 1,
+  viewerPanX: 0,
+  viewerPanY: 0,
+  viewerPanning: false,
+  viewerPanLast: null,
+  trainJob: null,
+  trainJobs: [],
+  trainPollTimer: null,
+  labelCatalog: [],
 };
 
 const titles = {
@@ -92,14 +103,57 @@ const roleText = {
   ai_service: "AI服务",
 };
 
-const labels = [
-  ["#1c2938", "0 背景"],
-  ["#00e5b0", "1 肝脏"],
-  ["#38a3ff", "2 肾脏"],
-  ["#ffb020", "3 肺部"],
-  ["#ff4d4f", "4 肿瘤"],
-  ["#b66dff", "5 脾脏"],
+const DEFAULT_LABEL_CATALOG = [
+  { label_id: 0, name: "background", display_name: "背景", color: "#1c2938", sort_order: 0, enabled: true },
+  { label_id: 1, name: "liver", display_name: "肝脏", color: "#00e5b0", sort_order: 1, enabled: true },
+  { label_id: 2, name: "kidney", display_name: "肾脏", color: "#38a3ff", sort_order: 2, enabled: true },
+  { label_id: 3, name: "lung", display_name: "肺部", color: "#ffb020", sort_order: 3, enabled: true },
+  { label_id: 4, name: "tumor", display_name: "肿瘤", color: "#ff4d4f", sort_order: 4, enabled: true },
+  { label_id: 5, name: "spleen", display_name: "脾脏", color: "#b66dff", sort_order: 5, enabled: true },
 ];
+
+function effectiveLabelCatalog({ includeBackground = true, enabledOnly = true } = {}) {
+  const source = (state.labelCatalog && state.labelCatalog.length)
+    ? state.labelCatalog
+    : DEFAULT_LABEL_CATALOG;
+  return source
+    .filter((item) => (includeBackground || Number(item.label_id) > 0) && (!enabledOnly || item.enabled !== false))
+    .slice()
+    .sort((a, b) => (Number(a.sort_order) - Number(b.sort_order)) || (Number(a.label_id) - Number(b.label_id)));
+}
+
+function labelById(labelId) {
+  const id = Number(labelId);
+  return effectiveLabelCatalog({ includeBackground: true, enabledOnly: false })
+    .find((item) => Number(item.label_id) === id)
+    || DEFAULT_LABEL_CATALOG.find((item) => Number(item.label_id) === id)
+    || null;
+}
+
+function labelColor(labelId) {
+  return labelById(labelId)?.color || "#00e5b0";
+}
+
+function labelDisplayText(labelId) {
+  const item = labelById(labelId);
+  if (!item) return `${labelId}`;
+  return `${item.label_id} ${item.display_name || item.name}`;
+}
+
+function setActiveAnnotationLabel(labelId) {
+  const id = Number(labelId) || 1;
+  const item = labelById(id);
+  state.annotationLabelId = id;
+  state.annotationLabel = item?.name || `label_${id}`;
+}
+
+function canManageUsers() {
+  return currentRole() === "admin";
+}
+
+function canManageLabels() {
+  return currentRole() === "admin";
+}
 
 const statusText = {
   unannotated: "未标注",
@@ -571,6 +625,34 @@ async function refreshCases() {
   }
 }
 
+async function refreshLabels() {
+  try {
+    const data = await apiGet("/api/labels?include_background=true&enabled_only=false");
+    state.labelCatalog = data.items || [];
+    if (!labelById(state.annotationLabelId) || labelById(state.annotationLabelId)?.enabled === false) {
+      const first = effectiveLabelCatalog({ includeBackground: false, enabledOnly: true })[0];
+      if (first) setActiveAnnotationLabel(first.label_id);
+    } else {
+      setActiveAnnotationLabel(state.annotationLabelId);
+    }
+  } catch {
+    if (!state.labelCatalog.length) state.labelCatalog = DEFAULT_LABEL_CATALOG.slice();
+  }
+}
+
+async function refreshUsersList() {
+  if (!canManageTasks()) {
+    state.users = [];
+    return;
+  }
+  try {
+    const users = await apiGet("/api/users");
+    state.users = users.items || [];
+  } catch {
+    state.users = [];
+  }
+}
+
 async function restoreSession() {
   if (!state.authToken) {
     updateAuthChrome();
@@ -580,14 +662,7 @@ async function restoreSession() {
     const data = await apiGet("/api/me");
     state.currentUser = data.user;
     updateAuthChrome();
-    if (canManageTasks()) {
-      try {
-        const users = await apiGet("/api/users");
-        state.users = users.items || [];
-      } catch {
-        state.users = [];
-      }
-    }
+    await refreshUsersList();
     await refreshTasks();
     return true;
   } catch {
@@ -621,10 +696,8 @@ async function handleLogin(event) {
   try {
     const data = await apiPost("/api/auth/login", { username, password });
     setAuthSession(data.access_token, data.user);
-    if (canManageTasks()) {
-      const users = await apiGet("/api/users");
-      state.users = users.items || [];
-    }
+    await refreshUsersList();
+    await refreshLabels();
     await refreshTasks();
     showToast(`已登录：${data.user.username}（${roleText[data.user.role] || data.user.role}）`);
     render();
@@ -795,8 +868,16 @@ async function uploadCtFiles(fileList, form) {
       const name = file.name.toLowerCase();
       return name.endsWith(".dcm") || name.endsWith(".dicom") || !name.includes(".");
     });
-    if (!allDicom) {
-      showToast("多文件导入仅支持同一 DICOM 序列；体积数据请单个导入 .nii / .nrrd / .zip");
+    const hasVolume = files.some((file) => {
+      const name = file.name.toLowerCase();
+      return name.endsWith(".nii") || name.endsWith(".nii.gz") || name.endsWith(".nrrd") || name.endsWith(".zip");
+    });
+    const hasLabel = files.some((file) => {
+      const name = file.name.toLowerCase();
+      return name.includes("label") || name.includes("mask") || name.includes("seg") || name.includes("rtstruct");
+    });
+    if (!allDicom && !(hasVolume && (hasLabel || files.length >= 2))) {
+      showToast("多文件：请上传同一 DICOM 序列，或 CT + 金标准 label/SEG/RTSTRUCT");
       return;
     }
   }
@@ -823,7 +904,17 @@ async function uploadCtFiles(fileList, form) {
       const detail = data.detail;
       throw new Error(typeof detail === "string" ? detail : (detail?.message || "上传失败"));
     }
-    showToast(`导入成功：${data.case_id} / ${data.image_id}`);
+    showToast(
+      data.attached_mask_count
+        ? `导入成功：${data.case_id} / ${data.image_id}，已挂载 ${data.attached_mask_count} 个金标准 Mask`
+        : `导入成功：${data.case_id} / ${data.image_id}`,
+    );
+    const warnings = (data.attached_masks || [])
+      .map((item) => item.warning || item.rtstruct_qc?.alignment_message)
+      .filter(Boolean);
+    if (warnings.length) {
+      showToast(`RTSTRUCT 对齐提示：${warnings[0]}`);
+    }
     state.activeCaseId = data.case_id;
     state.activeImageId = data.image_id;
     if (form) {
@@ -1009,6 +1100,7 @@ async function create3DMaskPreview(item, image) {
       source_version: "v1_manual",
       output_version: "v3_preview",
       label: state.annotationLabel,
+      label_id: state.annotationLabelId,
       label_type: "pseudo",
       method: "image_guided_distance",
       fill_holes: true,
@@ -1186,10 +1278,12 @@ async function runAIPredict(event) {
   button.disabled = true;
   const previousText = button.textContent;
   button.textContent = "预测中...";
-  const isSpleen = String(model.label || "").toLowerCase().includes("spleen") ||
-    String(model.model_id || "").toLowerCase().includes("spleen");
-  if (isSpleen) {
-    showToast("正在运行脾脏推理（真实 nnU-Net 或 baseline），CPU 可能需要数分钟...");
+  const isHeavy = String(model.label || "").toLowerCase().includes("spleen") ||
+    String(model.model_id || "").toLowerCase().includes("spleen") ||
+    String(model.model_id || "").toLowerCase().includes("totalseg") ||
+    String(model.backend || "").toLowerCase().includes("totalsegmentator");
+  if (isHeavy) {
+    showToast("正在运行 AI 推理（TotalSeg / nnU-Net），CPU 可能需要数分钟，请耐心等待...");
   }
   try {
     const data = await apiPost("/api/ai/predict", {
@@ -1197,23 +1291,43 @@ async function runAIPredict(event) {
       image_id: image.image_id,
       model_id: model.model_id,
       label: model.label || state.annotationLabel || "label",
-    }, { timeoutMs: isSpleen ? 30 * 60 * 1000 : 120 * 1000 });
+      allow_baseline: false,
+    }, { timeoutMs: isHeavy ? 30 * 60 * 1000 : 120 * 1000 });
     await loadImageMasks(image.image_id, { force: true });
     await loadCaseVersions(item.case_id, { force: true });
     await refreshCases();
-    state.active3DMaskId = data.mask_id;
+    // Prefer multiclass「全部标注」as the active 3D / overlay mask.
+    const masks = state.masksByImage[image.image_id] || [];
+    const allLabelsMask = masks.find((mask) => mask.mask_id === data.mask_id)
+      || masks.find((mask) => String(mask.label || "") === "全部标注" && mask.version === "v2_ai")
+      || masks.find((mask) => mask.mask_id === data.mask_id);
+    state.active3DMaskId = (allLabelsMask && allLabelsMask.mask_id) || data.mask_id;
     state.volumeViewMode = "3d";
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
     state.inferencePreview = {
       case_id: item.case_id,
       image_id: image.image_id,
-      mask_id: data.mask_id,
+      mask_id: state.active3DMaskId,
       model_id: data.model_id,
       version: data.version,
+      model_status: data.model_status,
+      backend: data.backend,
     };
     if (model.label) state.annotationLabel = model.label;
-    showToast(`AI 预测完成：${data.mask_id} · ${data.model_id}`);
+    const statusText = data.model_status || data.backend || "unknown";
+    const hasAll = Array.isArray(data.organ_labels) && data.organ_labels.includes("全部标注");
+    showToast(
+      hasAll
+        ? `AI 预测完成 [${statusText}]：已生成「全部标注」分色结果 · ${data.organ_count || 1} 个器官`
+        : `AI 预测完成 [${statusText}]：${data.organ_count || 1} 个器官 · ${data.mask_id} · ${data.model_id}`,
+    );
+    if (data.fallback_reason) {
+      showToast(`注意：${data.fallback_reason}`);
+    }
+    if (Array.isArray(data.organ_labels) && data.organ_labels.length > 1) {
+      showToast(`已写入：${data.organ_labels.slice(0, 12).join(", ")}${data.organ_labels.length > 12 ? " ..." : ""}`);
+    }
     render();
   } catch (error) {
     showToast(error.message || "AI 预测失败");
@@ -1448,6 +1562,7 @@ async function runSmart3DRefine(event) {
       output_version: "v3_preview",
       label: state.annotationLabel,
       model_id: "DeepEdit",
+      require_neural: true,
       random_walker_beta: state.refineParams.randomWalkerBeta,
       random_walker_roi_margin: state.refineParams.roiMargin,
       connected_component_min_voxels: state.refineParams.minVoxels,
@@ -1478,10 +1593,70 @@ async function runSmart3DRefine(event) {
     state.volumeViewMode = "3d";
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
-    showToast(`已生成 v3_preview 预览：${data.mask_id} · ${data.model_status || data.refinement_mode}`);
+    showToast(`DeepEdit 神经网络修正完成：${data.mask_id} · ${data.model_status || data.refinement_mode}`);
     render();
   } catch (error) {
-    showToast(error.message || "智能3D传播修正失败");
+    showToast(error.message || "DeepEdit 修正失败（需启动 DeepEdit 服务；图割请用「图割修正」）");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+async function runGraphCutRefine(event) {
+  const button = event.currentTarget;
+  const item = activeCase();
+  const image = activeImage();
+  if (!item || !image) {
+    showToast("请先选择病例和图像");
+    return;
+  }
+
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "图割修正中...";
+  try {
+    await saveCurrentSliceIfAnnotated(item, image);
+    const prompts = deepEditPromptPayload(image);
+    const data = await apiPost("/api/label_propagate", {
+      case_id: item.case_id,
+      image_id: image.image_id,
+      source_version: "v1_manual",
+      output_version: "v3_preview",
+      label: state.annotationLabel,
+      label_id: state.annotationLabelId,
+      label_type: "pseudo",
+      method: "random_walker",
+      fill_holes: true,
+      keep_largest_component: false,
+      image_guidance: true,
+      closing_radius: 1,
+      random_walker_beta: state.refineParams.randomWalkerBeta,
+      random_walker_roi_margin: state.refineParams.roiMargin,
+      connected_component_mode: "seeded",
+      connected_component_min_voxels: state.refineParams.minVoxels,
+      connected_component_max_components: 8,
+      positive_points: prompts.positive,
+      negative_points: prompts.negative,
+    });
+    await apiPost("/api/version", {
+      case_id: item.case_id,
+      version: "v3_preview",
+      annotation: data.mask_id,
+      model: "graph_cut_random_walker",
+      dataset: null,
+    });
+    await loadImageMasks(image.image_id, { force: true });
+    await loadCaseVersions(item.case_id, { force: true });
+    await refreshCases();
+    state.active3DMaskId = data.mask_id;
+    state.volumeViewMode = "3d";
+    state.volumeLoadingKey = null;
+    state.propagatedSliceLoads = {};
+    showToast(`图割修正完成（Random Walker · ${state.annotationLabel}#${state.annotationLabelId}）：${data.mask_id}`);
+    render();
+  } catch (error) {
+    showToast(error.message || "图割修正失败");
   } finally {
     button.disabled = false;
     button.textContent = previousText;
@@ -1687,6 +1862,15 @@ function renderDashboard() {
   const annotated = state.cases.filter((item) => item.status !== "unannotated").length;
   const pending = Math.max(total - annotated, 0);
   const progress = total ? Math.round((annotated / total) * 100) : 0;
+  const metrics = state.trainJob?.metrics || state.trainJobs?.[0]?.metrics;
+  const bestDice = metrics?.best_val_dice != null ? Number(metrics.best_val_dice).toFixed(3) : "暂无";
+  const history = Array.isArray(metrics?.history) ? metrics.history : [];
+  const bars = history.length
+    ? history.slice(-10).map((row) => {
+        const dice = Math.max(0, Math.min(1, Number(row.val_dice) || 0));
+        return `<div class="bar" style="height:${Math.round(dice * 100)}%" title="epoch ${row.epoch}: dice ${dice.toFixed(3)}"></div>`;
+      }).join("")
+    : `<div class="placeholder compact">尚无真实训练指标。请在「AI训练中心」启动训练。</div>`;
   return `
     <div class="dashboard-hero">
       <section class="hero-panel">
@@ -1713,7 +1897,7 @@ function renderDashboard() {
         </div>
         <p class="hero-copy">
           CT 导入、病例管理、人工标注、AI 推理、版本审核、质量评价和 Dataset 导出统一在一个闭环系统中完成。
-          当前前端已接入后端上传和病例查询接口，可作为 Vue/React 重构前的交互原型。
+          支持金标准上传、多标签编辑、多类导出与平台 U-Net 训练注册。
         </p>
         <div class="pipeline">
           ${["导入", "病例", "图像", "标注", "Mask", "Dataset", "训练", "模型", "预测", "修正"].map((item) => `<span class="chip">${item}</span>`).join("")}
@@ -1722,29 +1906,29 @@ function renderDashboard() {
       <section class="panel chart-box">
         <h2>标注进度</h2>
         <div class="ring" style="background: conic-gradient(var(--green) 0 ${progress}%, rgba(255,255,255,.08) ${progress}% 100%)">
-          <div class="ring-inner"><div><strong>${progress}%</strong><br><span class="metric-label">已审核</span></div></div>
+          <div class="ring-inner"><div><strong>${progress}%</strong><br><span class="metric-label">已处理</span></div></div>
         </div>
       </section>
     </div>
     <div class="grid cols-4">
       ${metricCard("病例总数", total, "来自后端 /api/cases")}
       ${metricCard("已标注", annotated, "人工 + AI + 修正")}
-      ${metricCard("待审核", pending, "等待 final 确认")}
-      ${metricCard("最佳 Dice", "0.86", "基线目标")}
+      ${metricCard("待处理", pending, "仍为 unannotated")}
+      ${metricCard("最佳 Dice", bestDice, metrics ? `模型 ${escapeHtml(metrics.model_id || "")}` : "来自最近一次真实训练")}
     </div>
     <div class="grid cols-2" style="margin-top:18px">
       <section class="panel">
-        <h2>AI训练 Loss / Dice</h2>
-        <div class="line-chart">${[32, 48, 41, 62, 58, 74, 69, 82, 77, 88].map((height) => `<div class="bar" style="height:${height}%"></div>`).join("")}</div>
+        <h2>AI训练 Val Dice</h2>
+        <div class="line-chart">${bars}</div>
       </section>
       <section class="panel">
         <h2>最近任务</h2>
-        <div class="log-box">上传 CT -> 生成 Case / Image
-人工 ROI -> 保存 Mask
-AI 预测 -> v2_ai
-智能修正 -> v3_preview
-确认预览 -> v3_fusion / final
-导出数据集 -> Dataset0001</div>
+        <div class="log-box">上传 CT (+金标准) -> Case / Image / Mask
+人工多标签标注 -> 保存 Mask
+AI 预测 -> v2_ai（真实后端或失败提示）
+DeepEdit / 图割 -> v3_preview
+导出多类 Dataset -> 训练中心 U-Net
+注册模型 -> 推理中心选用</div>
       </section>
     </div>
   `;
@@ -1802,7 +1986,7 @@ function renderCases() {
           />
           <div class="upload-dropzone-body">
             <strong>点击选择文件，或拖入 CT 文件</strong>
-            <span id="uploadDropHint">点击选择，或将 CT 文件拖到此处；选完后自动导入</span>
+            <span id="uploadDropHint">点击选择或拖入：CT，或 CT+金标准 label/SEG/RTSTRUCT；选完后自动导入</span>
             <em id="uploadSelectedName">未选择文件</em>
           </div>
         </div>
@@ -1857,7 +2041,31 @@ function activeImage() {
 }
 
 function labelList() {
-  return labels.map(([color, text]) => `<div class="label-row"><span class="swatch" style="background:${color}"></span>${text}</div>`).join("");
+  return effectiveLabelCatalog({ includeBackground: false, enabledOnly: true })
+    .map((item) => {
+      const id = Number(item.label_id);
+      const active = state.annotationLabelId === id;
+      return `<button type="button" class="label-row label-pick ${active ? "active" : ""}" data-pick-label="${id}" title="选择标注类别">
+        <span class="swatch" style="background:${escapeHtml(item.color)}"></span>${escapeHtml(labelDisplayText(id))}
+      </button>`;
+    })
+    .join("");
+}
+
+function renderLabelPicker() {
+  return `
+    <div class="label-picker">
+      <div class="label-picker-header">
+        <span>标注类别</span>
+        <strong>${escapeHtml(state.annotationLabel)} #${state.annotationLabelId}</strong>
+      </div>
+      <div class="label-picker-grid">${labelList()}</div>
+      <label class="erase-mode-row">
+        <input type="checkbox" id="eraseCurrentClassOnly" ${state.eraseCurrentClassOnly ? "checked" : ""} />
+        橡皮擦仅清除当前类别
+      </label>
+    </div>
+  `;
 }
 
 function masksForActiveImage() {
@@ -2178,7 +2386,7 @@ function renderSmartRefineHint() {
         <strong class="prompt-positive" id="promptPositiveCount">正点 ${counts.positive}</strong>
         <strong class="prompt-negative" id="promptNegativeCount">负点 ${counts.negative}</strong>
       </div>
-      <small>画笔/多边形/矩形 = 正向标注；智能橡皮擦点击相似区域自动擦除，并同时记为 DeepEdit 负点。点击“智能3D传播修正”后会一起更新 3D Mask。</small>
+      <small>画笔/多边形/矩形 = 正向标注；智能橡皮擦记为负点。「DeepEdit 神经网络」需独立服务；无服务时请用「图割修正」。</small>
     </div>
   `;
 }
@@ -2195,7 +2403,7 @@ function renderRefineParamControls() {
   const params = state.refineParams;
   return `
     <div class="refine-param-controls">
-      <div class="param-header"><span>修正参数</span><strong>Fallback 图模型</strong></div>
+      <div class="param-header"><span>修正参数</span><strong>图割 Random Walker</strong></div>
       <label class="param-row" for="randomWalkerBeta">
         <span>边界敏感度 beta</span>
         <input id="randomWalkerBeta" type="range" min="20" max="180" step="5" value="${params.randomWalkerBeta}" />
@@ -2226,16 +2434,28 @@ function renderViewerModeButtons() {
 }
 
 function render2DViewer(item, image, volume, activeSlice, sliceCount, maxSlice, axis) {
+  const zoomPercent = Math.round((Number(state.viewerZoom) || 1) * 100);
   return `
     <section class="viewer">
-      <div class="viewer-toolbar"><span id="viewerTitle">${item ? item.case_id : "暂无病例"} | ${axisLabel(axis)}</span><span id="viewerInfo">${image ? image.image_id : "等待图像"} | 缩放 100%</span></div>
+      <div class="viewer-toolbar"><span id="viewerTitle">${item ? item.case_id : "暂无病例"} | ${axisLabel(axis)}</span><span id="viewerInfo">${image ? image.image_id : "等待图像"} | 缩放 ${zoomPercent}%</span></div>
       ${renderViewerModeButtons()}
-      <div class="ct-frame real-image-frame">
+      <div class="ct-frame real-image-frame" id="sliceFrame">
         ${image ? `<img id="sliceImage" class="ct-slice-image" alt="医学影像切片" />` : ""}
         <div id="sliceError" class="slice-empty ${image ? "hidden" : ""}">${image ? "正在读取体数据..." : "暂无可显示图像"}</div>
         ${image ? `<canvas id="annotationCanvas" class="annotation-canvas" aria-label="标注画布"></canvas>` : ""}
         <div class="coordinate" id="sliceCoordinate">${axisCoordinateName(axis)}: ${activeSlice + 1} / ${sliceCount}</div>
       </div>
+      <div class="slider-row zoom-row">
+        <span>缩放</span>
+        <div class="zoom-controls">
+          <button type="button" class="ghost-button zoom-button" data-zoom-action="out" title="缩小">−</button>
+          <input id="viewerZoomSlider" type="range" min="25" max="400" step="5" value="${zoomPercent}" aria-label="缩放比例" />
+          <button type="button" class="ghost-button zoom-button" data-zoom-action="in" title="放大">+</button>
+          <button type="button" class="ghost-button zoom-button" data-zoom-action="fit" title="适应窗口">适应</button>
+        </div>
+        <strong id="zoomValue">${zoomPercent}%</strong>
+      </div>
+      <small class="zoom-hint">滚轮缩放；按住 Alt 或鼠标中键拖动平移。不同 CT 尺寸可用缩放对齐标注。</small>
       <div class="slider-row">
         <span>标注平面</span>
         <select id="axisSelect" aria-label="选择标注平面">
@@ -2385,12 +2605,13 @@ function renderAnnotation() {
         <h3 style="margin-top:24px">版本</h3>
         <div class="timeline">${versionTimeline.map((version) => `<span class="chip ${versions.some((item) => item.version === version) ? "active-chip" : ""}">${version}</span>`).join("")}</div>
         <h3 style="margin-top:24px">标签</h3>
-        <div class="label-list">${labelList()}</div>
+        ${renderLabelPicker()}
       </aside>
       ${state.volumeViewMode === "3d" ? render3DViewer(item, image, volume, masks) : render2DViewer(item, image, volume, activeSlice, sliceCount, maxSlice, axis)}
       <aside class="tool-panel">
         <h2>标注工具</h2>
         ${renderAnnotationModeControls()}
+        ${renderLabelPicker()}
         <div class="tool-grid">${renderToolButtons()}</div>
         <div class="annotation-state-line"><span>当前工具：<strong id="annotationToolLabel">${annotationToolLabel()}</strong></span><span>当前 label：<strong>${escapeHtml(state.annotationLabel)} #${state.annotationLabelId}</strong></span><span>智能阈值：<strong>HU ± ${state.magicWandThreshold}</strong></span><span>当前切片：<strong id="annotationMaskStats">0 像素</strong></span></div>
         ${renderMagicWandControls()}
@@ -2401,7 +2622,8 @@ function renderAnnotation() {
           <button class="primary-button" data-save-mask ${image && canAnnotate() ? "" : "disabled"}>保存 Mask</button>
           <button class="ghost-button" data-load-v2-ai ${image && aiMask ? "" : "disabled"}>从 v2_ai 加载到 2D</button>
           <button class="ghost-button" data-submit-case ${image && (currentRole() === "annotator" || currentRole() === "admin") ? "" : "disabled"}>提交审核</button>
-          <button class="ghost-button" data-smart-3d-refine ${image && canAnnotate() ? "" : "disabled"}>智能3D传播修正</button>
+          <button class="ghost-button" data-smart-3d-refine ${image && canAnnotate() ? "" : "disabled"}>DeepEdit 神经网络</button>
+          <button class="ghost-button" data-graph-cut-refine ${image && canAnnotate() ? "" : "disabled"}>图割修正</button>
           <button class="ghost-button" data-confirm-fusion ${previewMask && canAnnotate() ? "" : "disabled"}>确认 v3_fusion</button>
           <button class="ghost-button" data-final-mask ${(previewMask || fusionMask) && canConfirmFinal() ? "" : "disabled"}>确认 final</button>
           <button class="ghost-button" data-compare-masks ${image ? "" : "disabled"}>计算 Dice</button>
@@ -2678,26 +2900,87 @@ function clearAnnotationCanvas() {
   showToast("当前切片标注已清空");
 }
 
+function clampViewerZoom(value) {
+  return clamp(Number(value) || 1, 0.25, 4);
+}
+
+function updateViewerZoomDisplay() {
+  const zoomPercent = Math.round(clampViewerZoom(state.viewerZoom) * 100);
+  const info = $("#viewerInfo");
+  const zoomValue = $("#zoomValue");
+  const slider = $("#viewerZoomSlider");
+  const image = activeImage();
+  if (info) info.textContent = `${image ? image.image_id : "等待图像"} | 缩放 ${zoomPercent}%`;
+  if (zoomValue) zoomValue.textContent = `${zoomPercent}%`;
+  if (slider && Number(slider.value) !== zoomPercent) slider.value = String(zoomPercent);
+}
+
+function resetViewerZoom({ render = true } = {}) {
+  state.viewerZoom = 1;
+  state.viewerPanX = 0;
+  state.viewerPanY = 0;
+  state.viewerPanning = false;
+  state.viewerPanLast = null;
+  if (render) {
+    resizeAnnotationCanvas();
+    updateViewerZoomDisplay();
+  }
+}
+
+function setViewerZoom(nextZoom, { anchorClientX = null, anchorClientY = null } = {}) {
+  const imageElement = $("#sliceImage");
+  const frame = $("#sliceFrame") || imageElement?.parentElement;
+  const oldZoom = clampViewerZoom(state.viewerZoom);
+  const newZoom = clampViewerZoom(nextZoom);
+  if (!frame || Math.abs(newZoom - oldZoom) < 1e-6) {
+    state.viewerZoom = newZoom;
+    updateViewerZoomDisplay();
+    return;
+  }
+
+  const frameRect = frame.getBoundingClientRect();
+  const anchorX = anchorClientX == null ? frameRect.left + frameRect.width / 2 : anchorClientX;
+  const anchorY = anchorClientY == null ? frameRect.top + frameRect.height / 2 : anchorClientY;
+  const before = getDisplayedImageRect(imageElement);
+  state.viewerZoom = newZoom;
+  if (before) {
+    const relX = (anchorX - before.viewportLeft) / Math.max(before.width, 1);
+    const relY = (anchorY - before.viewportTop) / Math.max(before.height, 1);
+    const afterWidth = before.width * (newZoom / oldZoom);
+    const afterHeight = before.height * (newZoom / oldZoom);
+    const desiredLeft = anchorX - relX * afterWidth;
+    const desiredTop = anchorY - relY * afterHeight;
+    const centeredLeft = frameRect.left + (frameRect.width - afterWidth) / 2;
+    const centeredTop = frameRect.top + (frameRect.height - afterHeight) / 2;
+    state.viewerPanX = desiredLeft - centeredLeft;
+    state.viewerPanY = desiredTop - centeredTop;
+  }
+  resizeAnnotationCanvas();
+  updateViewerZoomDisplay();
+}
+
 function getDisplayedImageRect(imageElement) {
   const frame = imageElement?.parentElement;
   if (!imageElement || !frame || !imageElement.naturalWidth || !imageElement.naturalHeight) return null;
   const frameRect = frame.getBoundingClientRect();
   const imageRatio = imageElement.naturalWidth / imageElement.naturalHeight;
-  const frameRatio = frameRect.width / frameRect.height;
+  const frameRatio = frameRect.width / Math.max(frameRect.height, 1);
   let width = frameRect.width;
   let height = frameRect.height;
-  let left = 0;
-  let top = 0;
 
   if (frameRatio > imageRatio) {
     height = frameRect.height;
     width = height * imageRatio;
-    left = (frameRect.width - width) / 2;
   } else {
     width = frameRect.width;
     height = width / imageRatio;
-    top = (frameRect.height - height) / 2;
   }
+
+  const zoom = clampViewerZoom(state.viewerZoom);
+  width *= zoom;
+  height *= zoom;
+  const left = (frameRect.width - width) / 2 + (Number(state.viewerPanX) || 0);
+  const top = (frameRect.height - height) / 2 + (Number(state.viewerPanY) || 0);
 
   return {
     viewportLeft: frameRect.left + left,
@@ -2720,11 +3003,21 @@ function resizeAnnotationCanvas({ reset = false } = {}) {
     canvas.height = imageElement.naturalHeight;
     state.annotationPolygonPoints = [];
   }
+
+  imageElement.style.inset = "auto";
+  imageElement.style.objectFit = "fill";
+  imageElement.style.left = `${rect.frameLeft}px`;
+  imageElement.style.top = `${rect.frameTop}px`;
+  imageElement.style.width = `${rect.width}px`;
+  imageElement.style.height = `${rect.height}px`;
+
   canvas.style.left = `${rect.frameLeft}px`;
   canvas.style.top = `${rect.frameTop}px`;
   canvas.style.width = `${rect.width}px`;
   canvas.style.height = `${rect.height}px`;
+  canvas.style.cursor = state.viewerPanning ? "grabbing" : "crosshair";
   renderCurrentSliceMask();
+  updateViewerZoomDisplay();
 }
 
 function pointerToImagePoint(event) {
@@ -2744,7 +3037,7 @@ function pointerToImagePoint(event) {
 }
 
 function annotationStrokeStyle() {
-  const color = labels[state.annotationLabelId]?.[0] || labels[1]?.[0] || "#00e5b0";
+  const color = labelColor(state.annotationLabelId);
   return color;
 }
 
@@ -3096,7 +3389,7 @@ function renderCurrentSliceMask() {
   for (let index = 0; index < mask.data.length; index += 1) {
     const labelId = mask.data[index];
     if (!labelId) continue;
-    const color = hexToRgb(labels[labelId]?.[0] || annotationStrokeStyle());
+    const color = hexToRgb(labelColor(labelId) || annotationStrokeStyle());
     const offset = index * 4;
     imageData.data[offset] = color.r;
     imageData.data[offset + 1] = color.g;
@@ -3116,7 +3409,7 @@ function drawPointAnnotations(context) {
   context.save();
   for (const point of points) {
     const promptType = point.promptType || "positive";
-    const color = promptType === "negative" ? "#ff4d4f" : labels[point.labelId]?.[0] || annotationStrokeStyle();
+    const color = promptType === "negative" ? "#ff4d4f" : labelColor(point.labelId) || annotationStrokeStyle();
     context.strokeStyle = "rgba(255, 255, 255, 0.95)";
     context.fillStyle = color;
     context.lineWidth = 2;
@@ -3195,13 +3488,22 @@ function paintMaskCircle(point, radius, labelId) {
   const endX = clamp(centerX + radius, 0, mask.width - 1);
   const startY = clamp(centerY - radius, 0, mask.height - 1);
   const endY = clamp(centerY + radius, 0, mask.height - 1);
+  const eraseOnlyCurrent = state.eraseCurrentClassOnly !== false;
+  const currentClass = state.annotationLabelId;
 
   for (let y = startY; y <= endY; y += 1) {
     for (let x = startX; x <= endX; x += 1) {
       const dx = x - centerX;
       const dy = y - centerY;
       if (dx * dx + dy * dy <= radiusSquared) {
-        mask.data[y * mask.width + x] = labelId;
+        const index = y * mask.width + x;
+        if (labelId === 0) {
+          if (!eraseOnlyCurrent || mask.data[index] === currentClass) {
+            mask.data[index] = 0;
+          }
+        } else {
+          mask.data[index] = labelId;
+        }
       }
     }
   }
@@ -3530,6 +3832,18 @@ function updateAnnotationCoordinate(point) {
 
 function handleAnnotationPointerDown(event) {
   resizeAnnotationCanvas();
+  const isPan =
+    event.button === 1 ||
+    event.altKey ||
+    (event.button === 0 && event.shiftKey && !state.annotationDrawing);
+  if (isPan) {
+    event.preventDefault();
+    state.viewerPanning = true;
+    state.viewerPanLast = { x: event.clientX, y: event.clientY };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    resizeAnnotationCanvas();
+    return;
+  }
   if (state.annotationTool === "polygon" && Date.now() < state.annotationIgnoreNextClickUntil) {
     event.preventDefault();
     return;
@@ -3581,6 +3895,16 @@ function handleAnnotationPointerDown(event) {
 }
 
 function handleAnnotationPointerMove(event) {
+  if (state.viewerPanning && state.viewerPanLast) {
+    event.preventDefault();
+    const dx = event.clientX - state.viewerPanLast.x;
+    const dy = event.clientY - state.viewerPanLast.y;
+    state.viewerPanLast = { x: event.clientX, y: event.clientY };
+    state.viewerPanX += dx;
+    state.viewerPanY += dy;
+    resizeAnnotationCanvas();
+    return;
+  }
   const point = pointerToImagePoint(event);
   if (point) updateAnnotationCoordinate(point);
   if (state.annotationTool === "polygon" && state.annotationPolygonPoints.length && point) {
@@ -3603,6 +3927,12 @@ function handleAnnotationPointerMove(event) {
 }
 
 function finishAnnotationPointer(event) {
+  if (state.viewerPanning) {
+    state.viewerPanning = false;
+    state.viewerPanLast = null;
+    resizeAnnotationCanvas();
+    return;
+  }
   const point = pointerToImagePoint(event);
   if (state.annotationDrawing && state.annotationTool === "rectangle" && point) {
     state.annotationPreviewRect = null;
@@ -3623,6 +3953,7 @@ function finishAnnotationPolygon(event) {
 
 function bindAnnotationCanvas() {
   const canvas = $("#annotationCanvas");
+  const frame = $("#sliceFrame");
   if (!canvas) return;
   resizeAnnotationCanvas();
   canvas.addEventListener("pointerdown", handleAnnotationPointerDown);
@@ -3631,6 +3962,66 @@ function bindAnnotationCanvas() {
   canvas.addEventListener("pointercancel", finishAnnotationPointer);
   canvas.addEventListener("pointerleave", finishAnnotationPointer);
   canvas.addEventListener("dblclick", finishAnnotationPolygon);
+
+  if (frame && !frame.dataset.zoomBound) {
+    frame.dataset.zoomBound = "1";
+    frame.addEventListener(
+      "wheel",
+      (event) => {
+        if (state.volumeViewMode !== "2d") return;
+        event.preventDefault();
+        const factor = event.deltaY > 0 ? 0.9 : 1.1;
+        setViewerZoom(clampViewerZoom(state.viewerZoom) * factor, {
+          anchorClientX: event.clientX,
+          anchorClientY: event.clientY,
+        });
+      },
+      { passive: false },
+    );
+    frame.addEventListener("auxclick", (event) => {
+      if (event.button === 1) event.preventDefault();
+    });
+
+    const startPan = (event) => {
+      const isPan =
+        event.button === 1 ||
+        event.altKey ||
+        (event.button === 0 && event.shiftKey && !state.annotationDrawing);
+      if (!isPan) return false;
+      event.preventDefault();
+      state.viewerPanning = true;
+      state.viewerPanLast = { x: event.clientX, y: event.clientY };
+      frame.setPointerCapture?.(event.pointerId);
+      resizeAnnotationCanvas();
+      return true;
+    };
+
+    frame.addEventListener("pointerdown", (event) => {
+      startPan(event);
+    });
+    frame.addEventListener("pointermove", (event) => {
+      if (!state.viewerPanning || !state.viewerPanLast) return;
+      const dx = event.clientX - state.viewerPanLast.x;
+      const dy = event.clientY - state.viewerPanLast.y;
+      state.viewerPanLast = { x: event.clientX, y: event.clientY };
+      state.viewerPanX += dx;
+      state.viewerPanY += dy;
+      resizeAnnotationCanvas();
+    });
+    const endPan = (event) => {
+      if (!state.viewerPanning) return;
+      state.viewerPanning = false;
+      state.viewerPanLast = null;
+      try {
+        frame.releasePointerCapture?.(event.pointerId);
+      } catch (_error) {
+        // ignore
+      }
+      resizeAnnotationCanvas();
+    };
+    frame.addEventListener("pointerup", endPan);
+    frame.addEventListener("pointercancel", endPan);
+  }
 }
 
 async function hydrateVersions() {
@@ -3669,16 +4060,131 @@ async function hydrateVersions() {
 }
 
 function renderTrain() {
+  const job = state.trainJob;
+  const exportId = state.datasetExportResult?.dataset_id || "";
+  const history = Array.isArray(job?.metrics?.history) ? job.metrics.history : [];
+  const chart = history.length
+    ? history.map((row) => {
+        const dice = Math.max(0, Math.min(1, Number(row.val_dice) || 0));
+        return `<div class="bar" style="height:${Math.round(dice * 100)}%" title="E${row.epoch}"></div>`;
+      }).join("")
+    : `<div class="placeholder compact">训练开始后显示 Val Dice</div>`;
+  const logs = (job?.logs || []).slice(-40).join("\n") || "等待开始训练…\n先在 Dataset 导出页 materialize，再填写 dataset_id。";
+  const status = job?.status || "idle";
   return `
     <div class="grid cols-2">
-      <section class="panel"><h2>训练配置</h2><div class="grid cols-2" style="margin-top:16px">${["Dataset0001", "U-Net", "50 Epoch", "LR 0.001", "Batch 4", "BCE + Dice"].map((item) => `<span class="chip">${item}</span>`).join("")}</div><div class="toolbar-row" style="margin-top:18px"><button class="primary-button">开始训练</button><button class="ghost-button">停止</button><button class="ghost-button">继续</button></div></section>
-      <section class="panel"><h2>Loss / Dice 曲线</h2><div class="line-chart">${[78, 70, 61, 54, 47, 42, 36, 32].map((height) => `<div class="bar" style="height:${height}%"></div>`).join("")}</div></section>
+      <section class="panel">
+        <h2>训练配置</h2>
+        <p class="panel-lead">基于导出的 nnUNet 目录训练平台 <strong>2.5D U-Net</strong>（邻层上下文 + 按类采样 + 推理 3D 后处理）。正式高精度分割请优先用 TotalSeg / nnUNet。</p>
+        <div class="toolbar-row inference-toolbar" style="margin-top:14px; flex-wrap:wrap; gap:10px">
+          <div class="field"><label>Dataset ID</label><input id="trainDatasetId" value="${escapeHtml(exportId)}" placeholder="Dataset0001" /></div>
+          <div class="field"><label>Model ID</label><input id="trainModelId" value="${escapeHtml(job?.model_id || "")}" placeholder="自动生成" /></div>
+          <div class="field"><label>Epochs</label><input id="trainEpochs" type="number" min="1" max="200" value="20" /></div>
+          <div class="field"><label>Batch</label><input id="trainBatch" type="number" min="1" max="32" value="4" /></div>
+          <div class="field"><label>LR</label><input id="trainLr" type="number" step="0.0001" value="0.0001" /></div>
+          <div class="field"><label>Classes</label><input id="trainClasses" type="number" min="2" max="32" value="6" /></div>
+          <div class="field"><label>Image size</label><input id="trainImageSize" type="number" min="64" max="512" value="320" /></div>
+          <div class="field"><label>2.5D radius</label><input id="trainContextRadius" type="number" min="0" max="3" value="1" title="1=三通道(z-1,z,z+1)" /></div>
+        </div>
+        <div class="toolbar-row" style="margin-top:18px">
+          <button class="primary-button" data-start-train ${status === "running" || status === "queued" ? "disabled" : ""}>开始训练</button>
+          <button class="ghost-button" data-refresh-train>刷新状态</button>
+          <strong style="margin-left:12px">状态：${escapeHtml(status)}</strong>
+        </div>
+        ${job?.registered_model_id ? `<p style="margin-top:12px;color:var(--green)">已注册模型：${escapeHtml(job.registered_model_id)}，可去推理中心选用。</p>` : ""}
+      </section>
+      <section class="panel">
+        <h2>Val Dice</h2>
+        <div class="line-chart">${chart}</div>
+        <div class="case-meta" style="margin-top:12px">
+          <div class="meta-line"><span>epoch</span><strong>${job?.current_epoch ?? "-"}</strong></div>
+          <div class="meta-line"><span>train_loss</span><strong>${job?.train_loss != null ? Number(job.train_loss).toFixed(4) : "-"}</strong></div>
+          <div class="meta-line"><span>val_dice</span><strong>${job?.val_dice != null ? Number(job.val_dice).toFixed(4) : "-"}</strong></div>
+        </div>
+      </section>
     </div>
-    <section class="panel" style="margin-top:18px"><h2>训练日志</h2><div class="log-box">Epoch 01 | Loss 0.812 | Dice 0.42
-Epoch 02 | Loss 0.703 | Dice 0.51
-Epoch 03 | Loss 0.618 | Dice 0.59
-等待 Person B 接入 train.py...</div></section>
+    <section class="panel" style="margin-top:18px">
+      <h2>训练日志</h2>
+      <div class="log-box" id="trainLogBox">${escapeHtml(logs)}</div>
+    </section>
   `;
+}
+
+async function startPlatformTrain(event) {
+  const button = event.currentTarget;
+  const datasetId = $("#trainDatasetId")?.value?.trim();
+  if (!datasetId) {
+    showToast("请填写已导出的 Dataset ID");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const data = await apiPost("/api/train", {
+      dataset_id: datasetId,
+      model_id: $("#trainModelId")?.value?.trim() || null,
+      epochs: Number($("#trainEpochs")?.value || 20),
+      batch_size: Number($("#trainBatch")?.value || 4),
+      lr: Number($("#trainLr")?.value || 0.0001),
+      num_classes: Number($("#trainClasses")?.value || 6),
+      image_size: Number($("#trainImageSize")?.value || 320),
+      context_radius: Number($("#trainContextRadius")?.value || 1),
+    }, { timeoutMs: 60 * 1000 });
+    state.trainJob = data.job;
+    showToast(`训练任务已启动：${data.job.job_id}`);
+    startTrainPolling(data.job.job_id);
+    render();
+  } catch (error) {
+    showToast(error.message || "启动训练失败");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function refreshTrainJob(jobId) {
+  const id = jobId || state.trainJob?.job_id;
+  if (!id) {
+    const list = await apiGet("/api/train");
+    state.trainJobs = list.items || [];
+    if (state.trainJobs[0]) state.trainJob = state.trainJobs[0];
+    return state.trainJob;
+  }
+  const data = await apiGet(`/api/train/${id}`);
+  state.trainJob = data.job;
+  return data.job;
+}
+
+function startTrainPolling(jobId) {
+  if (state.trainPollTimer) {
+    clearInterval(state.trainPollTimer);
+    state.trainPollTimer = null;
+  }
+  state.trainPollTimer = setInterval(async () => {
+    try {
+      const job = await refreshTrainJob(jobId);
+      if (state.view === "train" || state.view === "dashboard") render();
+      if (job && (job.status === "completed" || job.status === "failed")) {
+        clearInterval(state.trainPollTimer);
+        state.trainPollTimer = null;
+        if (job.status === "completed") {
+          await loadModels();
+          showToast(`训练完成并已注册：${job.registered_model_id || job.model_id}`);
+        }
+      }
+    } catch (_error) {
+      // keep polling until user leaves
+    }
+  }, 2500);
+}
+
+async function hydrateTrain() {
+  try {
+    await refreshTrainJob();
+    if (state.trainJob && (state.trainJob.status === "running" || state.trainJob.status === "queued")) {
+      startTrainPolling(state.trainJob.job_id);
+    }
+  } catch (_error) {
+    // ignore
+  }
 }
 
 function renderInference() {
@@ -3750,7 +4256,7 @@ function renderInference() {
           <div class="meta-line"><span>模型</span><strong>${escapeHtml(preview.model_id)}</strong></div>
           <div class="meta-line"><span>版本</span><strong>${escapeHtml(preview.version)}</strong></div>
         </div>
-      ` : `<div class="placeholder compact">尚未推理。Person B 可配置 SPLEEN_NNUNET_PREDICT_COMMAND + checkpoint_best.pth；未配置时使用内置 baseline。</div>`}
+      ` : `<div class="placeholder compact">尚未推理。未配置真实模型权重时预测会失败（不再静默使用 HU baseline）；可配置 TotalSeg / nnUNet / 平台 U-Net。</div>`}
     </section>
   `;
 }
@@ -4172,7 +4678,259 @@ function renderExport() {
 }
 
 function renderSettings() {
-  return `<div class="grid cols-2"><section class="panel"><h2>标签管理</h2><div class="label-list">${labelList()}</div></section><section class="panel"><h2>账号与权限</h2><div class="case-meta"><div class="meta-line"><span>当前用户</span><strong>${state.currentUser ? escapeHtml(state.currentUser.username) : "未登录"}</strong></div><div class="meta-line"><span>角色</span><strong>${state.currentUser ? escapeHtml(roleText[state.currentUser.role] || state.currentUser.role) : "-"}</strong></div><div class="meta-line"><span>演示账号</span><strong>admin/admin123 · reviewer/reviewer123 · annotator/annotator123</strong></div><div class="meta-line"><span>状态机</span><strong>unannotated → annotated → pending → reviewed → final</strong></div></div></section></div>`;
+  const catalog = effectiveLabelCatalog({ includeBackground: true, enabledOnly: false });
+  const labelRows = catalog.length
+    ? catalog.map((item) => {
+      const disabled = item.enabled === false;
+      const isBg = Number(item.label_id) === 0;
+      return `
+        <tr class="${disabled ? "row-disabled" : ""}">
+          <td><span class="swatch" style="background:${escapeHtml(item.color)}"></span> ${item.label_id}</td>
+          <td>${escapeHtml(item.name)}</td>
+          <td>${escapeHtml(item.display_name || item.name)}</td>
+          <td>${disabled ? "已禁用" : "启用"}</td>
+          <td class="settings-actions">
+            ${canManageLabels() && !isBg ? `
+              <button type="button" class="ghost-button" data-edit-label="${item.label_id}">编辑</button>
+              <button type="button" class="ghost-button" data-toggle-label="${item.label_id}" data-enabled="${disabled ? "1" : "0"}">${disabled ? "启用" : "禁用"}</button>
+              <button type="button" class="danger-button" data-delete-label="${item.label_id}">删除</button>
+            ` : (isBg ? `<span class="muted">系统保留</span>` : `<span class="muted">只读</span>`)}
+          </td>
+        </tr>
+      `;
+    }).join("")
+    : `<tr><td colspan="5"><div class="placeholder">暂无标签</div></td></tr>`;
+
+  const userRows = (state.users || []).length
+    ? state.users.map((user) => `
+      <tr>
+        <td>${user.id}</td>
+        <td>${escapeHtml(user.username)}</td>
+        <td>${escapeHtml(roleText[user.role] || user.role)}</td>
+        <td>${escapeHtml(user.create_time || "-")}</td>
+        <td class="settings-actions">
+          ${canManageUsers() ? `
+            <button type="button" class="ghost-button" data-edit-user="${user.id}">改角色</button>
+            <button type="button" class="ghost-button" data-reset-password="${user.id}">重置密码</button>
+            <button type="button" class="danger-button" data-delete-user="${user.id}">删除</button>
+          ` : `<span class="muted">只读</span>`}
+        </td>
+      </tr>
+    `).join("")
+    : `<tr><td colspan="5"><div class="placeholder">${state.currentUser ? (canManageTasks() ? "暂无用户" : "需要审核员/管理员权限查看用户列表") : "请先登录"}</div></td></tr>`;
+
+  return `
+    <div class="grid cols-2 settings-grid">
+      <section class="panel">
+        <h2>标签管理</h2>
+        <p class="panel-lead">标签目录供标注台、金标准导入与导出共用。禁用后不再出现在标注选择器中。</p>
+        ${canManageLabels() ? `
+          <form id="labelCreateForm" class="toolbar-row settings-form">
+            <label class="field"><span>ID（可选）</span><input name="label_id" type="number" min="1" placeholder="自动分配" /></label>
+            <label class="field"><span>英文名 name</span><input name="name" required placeholder="pancreas" /></label>
+            <label class="field"><span>显示名</span><input name="display_name" placeholder="胰腺" /></label>
+            <label class="field"><span>颜色</span><input name="color" type="color" value="#7dd3fc" /></label>
+            <button type="submit" class="primary-button">新增标签</button>
+          </form>
+        ` : `<p class="panel-lead">当前角色仅可查看；管理员可增删改。</p>`}
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>ID</th><th>name</th><th>显示名</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody>${labelRows}</tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>用户管理</h2>
+        <div class="case-meta" style="margin-bottom:14px">
+          <div class="meta-line"><span>当前用户</span><strong>${state.currentUser ? escapeHtml(state.currentUser.username) : "未登录"}</strong></div>
+          <div class="meta-line"><span>角色</span><strong>${state.currentUser ? escapeHtml(roleText[state.currentUser.role] || state.currentUser.role) : "-"}</strong></div>
+          <div class="meta-line"><span>状态机</span><strong>unannotated → annotated → pending → reviewed → final</strong></div>
+        </div>
+        ${canManageUsers() ? `
+          <form id="userCreateForm" class="toolbar-row settings-form">
+            <label class="field"><span>用户名</span><input name="username" required minlength="2" placeholder="new_user" /></label>
+            <label class="field"><span>密码</span><input name="password" type="password" required minlength="6" placeholder="至少6位" /></label>
+            <label class="field"><span>角色</span>
+              <select name="role">
+                <option value="annotator">标注员</option>
+                <option value="reviewer">审核员</option>
+                <option value="admin">管理员</option>
+              </select>
+            </label>
+            <button type="submit" class="primary-button">创建用户</button>
+          </form>
+        ` : `<p class="panel-lead">${canManageTasks() ? "审核员可查看用户列表；仅管理员可创建/改密/删除。" : "登录后由管理员维护账号。"}</p>`}
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>创建时间</th><th>操作</th></tr></thead>
+            <tbody>${userRows}</tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+async function handleLabelCreate(event) {
+  event.preventDefault();
+  if (!canManageLabels()) return;
+  const form = event.currentTarget;
+  const fd = new FormData(form);
+  const payload = {
+    name: String(fd.get("name") || "").trim(),
+    display_name: String(fd.get("display_name") || "").trim() || undefined,
+    color: String(fd.get("color") || "#00e5b0"),
+  };
+  const labelIdRaw = String(fd.get("label_id") || "").trim();
+  if (labelIdRaw) payload.label_id = Number(labelIdRaw);
+  try {
+    await apiPost("/api/labels", payload);
+    form.reset();
+    await refreshLabels();
+    render();
+    showToast("标签已创建");
+  } catch (error) {
+    showToast(error.message || "创建标签失败");
+  }
+}
+
+async function handleLabelEdit(labelId) {
+  if (!canManageLabels()) return;
+  const item = labelById(labelId);
+  if (!item) return;
+  const displayName = window.prompt("显示名", item.display_name || item.name);
+  if (displayName === null) return;
+  const name = window.prompt("英文名 name", item.name);
+  if (name === null) return;
+  const color = window.prompt("颜色 (#RRGGBB)", item.color || "#00e5b0");
+  if (color === null) return;
+  try {
+    await apiPut(`/api/labels/${labelId}`, {
+      display_name: displayName.trim(),
+      name: name.trim(),
+      color: color.trim(),
+    });
+    await refreshLabels();
+    render();
+    showToast("标签已更新");
+  } catch (error) {
+    showToast(error.message || "更新标签失败");
+  }
+}
+
+async function handleLabelToggle(labelId, enabled) {
+  if (!canManageLabels()) return;
+  try {
+    await apiPut(`/api/labels/${labelId}`, { enabled: Boolean(enabled) });
+    await refreshLabels();
+    render();
+    showToast(enabled ? "标签已启用" : "标签已禁用");
+  } catch (error) {
+    showToast(error.message || "更新失败");
+  }
+}
+
+async function handleLabelDelete(labelId) {
+  if (!canManageLabels()) return;
+  if (!window.confirm(`禁用并移除标签 #${labelId}？现有 mask 中的像素值不会自动改写。`)) return;
+  try {
+    await apiDelete(`/api/labels/${labelId}`);
+    await refreshLabels();
+    render();
+    showToast("标签已删除（软删除）");
+  } catch (error) {
+    showToast(error.message || "删除失败");
+  }
+}
+
+async function handleUserCreate(event) {
+  event.preventDefault();
+  if (!canManageUsers()) return;
+  const form = event.currentTarget;
+  const fd = new FormData(form);
+  try {
+    await apiPost("/api/users", {
+      username: String(fd.get("username") || "").trim(),
+      password: String(fd.get("password") || ""),
+      role: String(fd.get("role") || "annotator"),
+    });
+    form.reset();
+    await refreshUsersList();
+    render();
+    showToast("用户已创建");
+  } catch (error) {
+    showToast(error.message || "创建用户失败");
+  }
+}
+
+async function handleUserEditRole(userId) {
+  if (!canManageUsers()) return;
+  const user = (state.users || []).find((item) => Number(item.id) === Number(userId));
+  if (!user) return;
+  const role = window.prompt("角色：annotator / reviewer / admin", user.role);
+  if (role === null) return;
+  try {
+    await apiPut(`/api/users/${userId}`, { role: role.trim() });
+    await refreshUsersList();
+    render();
+    showToast("角色已更新");
+  } catch (error) {
+    showToast(error.message || "更新失败");
+  }
+}
+
+async function handleUserResetPassword(userId) {
+  if (!canManageUsers()) return;
+  const password = window.prompt("输入新密码（至少 6 位）");
+  if (password === null) return;
+  try {
+    await apiPost(`/api/users/${userId}/password`, { password });
+    showToast("密码已重置");
+  } catch (error) {
+    showToast(error.message || "重置失败");
+  }
+}
+
+async function handleUserDelete(userId) {
+  if (!canManageUsers()) return;
+  const user = (state.users || []).find((item) => Number(item.id) === Number(userId));
+  if (!window.confirm(`确认删除用户 ${user?.username || userId}？`)) return;
+  try {
+    await apiDelete(`/api/users/${userId}`);
+    await refreshUsersList();
+    render();
+    showToast("用户已删除");
+  } catch (error) {
+    showToast(error.message || "删除失败");
+  }
+}
+
+function bindSettingsActions() {
+  const labelForm = $("#labelCreateForm");
+  if (labelForm) labelForm.addEventListener("submit", handleLabelCreate);
+  const userForm = $("#userCreateForm");
+  if (userForm) userForm.addEventListener("submit", handleUserCreate);
+  document.querySelectorAll("[data-edit-label]").forEach((button) => {
+    button.addEventListener("click", () => handleLabelEdit(button.dataset.editLabel));
+  });
+  document.querySelectorAll("[data-toggle-label]").forEach((button) => {
+    button.addEventListener("click", () => {
+      handleLabelToggle(button.dataset.toggleLabel, button.dataset.enabled === "1");
+    });
+  });
+  document.querySelectorAll("[data-delete-label]").forEach((button) => {
+    button.addEventListener("click", () => handleLabelDelete(button.dataset.deleteLabel));
+  });
+  document.querySelectorAll("[data-edit-user]").forEach((button) => {
+    button.addEventListener("click", () => handleUserEditRole(button.dataset.editUser));
+  });
+  document.querySelectorAll("[data-reset-password]").forEach((button) => {
+    button.addEventListener("click", () => handleUserResetPassword(button.dataset.resetPassword));
+  });
+  document.querySelectorAll("[data-delete-user]").forEach((button) => {
+    button.addEventListener("click", () => handleUserDelete(button.dataset.deleteUser));
+  });
 }
 
 function render() {
@@ -4185,6 +4943,7 @@ function render() {
   if (taskForm) taskForm.addEventListener("submit", createTaskAssignment);
   const loginForm = $("#loginForm");
   if (loginForm) loginForm.addEventListener("submit", handleLogin);
+  bindSettingsActions();
   document.querySelectorAll("[data-view-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       state.volumeViewMode = button.dataset.viewMode;
@@ -4227,6 +4986,18 @@ function render() {
   bindMagicWandControls();
   bindRefineParamControls();
   bindAnnotationCanvas();
+  document.querySelectorAll("[data-pick-label]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setActiveAnnotationLabel(button.dataset.pickLabel);
+      render();
+    });
+  });
+  const eraseCurrentClassOnly = $("#eraseCurrentClassOnly");
+  if (eraseCurrentClassOnly) {
+    eraseCurrentClassOnly.addEventListener("change", () => {
+      state.eraseCurrentClassOnly = eraseCurrentClassOnly.checked;
+    });
+  }
   const saveMaskButton = $("[data-save-mask]");
   if (saveMaskButton) {
     saveMaskButton.addEventListener("click", saveCurrentMask);
@@ -4410,6 +5181,25 @@ function render() {
   if (smart3DRefineButton) {
     smart3DRefineButton.addEventListener("click", runSmart3DRefine);
   }
+  const graphCutRefineButton = $("[data-graph-cut-refine]");
+  if (graphCutRefineButton) {
+    graphCutRefineButton.addEventListener("click", runGraphCutRefine);
+  }
+  const startTrainButton = $("[data-start-train]");
+  if (startTrainButton) {
+    startTrainButton.addEventListener("click", startPlatformTrain);
+  }
+  const refreshTrainButton = $("[data-refresh-train]");
+  if (refreshTrainButton) {
+    refreshTrainButton.addEventListener("click", async () => {
+      try {
+        await refreshTrainJob();
+        render();
+      } catch (error) {
+        showToast(error.message || "刷新训练状态失败");
+      }
+    });
+  }
   const renderAnnotation3DButton = $("[data-render-annotation-3d]");
   if (renderAnnotation3DButton) {
     renderAnnotation3DButton.addEventListener("click", renderAnnotationMaskIn3D);
@@ -4474,7 +5264,22 @@ function render() {
       state.activeSlices = { axial: 0, coronal: 0, sagittal: 0 };
       state.undoStack = [];
       state.redoStack = [];
+      resetViewerZoom({ render: false });
       setView("annotation");
+    });
+  });
+  const viewerZoomSlider = $("#viewerZoomSlider");
+  if (viewerZoomSlider) {
+    viewerZoomSlider.addEventListener("input", () => {
+      setViewerZoom(Number(viewerZoomSlider.value) / 100);
+    });
+  }
+  document.querySelectorAll("[data-zoom-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.dataset.zoomAction;
+      if (action === "in") setViewerZoom(clampViewerZoom(state.viewerZoom) * 1.15);
+      else if (action === "out") setViewerZoom(clampViewerZoom(state.viewerZoom) / 1.15);
+      else if (action === "fit") resetViewerZoom();
     });
   });
   const sliceSlider = $("#sliceSlider");
@@ -4531,6 +5336,7 @@ function render() {
   if (state.view === "versions") hydrateVersions();
   if (state.view === "inference") hydrateInference();
   if (state.view === "quality") hydrateQuality();
+  if (state.view === "train" || state.view === "dashboard") hydrateTrain();
 }
 
 async function startVolumeViewer(image) {
@@ -4544,7 +5350,7 @@ async function startVolumeViewer(image) {
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/volume_viewer.js?v=vtk-organ-color-ui-20260710-p2`);
+    const module = await import(`/frontend/volume_viewer.js?v=multiclass-zoom-20260712`);
     if (maskId) {
       loadMaskQuality(maskId)
         .then(() => updateMaskQualitySummary(maskId))
@@ -4561,6 +5367,12 @@ async function startVolumeViewer(image) {
       maxDim: 176,
       isotropic: false,
       highlightMask,
+      labelColors: Object.fromEntries(
+        effectiveLabelCatalog({ includeBackground: true, enabledOnly: false }).map((item) => [
+          item.label_id,
+          item.color,
+        ]),
+      ),
     });
     container.dataset.ready = "true";
   } catch (error) {
@@ -4574,6 +5386,8 @@ function bindNavigation() {
   $("#refreshButton").addEventListener("click", async () => {
     await refreshCases();
     await refreshTasks();
+    await refreshLabels();
+    await refreshUsersList();
     render();
     showToast("数据已刷新");
   });
@@ -4592,6 +5406,7 @@ async function init() {
   bindNavigation();
   window.addEventListener("resize", () => resizeAnnotationCanvas());
   await restoreSession();
+  await refreshLabels();
   await refreshCases();
   await loadModels();
   render();

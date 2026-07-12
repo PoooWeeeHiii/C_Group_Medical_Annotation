@@ -24,18 +24,20 @@ VERSION_AI = "v2_ai"
 VERSION_FUSION = "v3_fusion"
 VERSION_FINAL = "final"
 
-# Model (Day1 decision: U-Net 2D + Dice + BCE)
-MODEL_ARCH = "unet_2d"
-IN_CHANNELS = 1
-OUT_CHANNELS = 1
+# Model (platform U-Net: 2.5D by default)
+MODEL_ARCH = "unet_2_5d"
+IN_CHANNELS = 3  # context_radius=1 => z-1,z,z+1
+OUT_CHANNELS = 6
 LOSS_DICE_WEIGHT = 0.5
 LOSS_BCE_WEIGHT = 0.5
 
-# Training hyperparameters (Day2+ fill)
-EPOCHS = 50
-BATCH_SIZE = 8
+# Training hyperparameters
+EPOCHS = 20
+BATCH_SIZE = 4
 LEARNING_RATE = 1e-4
-IMAGE_SIZE = (256, 256)
+IMAGE_SIZE = (320, 320)
+CONTEXT_RADIUS = 1
+MAX_SLICES_PER_VOLUME = 64
 CT_HU_MIN = -1000
 CT_HU_MAX = 400
 DEFAULT_LABEL = "lung_nodule"
@@ -76,6 +78,17 @@ SPLEEN_NNUNET_PYTHON = os.environ.get(
     "SPLEEN_NNUNET_PYTHON",
     str(SPLEEN_NNUNET_ROOT / "venv_nnunet_cpu" / "Scripts" / "python.exe"),
 )
+
+# TotalSegmentator inference (official package; weights download on first run)
+_DEFAULT_TOTALSEG_ROOT = Path(os.environ.get("TOTALSEG_ROOT", r"D:\hm_2_totalseg"))
+TOTALSEG_ROOT = _DEFAULT_TOTALSEG_ROOT
+TOTALSEG_PYTHON = os.environ.get(
+    "TOTALSEG_PYTHON",
+    str(SPLEEN_NNUNET_ROOT / "venv_nnunet_cpu" / "Scripts" / "python.exe"),
+)
+TOTALSEG_DEVICE = os.environ.get("TOTALSEG_DEVICE", "auto")
+TOTALSEG_FAST = os.environ.get("TOTALSEG_FAST", "")  # empty = auto (fast on CPU)
+TOTALSEG_TIMEOUT_SECONDS = int(os.environ.get("TOTALSEG_TIMEOUT_SECONDS", "1800"))
 
 # Example label path pattern:
 # dataset/labels/Case0001/v2_ai/Case0001_Image0001_Mask0001_v2_ai_spleen.nii.gz
