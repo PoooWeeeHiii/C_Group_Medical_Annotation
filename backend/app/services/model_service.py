@@ -134,6 +134,94 @@ BUILTIN_MODELS: list[dict[str, Any]] = [
         "builtin": True,
     },
     {
+        "model_id": "liver_nnunet_ds511",
+        "version": "planA_100ep_3d_fullres",
+        "label": "liver",
+        "display_name": "肝脏 nnU-Net (Dataset511 / Plan A)",
+        "backend": "organ_nnunet_local",
+        "description": "Person B Plan A：伪标签 3d_fullres 100 epoch。需 ORGANS_NNUNET_ROOT 下 Dataset511 权重。",
+        "dice": 0.921,
+        "path": r"E:\lxy\hm_2_organs_nnunet\nnUNet_results\Dataset511_DeepEdit_Liver\nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres",
+        "builtin": True,
+    },
+    {
+        "model_id": "kidney_nnunet_ds513",
+        "version": "planA_100ep_3d_fullres",
+        "label": "kidney",
+        "display_name": "肾脏 nnU-Net (Dataset513 / Plan A)",
+        "backend": "organ_nnunet_local",
+        "description": "Person B Plan A：左右肾合并二值；伪标签 3d_fullres 100 epoch。",
+        "dice": 0.813,
+        "path": r"E:\lxy\hm_2_organs_nnunet\nnUNet_results\Dataset513_DeepEdit_Kidney\nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres",
+        "builtin": True,
+    },
+    {
+        "model_id": "lung_nnunet_ds512",
+        "version": "planA_100ep_3d_fullres",
+        "label": "lung",
+        "display_name": "肺部 nnU-Net (Dataset512 / Plan A)",
+        "backend": "organ_nnunet_local",
+        "description": "Person B Plan A：左右肺合并二值；伪标签 3d_fullres 100 epoch。",
+        "dice": 0.95,
+        "path": r"E:\lxy\hm_2_organs_nnunet\nnUNet_results\Dataset512_DeepEdit_Lung\nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres",
+        "builtin": True,
+    },
+    {
+        "model_id": "heart_nnunet_ds510",
+        "version": "planA_100ep_3d_fullres",
+        "label": "heart",
+        "display_name": "心脏 nnU-Net (Dataset510 / Plan A)",
+        "backend": "organ_nnunet_local",
+        "description": "Person B Plan A：伪标签 3d_fullres 100 epoch（心脏 Dice 相对偏低）。",
+        "dice": 0.613,
+        "path": r"E:\lxy\hm_2_organs_nnunet\nnUNet_results\Dataset510_DeepEdit_Heart\nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres",
+        "builtin": True,
+    },
+    {
+        "model_id": "Model0010",
+        "version": "planA_100ep_3d_fullres",
+        "label": "heart",
+        "display_name": "心脏 nnU-Net (Model0010 / Person B)",
+        "backend": "organ_nnunet_local",
+        "description": "Person B 别名 → heart_nnunet_ds510。",
+        "dice": 0.613,
+        "path": r"E:\lxy\hm_2_organs_nnunet\nnUNet_results\Dataset510_DeepEdit_Heart\nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres",
+        "builtin": True,
+    },
+    {
+        "model_id": "Model0011",
+        "version": "planA_100ep_3d_fullres",
+        "label": "liver",
+        "display_name": "肝脏 nnU-Net (Model0011 / Person B)",
+        "backend": "organ_nnunet_local",
+        "description": "Person B 别名 → liver_nnunet_ds511。",
+        "dice": 0.921,
+        "path": r"E:\lxy\hm_2_organs_nnunet\nnUNet_results\Dataset511_DeepEdit_Liver\nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres",
+        "builtin": True,
+    },
+    {
+        "model_id": "Model0012",
+        "version": "planA_100ep_3d_fullres",
+        "label": "lung",
+        "display_name": "肺部 nnU-Net (Model0012 / Person B)",
+        "backend": "organ_nnunet_local",
+        "description": "Person B 别名 → lung_nnunet_ds512。",
+        "dice": 0.95,
+        "path": r"E:\lxy\hm_2_organs_nnunet\nnUNet_results\Dataset512_DeepEdit_Lung\nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres",
+        "builtin": True,
+    },
+    {
+        "model_id": "Model0013",
+        "version": "planA_100ep_3d_fullres",
+        "label": "kidney",
+        "display_name": "肾脏 nnU-Net (Model0013 / Person B)",
+        "backend": "organ_nnunet_local",
+        "description": "Person B 别名 → kidney_nnunet_ds513。",
+        "dice": 0.813,
+        "path": r"E:\lxy\hm_2_organs_nnunet\nnUNet_results\Dataset513_DeepEdit_Kidney\nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres",
+        "builtin": True,
+    },
+    {
         "model_id": "builtin_lung",
         "version": "baseline",
         "label": "lung",
@@ -202,7 +290,11 @@ def ensure_builtin_models() -> None:
             else (
                 bool(os.getenv("TOTALSEG_PYTHON") or True)
                 if item.get("backend") == "totalsegmentator"
-                else False
+                else (
+                    True
+                    if item.get("backend") == "organ_nnunet_local"
+                    else False
+                )
             ),
         }
         if existing is None:
@@ -255,6 +347,14 @@ def _model_public(record: dict[str, Any]) -> dict[str, Any]:
         external_ready = Path(python_path).exists()
     elif "spleen" in model_id.lower() and backend != "totalsegmentator":
         external_ready = bool(os.getenv("SPLEEN_NNUNET_PREDICT_COMMAND"))
+    elif backend == "organ_nnunet_local":
+        try:
+            from ai.organ_nnunet import ensure_organ_model_ready
+
+            ensure_organ_model_ready(model_id=model_id, label=label)
+            external_ready = True
+        except Exception:
+            external_ready = False
     return {
         "model_id": model_id,
         "version": str(record.get("version") or model_id),

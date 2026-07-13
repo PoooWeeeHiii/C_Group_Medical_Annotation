@@ -317,3 +317,50 @@ def predict_spleen(
         model_id=SPLEEN_MODEL_ID,
         version=VERSION_AI,
     )
+
+
+def predict_organ(
+    case_id: str,
+    image_id: str,
+    mask_id: str,
+    volume: np.ndarray,
+    spacing: tuple[float, float, float],
+    image_path: str,
+    *,
+    model_id: str | None = None,
+    label: str | None = None,
+) -> dict:
+    """Person B entry: Plan A organ nnU-Net → dataset/labels/.../v2_ai/."""
+    from ai.config import ORGAN_MODEL_ALIASES, VERSION_AI, mask_filename
+    from ai.organ_nnunet import ensure_organ_model_ready, predict_organ_volume, resolve_organ_model
+
+    spec = resolve_organ_model(model_id=model_id, label=label)
+    if spec is None:
+        raise ValueError(f"Cannot resolve organ model: model_id={model_id!r} label={label!r}")
+    ensure_organ_model_ready(model_id=spec.model_id, label=spec.label)
+    relative_mask = (
+        Path("dataset")
+        / "labels"
+        / case_id
+        / VERSION_AI
+        / mask_filename(case_id, image_id, mask_id, VERSION_AI, spec.label, ext="nii.gz")
+    )
+    absolute_mask = Path(__file__).resolve().parents[1] / relative_mask
+    predict_organ_volume(
+        model_id=spec.model_id,
+        label=spec.label,
+        volume=volume,
+        spacing=spacing,
+        output_mask_path=absolute_mask,
+    )
+    display_model = model_id if (model_id or "") in ORGAN_MODEL_ALIASES else spec.model_id
+    return build_predict_response(
+        case_id=case_id,
+        image_id=image_id,
+        mask_id=mask_id,
+        image_path=image_path,
+        mask_path=str(relative_mask).replace("\\", "/"),
+        label=spec.label,
+        model_id=display_model or spec.model_id,
+        version=VERSION_AI,
+    )

@@ -71,3 +71,22 @@ D:\anaconda\python.exe -u scripts\run_organs_nnunet_planA.py --skip-convert --au
 
 - 肺/肝最好，肾中上，心最弱（结构更难、伪标噪声更大）
 - 与 DeepEdit 交互修正、人机闭环互补：nnUNet 负责初标扩展，DeepEdit 负责点击精修
+
+## 平台推理接入（已接线）
+
+模型 ID（前端可选）：
+
+| model_id | Person B 别名 | label |
+|----------|---------------|-------|
+| `heart_nnunet_ds510` | `Model0010` | heart |
+| `liver_nnunet_ds511` | `Model0011` | liver |
+| `lung_nnunet_ds512` | `Model0012` | lung |
+| `kidney_nnunet_ds513` | `Model0013` | kidney |
+
+实现：`ai/organ_nnunet.py` ← `ai_service`（`backend=organ_nnunet_local`）。  
+说明：`models/organ_nnunet.md`；联调：`docs/15_organ_ai_predict.md`。
+
+```powershell
+D:\anaconda\python.exe -u scripts\smoke_organ_predict.py --organ all --case spleen_10 --register
+D:\anaconda\python.exe -u scripts\e2e_organ_api.py --organ all
+```

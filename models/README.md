@@ -7,6 +7,7 @@ Only keep model notes, configuration examples, or download links here.
 Current notes:
 
 - [spleen_nnunet.md](spleen_nnunet.md): local Dataset506 spleen nnUNet weights for `POST /api/ai/predict`
+- [organ_nnunet.md](organ_nnunet.md): Plan A heart/liver/lung/kidney nnUNet (`*_nnunet_ds51x` / `Model0010`–`Model0013`)；联调见 [docs/15_organ_ai_predict.md](../docs/15_organ_ai_predict.md)
 
 Recommended layout:
 
@@ -14,6 +15,7 @@ Recommended layout:
 models/
   README.md
   spleen_nnunet.md
+  organ_nnunet.md
   deepedit/
     model.ts          # local only, ignored by Git
   model_registry.md
