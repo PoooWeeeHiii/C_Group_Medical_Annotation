@@ -174,6 +174,8 @@ def read_mask_surface_mesh(
     constrain_to_body: bool = True,
     constrain_to_source_roi: bool = True,
     source_roi_margin_mm: float = 45.0,
+    per_label: bool = True,
+    max_labels: int = 24,
 ) -> dict:
     return get_mask_surface_mesh(
         mask_id=mask_id,
@@ -186,6 +188,8 @@ def read_mask_surface_mesh(
         constrain_to_body=constrain_to_body,
         constrain_to_source_roi=constrain_to_source_roi,
         source_roi_margin_mm=source_roi_margin_mm,
+        per_label=per_label,
+        max_labels=max_labels,
     )
 
 

@@ -488,6 +488,13 @@ def get_mask_volume_data(mask_id: str, max_dim: int = 176) -> dict[str, Any]:
 
 
 def _read_nifti_mask_array(mask_id: str) -> tuple[dict[str, Any], Any, np.ndarray]:
+    """Load NIfTI mask as binary foreground (legacy helper)."""
+    record, image, labels = _read_nifti_mask_label_array(mask_id)
+    return record, image, (labels > 0).astype(np.uint8, copy=False)
+
+
+def _read_nifti_mask_label_array(mask_id: str) -> tuple[dict[str, Any], Any, np.ndarray]:
+    """Load NIfTI mask preserving integer label ids (0=background)."""
     try:
         import SimpleITK as sitk
     except ModuleNotFoundError as exc:
@@ -512,7 +519,179 @@ def _read_nifti_mask_array(mask_id: str) -> tuple[dict[str, Any], Any, np.ndarra
     array = sitk.GetArrayFromImage(image)
     if array.ndim == 2:
         array = array.reshape((1, array.shape[0], array.shape[1]))
-    return record, image, (array > 0).astype(np.uint8, copy=False)
+    return record, image, np.clip(np.asarray(array), 0, 255).astype(np.uint8, copy=False)
+
+
+def _mask_label_meta_map() -> dict[int, dict[str, str]]:
+    try:
+        from backend.app.services.label_service import list_labels
+
+        return {
+            int(item["label_id"]): {
+                "name": str(item.get("name") or ""),
+                "display_name": str(item.get("display_name") or item.get("name") or ""),
+                "color": str(item.get("color") or ""),
+            }
+            for item in list_labels(enabled_only=False, include_background=True)
+        }
+    except Exception:
+        return {}
+
+
+def _is_multiclass_mask_record(record: dict[str, Any], unique_labels: list[int]) -> bool:
+    label_name = str(record.get("label") or "").strip().lower()
+    is_named_multi = label_name in {"全部标注", "all_labels", "multiclass", "all", "alllabels"}
+    return bool(is_named_multi or (len(unique_labels) > 1 and set(unique_labels) != {255}))
+
+
+def _cleanup_binary_mask_for_surface(
+    record: dict[str, Any],
+    binary: np.ndarray,
+    spacing: tuple[float, float, float],
+    *,
+    min_component_voxels: int,
+    max_components: int,
+    remove_thin: bool,
+    constrain_to_body: bool,
+    constrain_to_source_roi: bool,
+    source_roi_margin_mm: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    cleanup: dict[str, Any] = {}
+    working = (binary > 0).astype(np.uint8, copy=False)
+    if constrain_to_source_roi:
+        working, roi_cleanup = _constrain_mask_to_source_roi(
+            record=record,
+            binary=working,
+            spacing=spacing,
+            margin_mm=source_roi_margin_mm,
+        )
+        cleanup["source_roi_constraint"] = roi_cleanup
+    if constrain_to_body:
+        working, body_cleanup = _constrain_mask_to_ct_body(record, working)
+        cleanup["ct_body_constraint"] = body_cleanup
+    if remove_thin:
+        working, removed_thin_voxels = _remove_thin_axial_artifacts(working)
+        cleanup["removed_thin_voxels"] = removed_thin_voxels
+    working, component_cleanup = _filter_mask_components(
+        binary=working,
+        min_voxels=min_component_voxels,
+        max_components=max_components,
+    )
+    cleanup.update(component_cleanup)
+    return working.astype(np.uint8, copy=False), cleanup
+
+
+def _binary_to_normalized_mesh(
+    binary: np.ndarray,
+    spacing: tuple[float, float, float],
+    origin: tuple[float, float, float],
+    *,
+    max_triangles: int,
+    target_reduction: float,
+    smooth_iterations: int,
+) -> dict[str, Any] | None:
+    try:
+        import vtk
+        from vtk.util import numpy_support
+    except ModuleNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="vtk is not installed. Run `pip install -r requirements.txt` to enable VTK mask surface mesh.",
+        ) from exc
+
+    if not np.any(binary):
+        return None
+
+    depth, height, width = binary.shape[:3]
+    image_data = vtk.vtkImageData()
+    image_data.SetDimensions(int(width), int(height), int(depth))
+    image_data.SetSpacing(spacing)
+    image_data.SetOrigin(origin)
+    scalars = numpy_support.numpy_to_vtk(
+        np.ascontiguousarray(binary.astype(np.uint8, copy=False)).reshape(-1, order="C"),
+        deep=True,
+        array_type=vtk.VTK_UNSIGNED_CHAR,
+    )
+    scalars.SetName("mask")
+    image_data.GetPointData().SetScalars(scalars)
+
+    marching = vtk.vtkMarchingCubes()
+    marching.SetInputData(image_data)
+    marching.SetValue(0, 0.5)
+    marching.ComputeNormalsOff()
+    marching.ComputeGradientsOff()
+    marching.Update()
+
+    triangle_filter = vtk.vtkTriangleFilter()
+    triangle_filter.SetInputConnection(marching.GetOutputPort())
+    triangle_filter.Update()
+    polydata = triangle_filter.GetOutput()
+
+    if smooth_iterations > 0 and polydata.GetNumberOfPoints() > 0:
+        smoother = vtk.vtkWindowedSincPolyDataFilter()
+        smoother.SetInputData(polydata)
+        smoother.SetNumberOfIterations(max(0, min(int(smooth_iterations), 24)))
+        smoother.BoundarySmoothingOff()
+        smoother.FeatureEdgeSmoothingOff()
+        smoother.NonManifoldSmoothingOn()
+        smoother.NormalizeCoordinatesOn()
+        smoother.Update()
+        smoothed = smoother.GetOutput()
+        if smoothed.GetNumberOfPoints() > 0 and smoothed.GetNumberOfPolys() > 0:
+            polydata = smoothed
+
+    polydata = _decimate_polydata(polydata, target_reduction=target_reduction, max_triangles=max_triangles)
+    normals_filter = vtk.vtkPolyDataNormals()
+    normals_filter.SetInputData(polydata)
+    normals_filter.ComputePointNormalsOn()
+    normals_filter.ComputeCellNormalsOff()
+    normals_filter.SplittingOff()
+    normals_filter.ConsistencyOn()
+    normals_filter.AutoOrientNormalsOn()
+    normals_filter.Update()
+    normals_polydata = normals_filter.GetOutput()
+    if normals_polydata.GetNumberOfPoints() > 0 and normals_polydata.GetPointData().GetNormals() is not None:
+        polydata = normals_polydata
+
+    if polydata.GetNumberOfPoints() == 0 or polydata.GetNumberOfPolys() == 0:
+        return None
+
+    points = polydata.GetPoints()
+    vtk_points = numpy_support.vtk_to_numpy(points.GetData()).astype(np.float32, copy=False)
+    normal_data = polydata.GetPointData().GetNormals()
+    if normal_data is not None:
+        normals = numpy_support.vtk_to_numpy(normal_data).astype(np.float32, copy=False)
+    else:
+        normals = np.zeros_like(vtk_points, dtype=np.float32)
+    extent = np.array(
+        [
+            spacing[0] * max(width - 1, 1),
+            spacing[1] * max(height - 1, 1),
+            spacing[2] * max(depth - 1, 1),
+        ],
+        dtype=np.float32,
+    )
+    normalized = (vtk_points - np.array(origin, dtype=np.float32)) / np.maximum(extent, 1e-6)
+    normalized = np.clip(normalized, 0.0, 1.0).astype(np.float32, copy=False)
+
+    polys = numpy_support.vtk_to_numpy(polydata.GetPolys().GetData()).astype(np.int64, copy=False)
+    indices: list[int] = []
+    cursor = 0
+    while cursor < polys.size:
+        count = int(polys[cursor])
+        if count == 3 and cursor + 3 < polys.size:
+            indices.extend(int(value) for value in polys[cursor + 1 : cursor + 4])
+        cursor += count + 1
+    if not indices:
+        return None
+    return {
+        "dimensions": [width, height, depth],
+        "vertex_count": int(normalized.shape[0]),
+        "triangle_count": int(len(indices) // 3),
+        "positions": normalized.reshape(-1).round(6).tolist(),
+        "normals": normals.reshape(-1).round(5).tolist(),
+        "indices": indices,
+    }
 
 
 def _filter_mask_components(binary: np.ndarray, min_voxels: int, max_components: int) -> tuple[np.ndarray, dict[str, Any]]:
@@ -795,147 +974,159 @@ def get_mask_surface_mesh(
     constrain_to_body: bool = True,
     constrain_to_source_roi: bool = True,
     source_roi_margin_mm: float = 45.0,
+    per_label: bool = True,
+    max_labels: int = 24,
 ) -> dict[str, Any]:
-    try:
-        import vtk
-        from vtk.util import numpy_support
-    except ModuleNotFoundError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="vtk is not installed. Run `pip install -r requirements.txt` to enable VTK mask surface mesh.",
-        ) from exc
-
-    record, image, binary = _read_nifti_mask_array(mask_id)
+    record, image, labels = _read_nifti_mask_label_array(mask_id)
     spacing = tuple(float(value) for value in image.GetSpacing()[:3])
-    cleanup: dict[str, Any] = {}
-    if constrain_to_source_roi:
-        binary, roi_cleanup = _constrain_mask_to_source_roi(
-            record=record,
-            binary=binary,
-            spacing=spacing,
-            margin_mm=source_roi_margin_mm,
-        )
-        cleanup["source_roi_constraint"] = roi_cleanup
-    if constrain_to_body:
-        binary, body_cleanup = _constrain_mask_to_ct_body(record, binary)
-        cleanup["ct_body_constraint"] = body_cleanup
-    if remove_thin:
-        binary, removed_thin_voxels = _remove_thin_axial_artifacts(binary)
-        cleanup["removed_thin_voxels"] = removed_thin_voxels
-
-    binary, component_cleanup = _filter_mask_components(
-        binary=binary,
-        min_voxels=min_component_voxels,
-        max_components=max_components,
-    )
-    cleanup.update(component_cleanup)
-    if not np.any(binary):
-        raise HTTPException(status_code=422, detail="Mask is empty after artifact cleanup")
-
-    depth, height, width = binary.shape[:3]
     origin = tuple(float(value) for value in image.GetOrigin()[:3])
+    unique_labels = sorted({int(v) for v in np.unique(labels) if int(v) > 0})
+    multiclass = _is_multiclass_mask_record(record, unique_labels)
+    label_meta = _mask_label_meta_map()
+    depth, height, width = labels.shape[:3]
 
-    image_data = vtk.vtkImageData()
-    image_data.SetDimensions(int(width), int(height), int(depth))
-    image_data.SetSpacing(spacing)
-    image_data.SetOrigin(origin)
-    scalars = numpy_support.numpy_to_vtk(
-        np.ascontiguousarray(binary).reshape(-1, order="C"),
-        deep=True,
-        array_type=vtk.VTK_UNSIGNED_CHAR,
+    def pack_response(
+        *,
+        mesh: dict[str, Any],
+        cleanup: dict[str, Any],
+        layers: list[dict[str, Any]] | None = None,
+        multiclass_flag: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "success": True,
+            "mask_id": mask_id,
+            "case_id": record.get("case_id"),
+            "image_id": record.get("image_id"),
+            "version": record.get("version"),
+            "label": record.get("label"),
+            "source": "vtk_marching_cubes",
+            "multiclass": bool(multiclass_flag),
+            "dimensions": [width, height, depth],
+            "spacing": [float(value) for value in spacing],
+            "origin": [float(value) for value in origin],
+            "cleanup": cleanup,
+            "vertex_count": int(mesh["vertex_count"]),
+            "triangle_count": int(mesh["triangle_count"]),
+            "positions": mesh["positions"],
+            "normals": mesh["normals"],
+            "indices": mesh["indices"],
+            "layers": layers or [],
+        }
+
+    # Multiclass path: one Marching Cubes surface per label id, colored on the client.
+    if per_label and multiclass and len(unique_labels) > 1:
+        ranked = sorted(
+            unique_labels,
+            key=lambda lid: int(np.count_nonzero(labels == lid)),
+            reverse=True,
+        )
+        selected = ranked[: max(1, min(int(max_labels), 48))]
+        per_budget = max(6000, int(max_triangles) // max(1, len(selected)))
+        layers: list[dict[str, Any]] = []
+        layer_cleanups: dict[str, Any] = {}
+        for label_id in selected:
+            binary = (labels == int(label_id)).astype(np.uint8, copy=False)
+            cleaned, cleanup = _cleanup_binary_mask_for_surface(
+                record,
+                binary,
+                spacing,
+                min_component_voxels=min_component_voxels,
+                max_components=max_components,
+                remove_thin=remove_thin,
+                constrain_to_body=constrain_to_body,
+                constrain_to_source_roi=constrain_to_source_roi,
+                source_roi_margin_mm=source_roi_margin_mm,
+            )
+            layer_cleanups[str(label_id)] = cleanup
+            if not np.any(cleaned):
+                continue
+            mesh = _binary_to_normalized_mesh(
+                cleaned,
+                spacing,
+                origin,
+                max_triangles=per_budget,
+                target_reduction=target_reduction,
+                smooth_iterations=smooth_iterations,
+            )
+            if mesh is None:
+                continue
+            meta = label_meta.get(int(label_id), {})
+            layers.append(
+                {
+                    "label_id": int(label_id),
+                    "name": meta.get("name") or f"label_{label_id}",
+                    "display_name": meta.get("display_name") or meta.get("name") or f"label_{label_id}",
+                    "color": meta.get("color") or "",
+                    "voxel_count": int(np.count_nonzero(cleaned)),
+                    "vertex_count": mesh["vertex_count"],
+                    "triangle_count": mesh["triangle_count"],
+                    "positions": mesh["positions"],
+                    "normals": mesh["normals"],
+                    "indices": mesh["indices"],
+                }
+            )
+
+        if layers:
+            # Keep top-level mesh fields for older clients (largest organ).
+            primary = max(layers, key=lambda item: int(item.get("triangle_count") or 0))
+            return pack_response(
+                mesh=primary,
+                cleanup={"per_label": layer_cleanups, "selected_labels": [int(x["label_id"]) for x in layers]},
+                layers=layers,
+                multiclass_flag=True,
+            )
+        # Fall through to binary merge if every per-label extract failed.
+
+    binary = (labels > 0).astype(np.uint8, copy=False)
+    cleaned, cleanup = _cleanup_binary_mask_for_surface(
+        record,
+        binary,
+        spacing,
+        min_component_voxels=min_component_voxels,
+        max_components=max_components,
+        remove_thin=remove_thin,
+        constrain_to_body=constrain_to_body,
+        constrain_to_source_roi=constrain_to_source_roi,
+        source_roi_margin_mm=source_roi_margin_mm,
     )
-    scalars.SetName("mask")
-    image_data.GetPointData().SetScalars(scalars)
-
-    marching = vtk.vtkMarchingCubes()
-    marching.SetInputData(image_data)
-    marching.SetValue(0, 0.5)
-    marching.ComputeNormalsOff()
-    marching.ComputeGradientsOff()
-    marching.Update()
-
-    triangle_filter = vtk.vtkTriangleFilter()
-    triangle_filter.SetInputConnection(marching.GetOutputPort())
-    triangle_filter.Update()
-    polydata = triangle_filter.GetOutput()
-
-    if smooth_iterations > 0 and polydata.GetNumberOfPoints() > 0:
-        smoother = vtk.vtkWindowedSincPolyDataFilter()
-        smoother.SetInputData(polydata)
-        smoother.SetNumberOfIterations(max(0, min(int(smooth_iterations), 24)))
-        smoother.BoundarySmoothingOff()
-        smoother.FeatureEdgeSmoothingOff()
-        smoother.NonManifoldSmoothingOn()
-        smoother.NormalizeCoordinatesOn()
-        smoother.Update()
-        smoothed = smoother.GetOutput()
-        if smoothed.GetNumberOfPoints() > 0 and smoothed.GetNumberOfPolys() > 0:
-            polydata = smoothed
-
-    polydata = _decimate_polydata(polydata, target_reduction=target_reduction, max_triangles=max_triangles)
-    normals_filter = vtk.vtkPolyDataNormals()
-    normals_filter.SetInputData(polydata)
-    normals_filter.ComputePointNormalsOn()
-    normals_filter.ComputeCellNormalsOff()
-    normals_filter.SplittingOff()
-    normals_filter.ConsistencyOn()
-    normals_filter.AutoOrientNormalsOn()
-    normals_filter.Update()
-    normals_polydata = normals_filter.GetOutput()
-    if normals_polydata.GetNumberOfPoints() > 0 and normals_polydata.GetPointData().GetNormals() is not None:
-        polydata = normals_polydata
-
-    if polydata.GetNumberOfPoints() == 0 or polydata.GetNumberOfPolys() == 0:
+    if not np.any(cleaned):
+        raise HTTPException(status_code=422, detail="Mask is empty after artifact cleanup")
+    mesh = _binary_to_normalized_mesh(
+        cleaned,
+        spacing,
+        origin,
+        max_triangles=max_triangles,
+        target_reduction=target_reduction,
+        smooth_iterations=smooth_iterations,
+    )
+    if mesh is None:
         raise HTTPException(status_code=422, detail="VTK could not extract a surface from this mask")
-
-    points = polydata.GetPoints()
-    vtk_points = numpy_support.vtk_to_numpy(points.GetData()).astype(np.float32, copy=False)
-    normal_data = polydata.GetPointData().GetNormals()
-    if normal_data is not None:
-        normals = numpy_support.vtk_to_numpy(normal_data).astype(np.float32, copy=False)
-    else:
-        normals = np.zeros_like(vtk_points, dtype=np.float32)
-    extent = np.array(
-        [
-            spacing[0] * max(width - 1, 1),
-            spacing[1] * max(height - 1, 1),
-            spacing[2] * max(depth - 1, 1),
-        ],
-        dtype=np.float32,
+    single_label = unique_labels[0] if len(unique_labels) == 1 else None
+    layers = []
+    if single_label is not None:
+        meta = label_meta.get(int(single_label), {})
+        layers = [
+            {
+                "label_id": int(single_label),
+                "name": meta.get("name") or str(record.get("label") or f"label_{single_label}"),
+                "display_name": meta.get("display_name")
+                or meta.get("name")
+                or str(record.get("label") or f"label_{single_label}"),
+                "color": meta.get("color") or "",
+                "voxel_count": int(np.count_nonzero(cleaned)),
+                "vertex_count": mesh["vertex_count"],
+                "triangle_count": mesh["triangle_count"],
+                "positions": mesh["positions"],
+                "normals": mesh["normals"],
+                "indices": mesh["indices"],
+            }
+        ]
+    return pack_response(
+        mesh=mesh,
+        cleanup=cleanup,
+        layers=layers,
+        multiclass_flag=False,
     )
-    normalized = (vtk_points - np.array(origin, dtype=np.float32)) / np.maximum(extent, 1e-6)
-    normalized = np.clip(normalized, 0.0, 1.0).astype(np.float32, copy=False)
-
-    polys = numpy_support.vtk_to_numpy(polydata.GetPolys().GetData()).astype(np.int64, copy=False)
-    indices: list[int] = []
-    cursor = 0
-    while cursor < polys.size:
-        count = int(polys[cursor])
-        if count == 3 and cursor + 3 < polys.size:
-            indices.extend(int(value) for value in polys[cursor + 1 : cursor + 4])
-        cursor += count + 1
-
-    if not indices:
-        raise HTTPException(status_code=422, detail="VTK surface contains no triangles")
-
-    return {
-        "success": True,
-        "mask_id": mask_id,
-        "case_id": record.get("case_id"),
-        "image_id": record.get("image_id"),
-        "version": record.get("version"),
-        "label": record.get("label"),
-        "source": "vtk_marching_cubes",
-        "dimensions": [width, height, depth],
-        "spacing": [float(value) for value in spacing],
-        "origin": [float(value) for value in origin],
-        "cleanup": cleanup,
-        "vertex_count": int(normalized.shape[0]),
-        "triangle_count": int(len(indices) // 3),
-        "positions": normalized.reshape(-1).round(6).tolist(),
-        "normals": normals.reshape(-1).round(5).tolist(),
-        "indices": indices,
-    }
 
 
 def get_mask_quality_summary(mask_id: str) -> dict[str, Any]:
