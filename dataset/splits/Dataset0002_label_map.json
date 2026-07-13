@@ -1,11 +1,10 @@
 {
   "background": 0,
-  "label": 1,
+  "spleen": 5,
   "liver": 1,
   "kidney": 2,
   "lung": 3,
   "tumor": 4,
-  "spleen": 5,
   "pancreas": 6,
   "stomach": 7,
   "gallbladder": 8,

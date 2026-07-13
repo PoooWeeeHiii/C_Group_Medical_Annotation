@@ -1,0 +1,9 @@
+{
+  "dataset_id": "DatasetSmokeP4b",
+  "version": "v3_fusion",
+  "train": [
+    "Case0002"
+  ],
+  "val": [],
+  "test": []
+}

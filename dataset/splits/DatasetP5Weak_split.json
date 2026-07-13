@@ -1,9 +1,9 @@
 {
-  "dataset_id": "Dataset0001",
+  "dataset_id": "DatasetP5Weak",
   "version": "v3_preview",
-  "label_set": "dense",
+  "label_set": "weak",
   "train": [
-    "Case0003"
+    "Case0002"
   ],
   "val": [],
   "test": []

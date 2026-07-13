@@ -1,0 +1,77 @@
+{
+  "dataset_id": "DatasetP5Weak",
+  "name": "p5_weak_smoke",
+  "version": "v3_preview",
+  "label_set": "weak",
+  "format": "nnunet",
+  "materialize": true,
+  "create_time": "2026-07-11T20:21:04",
+  "counts": {
+    "train": 1,
+    "val": 0,
+    "test": 0,
+    "total": 1
+  },
+  "label_map": {
+    "background": 0,
+    "label": 1
+  },
+  "records": [
+    {
+      "split": "train",
+      "case_id": "Case0002",
+      "image_id": "Image0002",
+      "image_path": "dataset/raw/Case0002/patient1.zip",
+      "mask_id": "Mask0502",
+      "mask_path": "dataset/labels/Case0002/v3_preview/Case0002_Image0002_Mask0502_v3_preview_label.nii.gz",
+      "version": "v3_preview",
+      "label": "label",
+      "nnunet_id": "Case0002",
+      "spacing_check": "ok"
+    }
+  ],
+  "missing_masks": [],
+  "notes": "weak label_set typically uses v3_preview (pseudo) propagated from sparse v1_manual coarse/scribble",
+  "export_dir": "dataset/exports/DatasetP5Weak",
+  "dataset_json": "dataset/exports/DatasetP5Weak/dataset.json",
+  "splits_final": "dataset/exports/DatasetP5Weak/splits_final.json",
+  "report": {
+    "success_count": 1,
+    "skipped_count": 0,
+    "missing_masks": [],
+    "spacing_checks": [
+      {
+        "case_id": "Case0002",
+        "image_id": "Image0002",
+        "mask_id": "Mask0502",
+        "status": "ok",
+        "image_spacing": [
+          0.9765624999999998,
+          0.9765624999999998,
+          2.999999999999999
+        ],
+        "mask_spacing": [
+          0.9765625,
+          0.9765625,
+          3.0
+        ],
+        "image_shape": [
+          134,
+          512,
+          512
+        ],
+        "mask_shape": [
+          134,
+          512,
+          512
+        ],
+        "detail": null
+      }
+    ],
+    "materialized_files": [
+      "dataset/exports/DatasetP5Weak/imagesTr/Case0002_0000.nii.gz",
+      "dataset/exports/DatasetP5Weak/labelsTr/Case0002.nii.gz"
+    ],
+    "export_dir": "dataset/exports/DatasetP5Weak"
+  }
+}
