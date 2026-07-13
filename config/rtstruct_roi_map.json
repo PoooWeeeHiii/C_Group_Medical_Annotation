@@ -1,0 +1,27 @@
+{
+  "roi_to_label_id": {
+    "liver": 1,
+    "肝": 1,
+    "肝脏": 1,
+    "kidney": 2,
+    "kidney_left": 2,
+    "kidney_right": 2,
+    "左肾": 2,
+    "右肾": 2,
+    "lung": 3,
+    "肺": 3,
+    "tumor": 4,
+    "gtv": 4,
+    "肿瘤": 4,
+    "spleen": 5,
+    "脾": 5,
+    "脾脏": 5,
+    "pancreas": 6,
+    "胰腺": 6,
+    "stomach": 7,
+    "胃": 7,
+    "gallbladder": 8,
+    "胆囊": 8
+  },
+  "notes": "Map RTSTRUCT ROIName substrings to platform label_id. Edit this file for site-specific naming."
+}

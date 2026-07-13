@@ -1,0 +1,99 @@
+{
+  "dataset_id": "Dataset0002",
+  "name": "medical_seg_dense_v2_ai",
+  "version": "v2_ai",
+  "label_set": "dense",
+  "format": "nnunet",
+  "materialize": true,
+  "create_time": "2026-07-13T13:24:12",
+  "counts": {
+    "train": 1,
+    "val": 0,
+    "test": 0,
+    "total": 1
+  },
+  "label_map": {
+    "background": 0,
+    "spleen": 5,
+    "liver": 1,
+    "kidney": 2,
+    "lung": 3,
+    "tumor": 4,
+    "pancreas": 6,
+    "stomach": 7,
+    "gallbladder": 8,
+    "heart": 6,
+    "心": 6,
+    "肝": 1,
+    "脾": 5,
+    "肺": 3,
+    "肾": 2,
+    "bone": 7,
+    "骨": 7,
+    "肿瘤": 4,
+    "other": 8,
+    "其他": 8
+  },
+  "records": [
+    {
+      "split": "train",
+      "case_id": "Case0003",
+      "image_id": "Image0003",
+      "image_path": "dataset/raw/Case0003/patient1.zip",
+      "mask_id": "Mask0419",
+      "mask_path": "dataset/labels/Case0003/v2_ai/Case0003_Image0003_Mask0419_v2_ai_spleen.nii.gz",
+      "version": "v2_ai",
+      "label": "spleen",
+      "nnunet_id": "Case0003",
+      "spacing_check": "ok"
+    }
+  ],
+  "missing_masks": [],
+  "notes": "dense label_set typically uses final / v3_fusion refined annotations",
+  "export_dir": "dataset/exports/Dataset0002",
+  "dataset_json": "dataset/exports/Dataset0002/dataset.json",
+  "splits_final": "dataset/exports/Dataset0002/splits_final.json",
+  "report": {
+    "success_count": 1,
+    "skipped_count": 0,
+    "missing_masks": [],
+    "spacing_checks": [
+      {
+        "case_id": "Case0003",
+        "image_id": "Image0003",
+        "mask_id": "Mask0419",
+        "status": "ok",
+        "image_spacing": [
+          0.9765624999999998,
+          0.9765624999999998,
+          2.999999999999999
+        ],
+        "mask_spacing": [
+          0.9765624999999998,
+          0.9765624999999998,
+          2.999999999999999
+        ],
+        "image_shape": [
+          134,
+          512,
+          512
+        ],
+        "mask_shape": [
+          134,
+          512,
+          512
+        ],
+        "detail": null
+      }
+    ],
+    "materialized_files": [
+      "dataset/exports/Dataset0002/imagesTr/Case0003_0000.nii.gz",
+      "dataset/exports/Dataset0002/labelsTr/Case0003.nii.gz"
+    ],
+    "export_dir": "dataset/exports/Dataset0002",
+    "multiclass": true,
+    "class_voxel_counts": {
+      "5": 526273
+    }
+  }
+}
