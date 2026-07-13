@@ -169,6 +169,66 @@ function sampleMaskLabelId(maskData, maskValues, uvx, uvy, uvz) {
   return maskValues[z * width * height + y * width + x] || 0;
 }
 
+function computeLabelFocus(maskData, maskValues, labelId) {
+  if (!maskData || !maskValues || !labelId || !Array.isArray(maskData.dimensions)) {
+    return null;
+  }
+  const [width, height, depth] = maskData.dimensions.map((value) => Number(value) || 0);
+  if (!width || !height || !depth) return null;
+  const multi =
+    Boolean(maskData.multiclass) &&
+    Array.isArray(maskData.unique_labels) &&
+    maskData.unique_labels.length > 1;
+  const voxelCount = width * height * depth;
+  let stride = 1;
+  if (voxelCount > 160 * 160 * 160) stride = 2;
+  if (voxelCount > 240 * 240 * 180) stride = 3;
+
+  let count = 0;
+  let sumX = 0;
+  let sumY = 0;
+  let sumZ = 0;
+  let minX = 1;
+  let minY = 1;
+  let minZ = 1;
+  let maxX = 0;
+  let maxY = 0;
+  let maxZ = 0;
+
+  for (let z = 0; z < depth; z += stride) {
+    const zBase = z * width * height;
+    for (let y = 0; y < height; y += stride) {
+      const yBase = zBase + y * width;
+      for (let x = 0; x < width; x += stride) {
+        const raw = maskValues[yBase + x] | 0;
+        if (!raw) continue;
+        const id = multi ? raw : 1;
+        if (id !== labelId) continue;
+        const nx = (x + 0.5) / width;
+        const ny = (y + 0.5) / height;
+        const nz = (z + 0.5) / depth;
+        sumX += nx;
+        sumY += ny;
+        sumZ += nz;
+        count += 1;
+        if (nx < minX) minX = nx;
+        if (ny < minY) minY = ny;
+        if (nz < minZ) minZ = nz;
+        if (nx > maxX) maxX = nx;
+        if (ny > maxY) maxY = ny;
+        if (nz > maxZ) maxZ = nz;
+      }
+    }
+  }
+  if (!count) return null;
+  const extent = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 0.04);
+  return {
+    center: [sumX / count, sumY / count, sumZ / count],
+    extent,
+    count,
+  };
+}
+
 function pickMaskLabelAtCursor(maskData, maskValues, viewerState, canvas, nx, ny) {
   if (!maskData || !maskValues || !canvas) return 0;
   const aspect = canvas.width / Math.max(canvas.height, 1);
@@ -176,6 +236,7 @@ function pickMaskLabelAtCursor(maskData, maskValues, viewerState, canvas, nx, ny
   const screenY = -(ny * 2 - 1);
   const camDist = Math.max(viewerState.camDist || 1.65, 0.35);
   const screenScale = 0.84 * (camDist / 1.65);
+  const focus = viewerState.focusCenter || [0.5, 0.5, 0.5];
   let origin = [screenX * screenScale, screenY * screenScale, -camDist];
   let dir = [0, 0, 1];
   // Match shader: invRotation = transpose(rotateY * rotateX) applied to camera space.
@@ -186,7 +247,7 @@ function pickMaskLabelAtCursor(maskData, maskValues, viewerState, canvas, nx, ny
   dir = rotateVecY(dir, viewerState.yaw);
   const len = Math.hypot(dir[0], dir[1], dir[2]) || 1;
   dir = [dir[0] / len, dir[1] / len, dir[2] / len];
-  origin = [origin[0] + 0.5, origin[1] + 0.5, origin[2] + 0.5];
+  origin = [origin[0] + focus[0], origin[1] + focus[1], origin[2] + focus[2]];
 
   // Ray-box intersection on unit cube.
   let tNear = 0;
@@ -596,6 +657,7 @@ function renderWithWebGL({
     uniform bool uMulticlass;
     uniform vec3 uPalette[16];
     uniform int uIsolateLabel;
+    uniform vec3 uFocus;
 
     mat3 rotateX(float a) {
       float s = sin(a);
@@ -833,7 +895,7 @@ function renderWithWebGL({
       mat3 invRotation = transpose(rotateY(uYaw) * rotateX(uPitch));
       float camDist = max(uCamDist, 0.35);
       float screenScale = 0.84 * (camDist / 1.65);
-      vec3 rayOrigin = invRotation * vec3(screen * screenScale, -camDist) + vec3(0.5);
+      vec3 rayOrigin = invRotation * vec3(screen * screenScale, -camDist) + uFocus;
       vec3 rayDir = normalize(invRotation * vec3(0.0, 0.0, 1.0));
 
       float nearHit;
@@ -935,6 +997,7 @@ function renderWithWebGL({
     multiclass: gl.getUniformLocation(program, "uMulticlass"),
     palette: gl.getUniformLocation(program, "uPalette"),
     isolateLabel: gl.getUniformLocation(program, "uIsolateLabel"),
+    focus: gl.getUniformLocation(program, "uFocus"),
   };
 
   const vertexBuffer = gl.createBuffer();
@@ -1004,6 +1067,7 @@ function renderWithWebGL({
     uniform float uPitch;
     uniform float uAspect;
     uniform float uPointSize;
+    uniform vec3 uFocus;
     out float vDepthShade;
 
     mat3 rotateX(float a) {
@@ -1019,7 +1083,7 @@ function renderWithWebGL({
     }
 
     void main() {
-      vec3 centered = aMaskPosition - vec3(0.5);
+      vec3 centered = aMaskPosition - uFocus;
       vec3 rotated = rotateY(uYaw) * rotateX(uPitch) * centered;
       vec2 screen = rotated.xy / 0.42;
       screen.x /= max(uAspect, 0.001);
@@ -1054,6 +1118,7 @@ function renderWithWebGL({
     uniform float uPitch;
     uniform float uAspect;
     uniform float uScale;
+    uniform vec3 uFocus;
     out vec3 vNormal;
     out float vDepthShade;
 
@@ -1071,7 +1136,7 @@ function renderWithWebGL({
 
     void main() {
       mat3 rotation = rotateY(uYaw) * rotateX(uPitch);
-      vec3 centered = aMaskPosition - vec3(0.5);
+      vec3 centered = aMaskPosition - uFocus;
       vec3 rotated = rotation * centered;
       vec2 screen = rotated.xy / max(uScale, 0.1);
       screen.x /= max(uAspect, 0.001);
@@ -1114,6 +1179,7 @@ function renderWithWebGL({
     pointSize: gl.getUniformLocation(surfaceProgram, "uPointSize"),
     color: gl.getUniformLocation(surfaceProgram, "uColor"),
     alpha: gl.getUniformLocation(surfaceProgram, "uAlpha"),
+    focus: gl.getUniformLocation(surfaceProgram, "uFocus"),
   };
   const meshProgram = createProgram(gl, meshVertexSource, meshFragmentSource);
   const meshPositionLocation = gl.getAttribLocation(meshProgram, "aMaskPosition");
@@ -1128,6 +1194,7 @@ function renderWithWebGL({
     specular: gl.getUniformLocation(meshProgram, "uSpecular"),
     rim: gl.getUniformLocation(meshProgram, "uRim"),
     material: gl.getUniformLocation(meshProgram, "uMaterial"),
+    focus: gl.getUniformLocation(meshProgram, "uFocus"),
   };
   const meshPositions = maskMesh?.positionsArray || new Float32Array();
   const meshNormals = maskMesh?.normalsArray || new Float32Array(meshPositions.length);
@@ -1184,6 +1251,11 @@ function renderWithWebGL({
     yaw: 0.65,
     pitch: -0.28,
     camDist: 1.65,
+    focusCenter: [0.5, 0.5, 0.5],
+    focusTarget: null,
+    camDistTarget: null,
+    meshScaleTarget: null,
+    focusAnim: 0,
     renderEngine: isMulticlassMask ? "volume" : hasCtMeshSurface ? "vtk" : "volume",
     preset: initialPreset,
     opacityScale: initialPreset.opacity,
@@ -1338,6 +1410,10 @@ function renderWithWebGL({
       gl.uniform1f(uniforms.maskAlpha, viewerState.maskAlpha);
       gl.uniform1f(uniforms.camDist, viewerState.camDist);
       gl.uniform1i(uniforms.multiclass, viewerState.multiclass ? 1 : 0);
+      if (uniforms.focus) {
+        const focus = viewerState.focusCenter || [0.5, 0.5, 0.5];
+        gl.uniform3f(uniforms.focus, focus[0], focus[1], focus[2]);
+      }
       if (uniforms.isolateLabel) {
         gl.uniform1i(uniforms.isolateLabel, viewerState.isolatedLabelId || 0);
       }
@@ -1384,6 +1460,10 @@ function renderWithWebGL({
       gl.uniform1f(meshUniforms.scale, viewerState.meshScale);
       gl.uniform3f(meshUniforms.color, color[0], color[1], color[2]);
       gl.uniform1f(meshUniforms.alpha, alpha);
+      if (meshUniforms.focus) {
+        const focus = viewerState.focusCenter || [0.5, 0.5, 0.5];
+        gl.uniform3f(meshUniforms.focus, focus[0], focus[1], focus[2]);
+      }
       gl.uniform1f(meshUniforms.specular, material === "mask" ? 0.42 : 0.20);
       gl.uniform1f(meshUniforms.rim, material === "mask" ? 0.34 : 0.22);
       gl.uniform1f(meshUniforms.material, material === "mask" ? 1.0 : 0.35);
@@ -1430,6 +1510,10 @@ function renderWithWebGL({
       gl.uniform1f(surfaceUniforms.pointSize, Math.max(2.2, Math.min(6.0, 620 / Math.max(...maskData.dimensions))));
       gl.uniform3f(surfaceUniforms.color, maskColor[0], maskColor[1], maskColor[2]);
       gl.uniform1f(surfaceUniforms.alpha, viewerState.maskAlpha);
+      if (surfaceUniforms.focus) {
+        const focus = viewerState.focusCenter || [0.5, 0.5, 0.5];
+        gl.uniform3f(surfaceUniforms.focus, focus[0], focus[1], focus[2]);
+      }
       gl.drawArrays(gl.POINTS, 0, surfacePoints.length / 3);
       gl.disable(gl.BLEND);
     }
@@ -1464,10 +1548,87 @@ function renderWithWebGL({
       const factor = Math.exp(direction * 0.12);
       viewerState.camDist = Math.min(3.8, Math.max(0.45, viewerState.camDist * factor));
       viewerState.meshScale = Math.min(1.85, Math.max(0.28, viewerState.meshScale / factor));
+      viewerState.camDistTarget = null;
+      viewerState.meshScaleTarget = null;
       draw();
     },
     { passive: false },
   );
+
+  function resetViewFocus() {
+    viewerState.focusTarget = [0.5, 0.5, 0.5];
+    viewerState.camDistTarget = 1.65;
+    viewerState.meshScaleTarget = 0.72;
+    viewerState.yaw = 0.65;
+    viewerState.pitch = -0.28;
+    viewerState.isolatedLabelId = 0;
+    startFocusAnimation();
+  }
+
+  function focusOnSelectedLabel(labelId, options = {}) {
+    const isolate = options.isolate !== false;
+    const focus = computeLabelFocus(maskData, maskValues, labelId);
+    if (!focus) return false;
+    viewerState.selectedLabelId = labelId;
+    if (isolate) viewerState.isolatedLabelId = labelId;
+    viewerState.focusTarget = focus.center;
+    // Smaller organ → closer camera / smaller meshScale (meshScale divides screen coords).
+    const extent = focus.extent;
+    viewerState.camDistTarget = Math.max(0.48, Math.min(2.1, extent * 2.6 + 0.38));
+    viewerState.meshScaleTarget = Math.max(0.22, Math.min(0.95, extent * 1.35 + 0.12));
+    startFocusAnimation();
+    return true;
+  }
+
+  let focusRaf = 0;
+  function startFocusAnimation() {
+    if (!viewerState.focusCenter) viewerState.focusCenter = [0.5, 0.5, 0.5];
+    if (!viewerState.focusTarget) viewerState.focusTarget = [...viewerState.focusCenter];
+    cancelAnimationFrame(focusRaf);
+    let frames = 0;
+    const step = () => {
+      const t = 0.22;
+      const c = viewerState.focusCenter;
+      const ft = viewerState.focusTarget;
+      c[0] += (ft[0] - c[0]) * t;
+      c[1] += (ft[1] - c[1]) * t;
+      c[2] += (ft[2] - c[2]) * t;
+      if (viewerState.camDistTarget != null) {
+        viewerState.camDist += (viewerState.camDistTarget - viewerState.camDist) * t;
+      }
+      if (viewerState.meshScaleTarget != null) {
+        viewerState.meshScale += (viewerState.meshScaleTarget - viewerState.meshScale) * t;
+      }
+      draw();
+      frames += 1;
+      const close =
+        Math.hypot(ft[0] - c[0], ft[1] - c[1], ft[2] - c[2]) < 0.004 &&
+        (viewerState.camDistTarget == null ||
+          Math.abs(viewerState.camDist - viewerState.camDistTarget) < 0.01);
+      if (!close && frames < 40) {
+        focusRaf = requestAnimationFrame(step);
+      } else {
+        viewerState.focusCenter = [...ft];
+        if (viewerState.camDistTarget != null) viewerState.camDist = viewerState.camDistTarget;
+        if (viewerState.meshScaleTarget != null) viewerState.meshScale = viewerState.meshScaleTarget;
+        draw();
+      }
+    };
+    focusRaf = requestAnimationFrame(step);
+  }
+
+  canvas.addEventListener("dblclick", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const nx = (event.clientX - rect.left) / rect.width;
+    const ny = (event.clientY - rect.top) / rect.height;
+    const labelId = pickMaskLabelAtCursor(maskData, maskValues, viewerState, canvas, nx, ny);
+    if (labelId > 0) {
+      focusOnSelectedLabel(labelId);
+      updateOrganHud?.();
+    }
+  });
+
   function updateProtocolPanel() {
     const resampling = volumeData.resampling || {};
     const spacing = Array.isArray(volumeData.spacing) ? volumeData.spacing.map((value) => Number(value).toFixed(2)).join(" / ") : "-";
@@ -1607,11 +1768,14 @@ function renderWithWebGL({
     });
   }
 
-  // --- Hand gesture control ---
+  // --- Hand gesture control (bimanual; panel docked top-right to free 3D center) ---
   const gesturePanel = document.createElement("div");
-  gesturePanel.className = "gesture-panel";
+  gesturePanel.className = "gesture-panel gesture-panel--compact";
   gesturePanel.innerHTML = `
-    <button type="button" class="ghost-button" data-gesture-toggle>开启手势控制</button>
+    <div class="gesture-toolbar">
+      <button type="button" class="ghost-button" data-gesture-toggle>开启手势</button>
+      <button type="button" class="ghost-button hidden" data-gesture-minimize title="收起预览">▾</button>
+    </div>
     <div class="gesture-body hidden" data-gesture-body>
       <div class="gesture-video-wrap">
         <video class="gesture-video" data-gesture-video playsinline muted></video>
@@ -1621,25 +1785,30 @@ function renderWithWebGL({
       <div class="gesture-status" data-gesture-status>摄像头未开启</div>
       <div class="gesture-coach" data-gesture-coach>
         <strong data-coach-title>准备中</strong>
-        <p data-coach-tip>点击上方按钮开启摄像头后，按步骤操作。</p>
+        <p data-coach-tip>开启后：捏合拖=旋转 · 双手开合=缩放。</p>
       </div>
       <div class="gesture-progress-wrap">
-        <div class="gesture-progress-label"><span>校准进度</span><span data-calibrate-pct>0%</span></div>
+        <div class="gesture-progress-label"><span>校准</span><span data-calibrate-pct>0%</span></div>
         <div class="gesture-progress-track"><div class="gesture-progress-bar" data-calibrate-bar></div></div>
       </div>
       <div class="gesture-actions">
-        <button type="button" class="primary-button" data-gesture-guide>开始引导校准</button>
-        <button type="button" class="ghost-button" data-gesture-instant>一键设为中心</button>
-        <button type="button" class="ghost-button hidden" data-gesture-cancel-cal>取消校准</button>
+        <button type="button" class="primary-button" data-gesture-guide>引导校准</button>
+        <button type="button" class="ghost-button" data-gesture-instant>设为中心</button>
+        <button type="button" class="ghost-button hidden" data-gesture-cancel-cal>取消</button>
       </div>
-      <div class="gesture-live" data-gesture-live>当前手势：-</div>
-      <div class="gesture-hint">
-        <div><b>引导校准：</b>手进绿框 → 五指张开 → 静止约 0.5 秒</div>
-        <div><b>一键设为中心：</b>手在画面中时，立刻把当前位置设为中心</div>
-        <div>舒展手指：向体内 · 收缩：向体外 · OK/握拳：选中 · 比耶：隔离 · 👍：重置</div>
-      </div>
-      <div class="gesture-organ" data-gesture-organ>悬停器官：-</div>
-      <div class="gesture-selected" data-gesture-selected>已选中：无</div>
+      <div class="gesture-live" data-gesture-live>当前：-</div>
+      <details class="gesture-help">
+        <summary>手势说明</summary>
+        <div class="gesture-hint">
+          <div><b>单手捏合 + 拖动</b>：旋转（pinch-to-rotate）</div>
+          <div><b>张开手掌 + 拖动</b>：轻量旋转</div>
+          <div><b>双手同时入镜，开合距离</b>：缩放（bimanual zoom）</div>
+          <div><b>食指指向</b>：悬停器官</div>
+          <div><b>OK / 握拳</b>：选中并特写居中放大 · <b>比耶</b>：隔离特写 · <b>竖拇指</b>：重置</div>
+        </div>
+      </details>
+      <div class="gesture-organ" data-gesture-organ>悬停：-</div>
+      <div class="gesture-selected" data-gesture-selected>已选：无</div>
     </div>
   `;
   container.appendChild(gesturePanel);
@@ -1658,7 +1827,7 @@ function renderWithWebGL({
   let gestureController = null;
   let lastHoverId = 0;
   let hoverSince = 0;
-  let lastHandX = 0.5;
+  let controlsCollapsedBeforeGesture = null;
 
   function labelTitle(id) {
     if (!id) return "背景 / 无标注";
@@ -1671,11 +1840,11 @@ function renderWithWebGL({
     const cursorLabel = cursorEl.querySelector("[data-gesture-cursor-label]");
     const hoverId = viewerState.hoveredLabelId || 0;
     const selectedId = viewerState.selectedLabelId || 0;
-    if (organEl) organEl.textContent = `悬停器官：${labelTitle(hoverId)}${hoverId ? ` (#${hoverId})` : ""}`;
+    if (organEl) organEl.textContent = `悬停：${labelTitle(hoverId)}${hoverId ? ` (#${hoverId})` : ""}`;
     if (selectedEl) {
       selectedEl.textContent = selectedId
-        ? `已选中：${labelTitle(selectedId)} (#${selectedId})${viewerState.isolatedLabelId ? " · 已隔离显示" : ""}`
-        : "已选中：无";
+        ? `已选：${labelTitle(selectedId)} (#${selectedId})${viewerState.isolatedLabelId ? " · 隔离" : ""}`
+        : "已选：无";
     }
     if (cursorLabel) {
       cursorLabel.textContent = hoverId ? labelTitle(hoverId) : "";
@@ -1696,9 +1865,10 @@ function renderWithWebGL({
     if (titleEl) titleEl.textContent = coach.title || "准备中";
     if (tipEl) tipEl.textContent = coach.tip || "";
     if (liveEl) {
+      const handTag = frame.handCount > 1 ? `双手×${frame.handCount}` : "单手";
       liveEl.textContent = frame.present
-        ? `当前手势：${frame.gestureText || frame.gesture || "-"} · 伸展 ${frame.extendedCount ?? "-"}/4 指`
-        : "当前手势：未检测到手";
+        ? `${handTag} · ${frame.gestureText || frame.gesture || "-"} · ${frame.mode || "-"}`
+        : "当前：未检测到手";
     }
     const progress = Number(frame.calibrateProgress || 0);
     if (pctEl) pctEl.textContent = `${Math.round(progress * 100)}%`;
@@ -1706,15 +1876,15 @@ function renderWithWebGL({
     if (coachBox) coachBox.classList.toggle("ok", Boolean(coach.ok));
     if (coachBox) coachBox.classList.toggle("warn", !coach.ok);
     if (cancelBtn) cancelBtn.classList.toggle("hidden", !frame.calibrateMode);
-    if (guideBtn) guideBtn.textContent = frame.calibrateMode ? "校准进行中…" : "开始引导校准";
+    if (guideBtn) guideBtn.textContent = frame.calibrateMode ? "校准中…" : "引导校准";
   }
 
-  function drawHandOverlay(landmarks) {
+  function drawHandOverlay(handsOrLandmarks) {
     const videoEl = gesturePanel.querySelector("[data-gesture-video]");
     const overlay = gesturePanel.querySelector("[data-gesture-overlay]");
     if (!videoEl || !overlay) return;
-    const width = videoEl.clientWidth || 240;
-    const height = videoEl.clientHeight || 180;
+    const width = videoEl.clientWidth || 200;
+    const height = videoEl.clientHeight || 150;
     if (overlay.width !== width || overlay.height !== height) {
       overlay.width = width;
       overlay.height = height;
@@ -1722,7 +1892,10 @@ function renderWithWebGL({
     const ctx = overlay.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, width, height);
-    if (!landmarks) return;
+    if (!handsOrLandmarks) return;
+    const handsList = Array.isArray(handsOrLandmarks[0])
+      ? handsOrLandmarks
+      : [handsOrLandmarks];
     const edges = [
       [0, 1], [1, 2], [2, 3], [3, 4],
       [0, 5], [5, 6], [6, 7], [7, 8],
@@ -1731,23 +1904,31 @@ function renderWithWebGL({
       [0, 17], [17, 18], [18, 19], [19, 20],
       [5, 9], [9, 13], [13, 17],
     ];
-    ctx.strokeStyle = "rgba(0, 229, 176, 0.9)";
-    ctx.fillStyle = "rgba(0, 194, 255, 0.95)";
-    ctx.lineWidth = 2;
-    for (const [a, b] of edges) {
-      const pa = landmarks[a];
-      const pb = landmarks[b];
-      if (!pa || !pb) continue;
-      ctx.beginPath();
-      ctx.moveTo((1 - pa.x) * width, pa.y * height);
-      ctx.lineTo((1 - pb.x) * width, pb.y * height);
-      ctx.stroke();
-    }
-    for (const point of landmarks) {
-      ctx.beginPath();
-      ctx.arc((1 - point.x) * width, point.y * height, 3, 0, Math.PI * 2);
-      ctx.fill();
-    }
+    const palettes = [
+      { stroke: "rgba(0, 229, 176, 0.95)", fill: "rgba(0, 194, 255, 0.95)" },
+      { stroke: "rgba(255, 176, 32, 0.95)", fill: "rgba(255, 120, 80, 0.95)" },
+    ];
+    handsList.forEach((landmarks, handIdx) => {
+      if (!landmarks?.length) return;
+      const palette = palettes[handIdx % palettes.length];
+      ctx.strokeStyle = palette.stroke;
+      ctx.fillStyle = palette.fill;
+      ctx.lineWidth = 2;
+      for (const [a, b] of edges) {
+        const pa = landmarks[a];
+        const pb = landmarks[b];
+        if (!pa || !pb) continue;
+        ctx.beginPath();
+        ctx.moveTo((1 - pa.x) * width, pa.y * height);
+        ctx.lineTo((1 - pb.x) * width, pb.y * height);
+        ctx.stroke();
+      }
+      for (const point of landmarks) {
+        ctx.beginPath();
+        ctx.arc((1 - point.x) * width, point.y * height, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    });
   }
 
   function syncCalibrateButtons() {
@@ -1776,23 +1957,41 @@ function renderWithWebGL({
     syncCalibrateButtons();
   });
 
+  gesturePanel.querySelector("[data-gesture-minimize]")?.addEventListener("click", () => {
+    const body = gesturePanel.querySelector("[data-gesture-body]");
+    const minBtn = gesturePanel.querySelector("[data-gesture-minimize]");
+    if (!body) return;
+    const collapsed = body.classList.toggle("is-collapsed");
+    gesturePanel.classList.toggle("is-minimized", collapsed);
+    if (minBtn) minBtn.textContent = collapsed ? "▴" : "▾";
+  });
+
   gesturePanel.querySelector("[data-gesture-toggle]").addEventListener("click", async () => {
     const button = gesturePanel.querySelector("[data-gesture-toggle]");
     const body = gesturePanel.querySelector("[data-gesture-body]");
     const statusEl = gesturePanel.querySelector("[data-gesture-status]");
+    const minBtn = gesturePanel.querySelector("[data-gesture-minimize]");
     if (gestureController?.isRunning()) {
       gestureController.stop();
       cursorEl.classList.add("hidden");
       body.classList.add("hidden");
-      button.textContent = "开启手势控制";
+      body.classList.remove("is-collapsed");
+      gesturePanel.classList.remove("is-minimized");
+      minBtn?.classList.add("hidden");
+      button.textContent = "开启手势";
       drawHandOverlay(null);
+      if (controlsCollapsedBeforeGesture != null) {
+        controlsCollapsed = controlsCollapsedBeforeGesture;
+        controlsCollapsedBeforeGesture = null;
+        updateControlPanel();
+      }
       return;
     }
     button.disabled = true;
-    button.textContent = "加载手势模型…";
+    button.textContent = "加载模型…";
     try {
       if (!gestureController) {
-        const module = await import(`/frontend/hand_gesture.js?v=gesture-guide-20260712`);
+        const module = await import(`/frontend/hand_gesture.js?v=focus-select-20260713`);
         gestureController = await module.createHandGestureController({
           onStatus: (text) => {
             if (statusEl) statusEl.textContent = text;
@@ -1803,7 +2002,7 @@ function renderWithWebGL({
               videoEl.srcObject = frame.video.srcObject;
             }
             updateCoachUi(frame);
-            drawHandOverlay(frame.landmarks || null);
+            drawHandOverlay(frame.handsLandmarks?.length ? frame.handsLandmarks : (frame.landmarks || null));
             syncCalibrateButtons();
 
             if (!frame.present) {
@@ -1814,16 +2013,27 @@ function renderWithWebGL({
             cursorEl.style.left = `${frame.cursor.x * 100}%`;
             cursorEl.style.top = `${frame.cursor.y * 100}%`;
             cursorEl.dataset.gesture = frame.gesture || "move";
+            cursorEl.dataset.mode = frame.mode || "idle";
 
-            // Depth control pauses during guided calibration so user can hold still.
+            // Continuous camera control from scientific mappings:
+            // pinch/palm drag → rotate; two-hand gap → zoom. Pause while calibrating.
             if (!frame.calibrateMode) {
-              const targetDist = 3.2 - frame.openAmount * 2.55;
-              viewerState.camDist = viewerState.camDist * 0.82 + targetDist * 0.18;
-              viewerState.meshScale = Math.min(1.85, Math.max(0.28, 1.2 / viewerState.camDist));
-              const dx = frame.cursor.x - lastHandX;
-              lastHandX = frame.cursor.x;
-              if (Math.abs(dx) > 0.002 && frame.gesture !== "pinch") {
-                viewerState.yaw += dx * 1.4;
+              const rd = frame.rotateDelta || { x: 0, y: 0 };
+              if (Math.abs(rd.x) > 0.0005 || Math.abs(rd.y) > 0.0005) {
+                viewerState.yaw += rd.x * 2.2;
+                viewerState.pitch = Math.max(
+                  -1.2,
+                  Math.min(1.2, viewerState.pitch - rd.y * 1.8),
+                );
+              }
+              const zd = Number(frame.zoomDelta || 0);
+              if (Math.abs(zd) > 0.0008) {
+                // Hands farther → zoom in (smaller camDist), same as Minority Report / Pan_Zoom MH.
+                viewerState.camDist = Math.max(
+                  0.55,
+                  Math.min(4.2, viewerState.camDist * (1 - zd * 0.85)),
+                );
+                viewerState.meshScale = Math.min(1.85, Math.max(0.28, 1.2 / viewerState.camDist));
               }
             }
 
@@ -1846,10 +2056,15 @@ function renderWithWebGL({
 
             if (frame.selectPulse && hoverId > 0) {
               viewerState.selectedLabelId = hoverId;
-              if (statusEl) statusEl.textContent = `已选中器官：${labelTitle(hoverId)}`;
+              const focused = focusOnSelectedLabel(hoverId, { isolate: true });
+              if (statusEl) {
+                statusEl.textContent = focused
+                  ? `特写：${labelTitle(hoverId)}`
+                  : `已选中器官：${labelTitle(hoverId)}`;
+              }
               container.dispatchEvent(
                 new CustomEvent("gesture-organ-select", {
-                  detail: { labelId: hoverId, name: labelTitle(hoverId) },
+                  detail: { labelId: hoverId, name: labelTitle(hoverId), focused },
                 }),
               );
             }
@@ -1858,16 +2073,15 @@ function renderWithWebGL({
                 viewerState.isolatedLabelId = 0;
                 if (statusEl) statusEl.textContent = "已取消器官隔离";
               } else if (viewerState.selectedLabelId || hoverId) {
-                viewerState.isolatedLabelId = viewerState.selectedLabelId || hoverId;
-                if (statusEl) statusEl.textContent = `仅显示：${labelTitle(viewerState.isolatedLabelId)}`;
+                const id = viewerState.selectedLabelId || hoverId;
+                viewerState.isolatedLabelId = id;
+                focusOnSelectedLabel(id, { isolate: true });
+                if (statusEl) statusEl.textContent = `特写隔离：${labelTitle(id)}`;
               }
             }
             if (frame.resetPulse) {
-              viewerState.yaw = 0.65;
-              viewerState.pitch = -0.28;
-              viewerState.camDist = 1.65;
-              viewerState.meshScale = 0.72;
-              viewerState.isolatedLabelId = 0;
+              viewerState.selectedLabelId = 0;
+              resetViewFocus();
               if (statusEl) statusEl.textContent = "视角已重置";
             }
             if (frame.calibrating) cursorEl.classList.add("calibrating");
@@ -1878,13 +2092,24 @@ function renderWithWebGL({
           },
         });
       }
-      body.classList.remove("hidden");
+      // Free the 3D center: collapse the left metrics/control panel while gesturing.
+      if (controlsCollapsedBeforeGesture == null) {
+        controlsCollapsedBeforeGesture = controlsCollapsed;
+      }
+      if (!controlsCollapsed) {
+        controlsCollapsed = true;
+        updateControlPanel();
+      }
+      body.classList.remove("hidden", "is-collapsed");
+      gesturePanel.classList.remove("is-minimized");
+      minBtn?.classList.remove("hidden");
+      if (minBtn) minBtn.textContent = "▾";
       await gestureController.start();
-      button.textContent = "关闭手势控制";
-      if (statusEl) statusEl.textContent = "已开启。推荐：点「开始引导校准」或「一键设为中心」";
+      button.textContent = "关闭手势";
+      if (statusEl) statusEl.textContent = "已开启。捏合拖=旋转 · 双手开合=缩放";
     } catch (error) {
       if (statusEl) statusEl.textContent = `手势启动失败：${error.message || error}`;
-      button.textContent = "开启手势控制";
+      button.textContent = "开启手势";
       body.classList.remove("hidden");
     } finally {
       button.disabled = false;
@@ -1899,6 +2124,7 @@ function renderWithWebGL({
     delete() {
       resizeObserver.disconnect();
       try {
+        cancelAnimationFrame(focusRaf);
         gestureController?.dispose?.();
       } catch {
         // ignore

@@ -61,6 +61,8 @@ const state = {
   volumeViewMode: "2d",
   active3DMaskId: null,
   showMip: false,
+  mipCenters: { axial: null, coronal: null, sagittal: null },
+  mipThickness: 32,
   volumeLoadingKey: null,
   recoveringAnnotation: false,
   models: [],
@@ -1385,12 +1387,17 @@ async function runAIPredict(event) {
     showToast(tumorHint);
   }
   try {
+    const modelId = String(model.model_id || "").toLowerCase();
+    const backend = String(model.backend || "").toLowerCase();
+    const allowBaseline = backend.includes("builtin") ||
+      modelId.startsWith("builtin_") ||
+      backend.includes("ct_threshold");
     const data = await apiPost("/api/ai/predict", {
       case_id: item.case_id,
       image_id: image.image_id,
       model_id: model.model_id,
       label: request.label,
-      allow_baseline: false,
+      allow_baseline: allowBaseline,
     }, { timeoutMs: isHeavy ? 30 * 60 * 1000 : 120 * 1000 });
     await loadImageMasks(image.image_id, { force: true });
     await loadCaseVersions(item.case_id, { force: true });
@@ -2705,6 +2712,42 @@ function render3DViewer(item, image, volume, masks = []) {
   const axialIndex = Math.min(currentSliceIndex("axial"), Math.max(depth - 1, 0));
   const coronalIndex = Math.min(currentSliceIndex("coronal"), Math.max(height - 1, 0));
   const sagittalIndex = Math.min(currentSliceIndex("sagittal"), Math.max(width - 1, 0));
+  const ensureMipCenter = (axis, fallback, maxIndex) => {
+    const stored = state.mipCenters?.[axis];
+    const value = Number.isFinite(stored) ? stored : fallback;
+    return Math.min(Math.max(0, value), Math.max(maxIndex, 0));
+  };
+  const mipAxial = ensureMipCenter("axial", axialIndex, depth - 1);
+  const mipCoronal = ensureMipCenter("coronal", coronalIndex, height - 1);
+  const mipSagittal = ensureMipCenter("sagittal", sagittalIndex, width - 1);
+  const maxExtent = Math.max(depth, height, width, 1);
+  const mipThickness = Math.min(Math.max(1, Number(state.mipThickness) || 32), maxExtent);
+  state.mipCenters = { axial: mipAxial, coronal: mipCoronal, sagittal: mipSagittal };
+  state.mipThickness = mipThickness;
+
+  const projectionSrc = (axis, method, center) => {
+    if (!canRender) return "";
+    const params = new URLSearchParams({
+      method,
+      window: "auto",
+      center: String(center),
+      thickness: String(mipThickness),
+    });
+    return apiUrl(`/api/image/${image.image_id}/projection/${axis}.png?${params}`);
+  };
+  const mipAxisCard = (axis, label, center, maxIndex, method) => `
+    <div class="mip-card" data-mip-card data-axis="${axis}" data-method="${method}">
+      <div class="mip-card-head">
+        <span>${label}</span>
+        <strong data-mip-center-label>${center + 1} / ${maxIndex + 1}</strong>
+      </div>
+      ${canRender ? `<img data-mip-img data-axis="${axis}" data-method="${method}" loading="lazy" src="${projectionSrc(axis, method, center)}" alt="${label}" />` : `<div class="mip-card-empty">无数据</div>`}
+      <div class="slider-row mip-card-slider">
+        <span>中心层</span>
+        <input data-mip-center type="range" min="0" max="${Math.max(maxIndex, 0)}" value="${center}" data-axis="${axis}" />
+      </div>
+    </div>
+  `;
   const mprGrid = `
     <div class="viewer-subsection">
       <div class="subsection-title"><span>MPR 三平面重建（与选中 Mask / 切片联动）</span><strong>点击可回 2D 修正</strong></div>
@@ -2729,16 +2772,30 @@ function render3DViewer(item, image, volume, masks = []) {
   `;
   const mipGrid = state.showMip
     ? `
-      <div class="viewer-subsection">
-      <div class="subsection-title"><span>MIP / MinIP 投影</span><strong>高密度 / 低密度结构辅助观察</strong></div>
-      <div class="orthogonal-grid">
-        <div><span>轴位 MIP</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/projection/axial.png?method=mip&window=auto`)}" alt="轴位 MIP" />` : ""}</div>
-        <div><span>冠状位 MIP</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/projection/coronal.png?method=mip&window=auto`)}" alt="冠状位 MIP" />` : ""}</div>
-        <div><span>矢状位 MIP</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/projection/sagittal.png?method=mip&window=auto`)}" alt="矢状位 MIP" />` : ""}</div>
-        <div><span>轴位 MinIP</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/projection/axial.png?method=min&window=auto`)}" alt="轴位 MinIP" />` : ""}</div>
-        <div><span>冠状位 MinIP</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/projection/coronal.png?method=min&window=auto`)}" alt="冠状位 MinIP" />` : ""}</div>
-        <div><span>矢状位 MinIP</span>${canRender ? `<img loading="lazy" src="${apiUrl(`/api/image/${image.image_id}/projection/sagittal.png?method=min&window=auto`)}" alt="矢状位 MinIP" />` : ""}</div>
-      </div>
+      <div class="viewer-subsection mip-section" data-mip-section data-image-id="${image?.image_id || ""}">
+        <div class="subsection-title">
+          <span>MIP / MinIP 投影</span>
+          <strong>左高密度 · 右低密度 · 拖动中心层换切片</strong>
+        </div>
+        <div class="slider-row mip-thickness-row">
+          <span>投影层厚</span>
+          <input id="mipThicknessSlider" type="range" min="1" max="${maxExtent}" value="${mipThickness}" />
+          <strong id="mipThicknessValue">${mipThickness} 层</strong>
+        </div>
+        <div class="mip-columns">
+          <section class="mip-column mip-column--high">
+            <header class="mip-column-title">高密度 · MIP</header>
+            ${mipAxisCard("axial", "轴位 MIP", mipAxial, depth - 1, "mip")}
+            ${mipAxisCard("coronal", "冠状位 MIP", mipCoronal, height - 1, "mip")}
+            ${mipAxisCard("sagittal", "矢状位 MIP", mipSagittal, width - 1, "mip")}
+          </section>
+          <section class="mip-column mip-column--low">
+            <header class="mip-column-title">低密度 · MinIP</header>
+            ${mipAxisCard("axial", "轴位 MinIP", mipAxial, depth - 1, "min")}
+            ${mipAxisCard("coronal", "冠状位 MinIP", mipCoronal, height - 1, "min")}
+            ${mipAxisCard("sagittal", "矢状位 MinIP", mipSagittal, width - 1, "min")}
+          </section>
+        </div>
       </div>
     `
     : `
@@ -5362,6 +5419,65 @@ function render() {
       render();
     });
   }
+
+  const mipSection = $("[data-mip-section]");
+  if (mipSection?.dataset.imageId) {
+    const imageId = mipSection.dataset.imageId;
+    const axisMax = {
+      axial: Number($("#mprAxialSlider")?.max || 0),
+      coronal: Number($("#mprCoronalSlider")?.max || 0),
+      sagittal: Number($("#mprSagittalSlider")?.max || 0),
+    };
+    const refreshMipImages = () => {
+      const thickness = Math.max(1, Number(state.mipThickness) || 32);
+      const thicknessLabel = $("#mipThicknessValue");
+      if (thicknessLabel) thicknessLabel.textContent = `${thickness} 层`;
+      mipSection.querySelectorAll("[data-mip-img]").forEach((img) => {
+        const axis = img.dataset.axis;
+        const method = img.dataset.method;
+        const center = Number(state.mipCenters?.[axis] ?? 0);
+        const params = new URLSearchParams({
+          method,
+          window: "auto",
+          center: String(center),
+          thickness: String(thickness),
+        });
+        img.src = apiUrl(`/api/image/${imageId}/projection/${axis}.png?${params}`);
+      });
+      mipSection.querySelectorAll("[data-mip-card]").forEach((card) => {
+        const axis = card.dataset.axis;
+        const center = Number(state.mipCenters?.[axis] ?? 0);
+        const maxIndex = axisMax[axis] ?? 0;
+        const label = card.querySelector("[data-mip-center-label]");
+        if (label) label.textContent = `${center + 1} / ${maxIndex + 1}`;
+      });
+    };
+    mipSection.querySelectorAll("[data-mip-center]").forEach((slider) => {
+      const onSlide = () => {
+        const axis = slider.dataset.axis;
+        state.mipCenters = {
+          ...(state.mipCenters || {}),
+          [axis]: Number(slider.value),
+        };
+        // Keep paired MIP/MinIP sliders for the same axis in sync.
+        mipSection.querySelectorAll(`[data-mip-center][data-axis="${axis}"]`).forEach((el) => {
+          if (el !== slider) el.value = slider.value;
+        });
+        refreshMipImages();
+      };
+      slider.addEventListener("input", onSlide);
+      slider.addEventListener("change", onSlide);
+    });
+    const thicknessSlider = $("#mipThicknessSlider");
+    if (thicknessSlider) {
+      const onThickness = () => {
+        state.mipThickness = Number(thicknessSlider.value);
+        refreshMipImages();
+      };
+      thicknessSlider.addEventListener("input", onThickness);
+      thicknessSlider.addEventListener("change", onThickness);
+    }
+  }
   document.querySelectorAll("[data-annotation-tool]").forEach((button) => {
     button.addEventListener("click", () => setAnnotationTool(button.dataset.annotationTool));
   });
@@ -5773,7 +5889,7 @@ async function startVolumeViewer(image) {
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/volume_viewer.js?v=lung-vtk-fix-20260712`);
+    const module = await import(`/frontend/volume_viewer.js?v=focus-select-20260713`);
     if (maskId) {
       loadMaskQuality(maskId)
         .then(() => updateMaskQualitySummary(maskId))

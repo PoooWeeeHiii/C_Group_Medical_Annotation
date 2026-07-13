@@ -1,6 +1,15 @@
 /**
  * Browser hand-gesture controller for the 3D volume viewer.
  * Uses MediaPipe Hand Landmarker (Tasks Vision) via CDN.
+ *
+ * Interaction design (aligned with common 3D / medical gesture systems):
+ * - One hand pinch + move  → rotate (pinch-to-rotate)
+ * - Open palm drag         → gentle rotate (CatGo-style)
+ * - Two hands distance     → zoom (bimanual, log-scaled)
+ * - Index point            → cursor / organ hover
+ * - Pinch tap / fist       → select
+ * - Peace                  → isolate
+ * - Thumbs up              → reset view
  */
 
 const VISION_WASM =
@@ -10,13 +19,14 @@ const MODEL_URL =
 
 const GESTURE_TEXT = {
   none: "未检测到手",
-  move: "移动中",
+  point: "食指指向",
   open: "张开手掌",
-  pinch: "捏合/收缩",
-  select: "OK 选中",
-  peace: "比耶",
-  thumbs_up: "竖大拇指",
-  fist: "握拳",
+  pinch: "捏合抓取",
+  select: "OK 选中特写",
+  peace: "比耶隔离特写",
+  thumbs_up: "竖拇指重置",
+  fist: "握拳选中特写",
+  two_hand_zoom: "双手缩放",
 };
 
 function dist3(a, b) {
@@ -24,6 +34,10 @@ function dist3(a, b) {
   const dy = a.y - b.y;
   const dz = (a.z || 0) - (b.z || 0);
   return Math.hypot(dx, dy, dz);
+}
+
+function dist2(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
 function fingerExtended(landmarks, tip, pip, mcp) {
@@ -51,64 +65,71 @@ function classifyHand(landmarks) {
   const pinkyUp = fingerExtended(landmarks, 20, 18, 17);
   const thumbUp = fingerExtended(landmarks, 4, 3, 2);
   const extendedCount = [indexUp, middleUp, ringUp, pinkyUp].filter(Boolean).length;
-  const openScore = extendedCount / 4 + Math.max(0, Math.min(1, (openSpan - 0.1) / 0.28));
-  const isOpenPalm = extendedCount >= 2 || openSpan > 0.18 || openScore >= 0.9;
+  const isOpenPalm = extendedCount >= 3 || openSpan > 0.22;
+  const isPoint = indexUp && !middleUp && !ringUp && !pinkyUp && pinch > 0.06;
+  const isPinch = pinch < 0.055 && extendedCount <= 2;
 
-  let gesture = "move";
-  if (okPinch < 0.055 && indexUp && !isOpenPalm) gesture = "select";
-  else if (pinch < 0.05 && extendedCount <= 1) gesture = "pinch";
+  let gesture = "open";
+  if (okPinch < 0.05 && indexUp && !isOpenPalm) gesture = "select";
+  else if (isPinch) gesture = "pinch";
   else if (indexUp && middleUp && !ringUp && !pinkyUp) gesture = "peace";
   else if (thumbUp && extendedCount <= 1) gesture = "thumbs_up";
+  else if (isPoint) gesture = "point";
+  else if (extendedCount === 0 && pinch > 0.07) gesture = "fist";
   else if (isOpenPalm) gesture = "open";
-  else if (extendedCount === 0 && pinch > 0.06) gesture = "fist";
 
-  const openAmount = Math.max(0, Math.min(1, (pinch - 0.03) / 0.18));
+  const palm = {
+    x: (landmarks[0].x + landmarks[9].x) / 2,
+    y: (landmarks[0].y + landmarks[9].y) / 2,
+    z: ((landmarks[0].z || 0) + (landmarks[9].z || 0)) / 2,
+  };
 
   return {
     gesture,
     pinch,
-    openAmount,
     openSpan,
-    openScore,
     extendedCount,
+    isPinch,
+    isOpenPalm,
+    isPoint,
     cursor: { x: indexTip.x, y: indexTip.y, z: indexTip.z || 0 },
-    palm: {
-      x: (landmarks[0].x + landmarks[9].x) / 2,
-      y: (landmarks[0].y + landmarks[9].y) / 2,
-    },
+    palm,
+    landmarks,
   };
 }
 
-function buildCoach(parsed, present, calibrateMode, progress, motionSpread) {
+function buildCoach(mode, present, handCount, calibrateMode, progress, motionSpread) {
   if (!present) {
     return {
       step: 1,
       title: "第 1 步：把手放进画面",
-      tip: "请将一只手正对摄像头，放到绿色框内，距离约 40–80cm，光线尽量均匀。",
+      tip: "单手或双手均可。正对摄像头，距离约 40–80cm。双手缩放时请两只手都入镜。",
       ok: false,
     };
   }
   if (!calibrateMode) {
+    const modeText = {
+      rotate: "捏合拖动 → 旋转",
+      palm_rotate: "张开拖动 → 轻旋转",
+      zoom: "双手开合 → 缩放",
+      point: "食指指向 → 悬停器官",
+      idle: "等待手势",
+    };
     return {
       step: 0,
-      title: `当前手势：${GESTURE_TEXT[parsed.gesture] || parsed.gesture}`,
-      tip: "可直接收缩/舒展控制进深。需要校准中心时，点「开始引导校准」。",
+      title: `模式：${modeText[mode] || mode}`,
+      tip: "捏合拖=旋转 · 开合=缩放 · 食指=悬停 · OK/拳=选中特写 · 比耶=隔离 · 👍=重置",
       ok: true,
     };
   }
-  if (parsed.extendedCount < 2 && parsed.openSpan < 0.15) {
-    return {
-      step: 2,
-      title: "第 2 步：五指尽量张开",
-      tip: `当前张开不够（已伸展 ${parsed.extendedCount}/4 指）。请掌心朝摄像头，五指张开。`,
-      ok: false,
-    };
+  if (handCount < 1) {
+    return { step: 2, title: "第 2 步：伸出一只手", tip: "掌心朝摄像头，五指自然张开。", ok: false };
   }
-  if (motionSpread > 0.06) {
+  if (motionSpread > 0.07) {
     return {
       step: 3,
       title: "第 3 步：尽量保持静止",
-      tip: "检测到手在晃动。请像拍照一样稳住 0.5 秒，进度条会上涨。",
+      tip: "检测到晃动。稳住约 0.5 秒完成校准。",
       ok: false,
     };
   }
@@ -116,16 +137,15 @@ function buildCoach(parsed, present, calibrateMode, progress, motionSpread) {
     return {
       step: 3,
       title: `第 3 步：保持静止 ${Math.round(progress * 100)}%`,
-      tip: "很好！继续保持张开手掌静止，进度满后自动完成校准。",
+      tip: "继续保持，进度满后自动设为中心。",
       ok: true,
     };
   }
-  return {
-    step: 4,
-    title: "校准完成",
-    tip: "当前手掌位置已设为画面中心。",
-    ok: true,
-  };
+  return { step: 4, title: "校准完成", tip: "当前手掌位置已设为画面中心。", ok: true };
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
 }
 
 export async function createHandGestureController(options = {}) {
@@ -153,8 +173,14 @@ export async function createHandGestureController(options = {}) {
   let lastCalibrateAt = 0;
   let calibrateMode = false;
   let lastPalm = null;
+  let prevPrimary = null;
+  let prevHandGap = null;
+  let smoothCursor = { x: 0.5, y: 0.5 };
+  let smoothDelta = { x: 0, y: 0 };
+  let smoothZoomDelta = 0;
+  let gestureHold = { name: "open", count: 0 };
 
-  onStatus("正在加载手势模型…");
+  onStatus("正在加载双手手势模型…");
   const vision = await import(
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm"
   );
@@ -168,10 +194,10 @@ export async function createHandGestureController(options = {}) {
         delegate,
       },
       runningMode: "VIDEO",
-      numHands: 1,
-      minHandDetectionConfidence: 0.45,
-      minHandPresenceConfidence: 0.45,
-      minTrackingConfidence: 0.45,
+      numHands: 2,
+      minHandDetectionConfidence: 0.5,
+      minHandPresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5,
     });
   }
 
@@ -182,9 +208,12 @@ export async function createHandGestureController(options = {}) {
     landmarker = await createLandmarker("CPU");
   }
 
+  function mapX(x) {
+    return mirrored ? 1 - x : x;
+  }
+
   function applyCalibration(avgX, avgY, now, source = "auto") {
-    const mx = mirrored ? 1 - avgX : avgX;
-    centerOffset = { x: mx, y: avgY };
+    centerOffset = { x: mapX(avgX), y: avgY };
     calibrated = true;
     calibrateMode = false;
     calibratingUntil = now + 1200;
@@ -214,6 +243,17 @@ export async function createHandGestureController(options = {}) {
     return true;
   }
 
+  function stabilizeGesture(name) {
+    if (gestureHold.name === name) gestureHold.count += 1;
+    else gestureHold = { name, count: 1 };
+    // Require 2 consecutive frames to accept discrete gestures (anti-flicker).
+    if (["select", "fist", "peace", "thumbs_up"].includes(name) && gestureHold.count < 2) {
+      return gestureHold.prev || "open";
+    }
+    gestureHold.prev = name;
+    return name;
+  }
+
   async function start() {
     if (running) return;
     stream = await navigator.mediaDevices.getUserMedia({
@@ -223,7 +263,7 @@ export async function createHandGestureController(options = {}) {
     video.srcObject = stream;
     await video.play();
     running = true;
-    onStatus("手势已就绪。建议先点「开始引导校准」，或「一键设为中心」");
+    onStatus("双手手势已就绪。单手捏合拖=旋转，双手开合=缩放");
     const loop = () => {
       if (!running) return;
       raf = requestAnimationFrame(loop);
@@ -232,13 +272,16 @@ export async function createHandGestureController(options = {}) {
       if (video.currentTime === lastVideoTime) return;
       lastVideoTime = video.currentTime;
       const result = landmarker.detectForVideo(video, now);
-      const landmarks = result?.landmarks?.[0];
+      const allLandmarks = result?.landmarks || [];
 
-      if (!landmarks) {
+      if (!allLandmarks.length) {
         lastPalm = null;
-        const coach = buildCoach(null, false, calibrateMode, 0, 0);
+        prevPrimary = null;
+        prevHandGap = null;
+        const coach = buildCoach("idle", false, 0, calibrateMode, 0, 0);
         onFrame({
           present: false,
+          handCount: 0,
           video,
           mirrored,
           calibrated,
@@ -247,81 +290,138 @@ export async function createHandGestureController(options = {}) {
           coach,
           gesture: "none",
           gestureText: GESTURE_TEXT.none,
+          mode: "idle",
+          rotateDelta: { x: 0, y: 0 },
+          zoomDelta: 0,
           landmarks: null,
+          hands: [],
         });
         return;
       }
 
-      const parsed = classifyHand(landmarks);
-      lastPalm = parsed.palm;
-      let cx = mirrored ? 1 - parsed.cursor.x : parsed.cursor.x;
-      let cy = parsed.cursor.y;
+      const hands = allLandmarks.map((lm) => classifyHand(lm));
+      // Prefer right-looking hand (larger x before mirror) as primary for pointing/rotate.
+      hands.sort((a, b) => b.palm.x - a.palm.x);
+      const primary = hands[0];
+      const secondary = hands[1] || null;
+      lastPalm = primary.palm;
+
+      let mode = "idle";
+      let rotateDelta = { x: 0, y: 0 };
+      let zoomDelta = 0;
+      let activeGesture = primary.gesture;
+
+      if (hands.length >= 2 && secondary) {
+        const gap = dist2(primary.palm, secondary.palm);
+        if (prevHandGap != null) {
+          // Log-ish scaling: positive = hands farther = zoom in (cam closer).
+          const raw = (gap - prevHandGap) * 2.8;
+          zoomDelta = Math.max(-0.12, Math.min(0.12, raw));
+        }
+        prevHandGap = gap;
+        mode = "zoom";
+        activeGesture = "two_hand_zoom";
+        prevPrimary = { palm: primary.palm, cursor: primary.cursor };
+      } else {
+        prevHandGap = null;
+        const usePinchRotate = primary.isPinch || primary.gesture === "pinch";
+        const usePalmRotate = primary.isOpenPalm && !primary.isPoint;
+        if ((usePinchRotate || usePalmRotate) && prevPrimary) {
+          const dx = mapX(primary.palm.x) - mapX(prevPrimary.palm.x);
+          const dy = primary.palm.y - prevPrimary.palm.y;
+          const gain = usePinchRotate ? 2.6 : 1.35;
+          rotateDelta = {
+            x: Math.max(-0.08, Math.min(0.08, dx * gain)),
+            y: Math.max(-0.08, Math.min(0.08, dy * gain)),
+          };
+          mode = usePinchRotate ? "rotate" : "palm_rotate";
+          // CatGo-style: while pinching with little lateral move, finger gap → zoom.
+          if (
+            usePinchRotate &&
+            prevPrimary.pinch != null &&
+            Math.hypot(dx, dy) < 0.01
+          ) {
+            const raw = (prevPrimary.pinch - primary.pinch) * 2.4;
+            zoomDelta = Math.max(-0.1, Math.min(0.1, raw));
+            if (Math.abs(zoomDelta) > 0.008) mode = "zoom";
+          }
+        } else if (primary.isPoint || primary.gesture === "point") {
+          mode = "point";
+        }
+        prevPrimary = { palm: primary.palm, cursor: primary.cursor, pinch: primary.pinch };
+      }
+
+      activeGesture = stabilizeGesture(activeGesture);
+
+      let cx = mapX(primary.cursor.x);
+      let cy = primary.cursor.y;
       cx = Math.max(0, Math.min(1, cx - centerOffset.x + 0.5));
       cy = Math.max(0, Math.min(1, cy - centerOffset.y + 0.5));
+      smoothCursor = {
+        x: lerp(smoothCursor.x, cx, 0.35),
+        y: lerp(smoothCursor.y, cy, 0.35),
+      };
+      smoothDelta = {
+        x: lerp(smoothDelta.x, rotateDelta.x, 0.45),
+        y: lerp(smoothDelta.y, rotateDelta.y, 0.45),
+      };
+      smoothZoomDelta = lerp(smoothZoomDelta, zoomDelta, 0.4);
 
       let motionSpread = 0;
-      // In calibrate mode: accumulate when hand is visible enough; much more forgiving.
       if (calibrateMode) {
-        const openish =
-          parsed.gesture === "open" ||
-          parsed.extendedCount >= 2 ||
-          parsed.openSpan > 0.15 ||
-          parsed.openScore >= 0.85;
-        if (openish) {
-          calmSamples.push({ x: parsed.palm.x, y: parsed.palm.y, t: now });
-          calmSamples = calmSamples.filter((s) => now - s.t < 900);
-          if (calmSamples.length >= 2) {
-            const xs = calmSamples.map((s) => s.x);
-            const ys = calmSamples.map((s) => s.y);
-            motionSpread = Math.max(...xs) - Math.min(...xs) + (Math.max(...ys) - Math.min(...ys));
-            if (motionSpread > 0.1) calmSamples = calmSamples.slice(-4);
-          }
-          // Only need ~8 stable frames (~0.4–0.6s)
-          if (calmSamples.length >= 8 && motionSpread <= 0.08 && now - lastCalibrateAt > 800) {
-            const avgX = calmSamples.reduce((s, p) => s + p.x, 0) / calmSamples.length;
-            const avgY = calmSamples.reduce((s, p) => s + p.y, 0) / calmSamples.length;
-            applyCalibration(avgX, avgY, now, "guided");
-          }
-        } else {
-          const newest = calmSamples[calmSamples.length - 1];
-          if (!newest || now - newest.t > 400) calmSamples = [];
+        calmSamples.push({ x: primary.palm.x, y: primary.palm.y, t: now });
+        calmSamples = calmSamples.filter((s) => now - s.t < 900);
+        if (calmSamples.length >= 2) {
+          const xs = calmSamples.map((s) => s.x);
+          const ys = calmSamples.map((s) => s.y);
+          motionSpread = Math.max(...xs) - Math.min(...xs) + (Math.max(...ys) - Math.min(...ys));
+          if (motionSpread > 0.1) calmSamples = calmSamples.slice(-4);
+        }
+        if (calmSamples.length >= 8 && motionSpread <= 0.08 && now - lastCalibrateAt > 800) {
+          const avgX = calmSamples.reduce((s, p) => s + p.x, 0) / calmSamples.length;
+          const avgY = calmSamples.reduce((s, p) => s + p.y, 0) / calmSamples.length;
+          applyCalibration(avgX, avgY, now, "guided");
         }
       } else {
         calmSamples = [];
       }
 
       let selectPulse = false;
-      if (!calibrateMode && (parsed.gesture === "select" || parsed.gesture === "fist") && now - lastSelectAt > 900) {
+      if (!calibrateMode && (activeGesture === "select" || activeGesture === "fist") && now - lastSelectAt > 900) {
         lastSelectAt = now;
         selectPulse = true;
       }
       let peacePulse = false;
-      if (!calibrateMode && parsed.gesture === "peace" && now - lastPeaceAt > 1000) {
+      if (!calibrateMode && activeGesture === "peace" && now - lastPeaceAt > 1000) {
         lastPeaceAt = now;
         peacePulse = true;
       }
       let resetPulse = false;
-      if (!calibrateMode && parsed.gesture === "thumbs_up" && now - lastResetAt > 1200) {
+      if (!calibrateMode && activeGesture === "thumbs_up" && now - lastResetAt > 1200) {
         lastResetAt = now;
         resetPulse = true;
       }
 
       const progress = calibrateMode ? Math.min(1, calmSamples.length / 8) : calibrated ? 1 : 0;
-      const coach = buildCoach(parsed, true, calibrateMode, progress, motionSpread);
+      const coach = buildCoach(mode, true, hands.length, calibrateMode, progress, motionSpread);
 
       onFrame({
         present: true,
+        handCount: hands.length,
         video,
         mirrored,
-        gesture: parsed.gesture,
-        gestureText: GESTURE_TEXT[parsed.gesture] || parsed.gesture,
-        openAmount: parsed.openAmount,
-        pinch: parsed.pinch,
-        extendedCount: parsed.extendedCount,
-        openSpan: parsed.openSpan,
-        cursor: { x: cx, y: cy },
-        rawCursor: parsed.cursor,
-        palm: parsed.palm,
+        gesture: activeGesture,
+        gestureText: GESTURE_TEXT[activeGesture] || activeGesture,
+        mode,
+        rotateDelta: { ...smoothDelta },
+        zoomDelta: smoothZoomDelta,
+        openAmount: Math.max(0, Math.min(1, (primary.pinch - 0.03) / 0.18)),
+        pinch: primary.pinch,
+        extendedCount: primary.extendedCount,
+        openSpan: primary.openSpan,
+        cursor: { ...smoothCursor },
+        rawCursor: primary.cursor,
+        palm: primary.palm,
         calibrating: calibrateMode || now < calibratingUntil,
         calibrateMode,
         calibrateProgress: progress,
@@ -330,7 +430,8 @@ export async function createHandGestureController(options = {}) {
         selectPulse,
         peacePulse,
         resetPulse,
-        landmarks,
+        landmarks: primary.landmarks,
+        handsLandmarks: allLandmarks,
       });
     };
     raf = requestAnimationFrame(loop);
@@ -338,15 +439,16 @@ export async function createHandGestureController(options = {}) {
 
   function stop() {
     running = false;
-    calibrateMode = false;
     cancelAnimationFrame(raf);
+    raf = 0;
     if (stream) {
-      stream.getTracks().forEach((track) => track.stop());
+      for (const track of stream.getTracks()) track.stop();
       stream = null;
     }
     video.srcObject = null;
-    lastPalm = null;
-    onStatus("手势控制已关闭");
+    prevPrimary = null;
+    prevHandGap = null;
+    onStatus("手势已关闭");
   }
 
   function dispose() {
@@ -360,7 +462,6 @@ export async function createHandGestureController(options = {}) {
   }
 
   return {
-    video,
     start,
     stop,
     dispose,
@@ -369,5 +470,6 @@ export async function createHandGestureController(options = {}) {
     calibrateNow,
     isRunning: () => running,
     isCalibrateMode: () => calibrateMode,
+    getVideo: () => video,
   };
 }

@@ -104,8 +104,22 @@ def read_image_axis_slice_values(image_id: str, axis: str, slice_index: int):
 
 
 @router.get("/image/{image_id}/projection/{axis}.png")
-def read_image_projection(image_id: str, axis: str, method: str = "mip", window: str = "auto"):
-    return render_projection_png(image_id=image_id, axis=axis, method=method, window=window)
+def read_image_projection(
+    image_id: str,
+    axis: str,
+    method: str = "mip",
+    window: str = "auto",
+    center: int | None = None,
+    thickness: int | None = None,
+):
+    return render_projection_png(
+        image_id=image_id,
+        axis=axis,
+        method=method,
+        window=window,
+        center=center,
+        thickness=thickness,
+    )
 
 
 @router.get("/image/{image_id}/export-3d")

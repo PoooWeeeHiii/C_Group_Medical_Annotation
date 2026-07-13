@@ -477,7 +477,41 @@ def _slice_by_axis(array: np.ndarray, axis: str, slice_index: int) -> np.ndarray
     raise HTTPException(status_code=400, detail=f"Unsupported axis: {axis}")
 
 
-def _projection_by_axis(array: np.ndarray, axis: str, method: str) -> np.ndarray:
+def _axis_extent(array: np.ndarray, axis: str) -> int:
+    if axis == "axial":
+        return int(array.shape[0])
+    if axis == "coronal":
+        return int(array.shape[1])
+    if axis == "sagittal":
+        return int(array.shape[2])
+    raise HTTPException(status_code=400, detail=f"Unsupported axis: {axis}")
+
+
+def _slab_bounds(extent: int, center: int | None, thickness: int | None) -> tuple[int, int]:
+    """Return [lo, hi) along the projection axis. Full extent when thickness omitted/large."""
+    if extent <= 0:
+        return 0, 0
+    if center is None and thickness is None:
+        return 0, extent
+    c = 0 if center is None else int(center)
+    c = max(0, min(c, extent - 1))
+    if thickness is None or int(thickness) <= 0:
+        return 0, extent
+    t = min(int(thickness), extent)
+    lo = max(0, c - t // 2)
+    hi = min(extent, lo + t)
+    if hi - lo < t:
+        lo = max(0, hi - t)
+    return lo, hi
+
+
+def _projection_by_axis(
+    array: np.ndarray,
+    axis: str,
+    method: str,
+    center: int | None = None,
+    thickness: int | None = None,
+) -> np.ndarray:
     if method == "mean":
         reducer = np.mean
     elif method == "min":
@@ -485,12 +519,18 @@ def _projection_by_axis(array: np.ndarray, axis: str, method: str) -> np.ndarray
     else:
         reducer = np.max
 
+    extent = _axis_extent(array, axis)
+    lo, hi = _slab_bounds(extent, center, thickness)
+
     if axis == "axial":
-        return reducer(array, axis=0)
+        slab = array[lo:hi, :, :]
+        return reducer(slab, axis=0)
     if axis == "coronal":
-        return np.flipud(reducer(array, axis=1))
+        slab = array[:, lo:hi, :]
+        return np.flipud(reducer(slab, axis=1))
     if axis == "sagittal":
-        return np.flipud(reducer(array, axis=2))
+        slab = array[:, :, lo:hi]
+        return np.flipud(reducer(slab, axis=2))
     raise HTTPException(status_code=400, detail=f"Unsupported axis: {axis}")
 
 
@@ -535,13 +575,23 @@ def get_slice_values(image_id: str, slice_index: int, axis: str = "axial") -> di
     }
 
 
-def render_projection_png(image_id: str, axis: str = "axial", method: str = "mip", window: str = "auto") -> Response:
+def render_projection_png(
+    image_id: str,
+    axis: str = "axial",
+    method: str = "mip",
+    window: str = "auto",
+    center: int | None = None,
+    thickness: int | None = None,
+) -> Response:
     _, volume = load_volume(image_id)
     if volume.array.size <= 0:
         raise HTTPException(status_code=422, detail="Volume has no voxels")
     if axis not in AXES:
         raise HTTPException(status_code=400, detail=f"Unsupported axis: {axis}")
-    pixels = _window_slice(_projection_by_axis(volume.array, axis, method), window)
+    pixels = _window_slice(
+        _projection_by_axis(volume.array, axis, method, center=center, thickness=thickness),
+        window,
+    )
     return _png_response(pixels)
 
 

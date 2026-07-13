@@ -479,6 +479,8 @@ image/png
 | --- | --- | --- | --- |
 | `method` | string | 否 | `mip`、`mean`、`min`，默认 `mip`。 |
 | `window` | string | 否 | `auto`、`lung`、`soft`、`bone`。 |
+| `center` | int | 否 | 薄层投影中心切片索引（与 `thickness` 联用）。省略则对整轴投影。 |
+| `thickness` | int | 否 | 投影层厚（切片数）。省略或 ≥ 轴向长度时等同全投影。 |
 
 响应方式：
 

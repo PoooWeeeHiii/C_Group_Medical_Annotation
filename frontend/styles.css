@@ -684,8 +684,8 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   left: 12px;
   bottom: 12px;
   z-index: 3;
-  width: min(520px, calc(100% - 24px));
-  max-height: min(44vh, 360px);
+  width: min(360px, calc(100% - 24px));
+  max-height: min(36vh, 280px);
   overflow: auto;
   padding: 9px;
   border: 1px solid rgba(0, 194, 255, 0.24);
@@ -977,6 +977,81 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 }
 .mpr-grid div {
   background: linear-gradient(180deg, rgba(0, 194, 255, 0.08), rgba(2, 12, 24, 0.70));
+}
+.mip-section {
+  margin-top: 18px;
+}
+.mip-thickness-row {
+  margin-top: 10px;
+}
+.mip-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 12px;
+}
+.mip-column {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(2, 12, 24, 0.55);
+}
+.mip-column--high {
+  border-color: rgba(255, 176, 32, 0.35);
+  background: linear-gradient(180deg, rgba(255, 176, 32, 0.08), rgba(2, 12, 24, 0.62));
+}
+.mip-column--low {
+  border-color: rgba(0, 194, 255, 0.35);
+  background: linear-gradient(180deg, rgba(0, 194, 255, 0.08), rgba(2, 12, 24, 0.62));
+}
+.mip-column-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.mip-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+}
+.mip-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.mip-card-head strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.mip-card img,
+.mip-card-empty {
+  width: 100%;
+  height: min(38vh, 300px);
+  min-height: 200px;
+  object-fit: contain;
+  background: #02070d;
+  border-radius: 6px;
+}
+.mip-card-empty {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+.mip-card-slider {
+  margin: 0;
 }
 .mip-placeholder {
   margin-top: 14px;
@@ -1718,24 +1793,39 @@ button.label-pick.active {
   .viewer-toolbar { flex-direction: column; }
   .tool-grid { grid-template-columns: 1fr; }
   .orthogonal-grid { grid-template-columns: 1fr; }
+  .mip-columns { grid-template-columns: 1fr; }
+  .mip-card img,
+  .mip-card-empty { height: min(32vh, 240px); min-height: 160px; }
   .mip-placeholder { align-items: stretch; flex-direction: column; }
   .volume-stage { width: 300px; height: 300px; }
   .volume-cube { width: 230px; height: 230px; }
 }
 
-/* Hand gesture 3D control */
+/* Hand gesture 3D control — docked top-right so it doesn't cover the volume center */
 .gesture-panel {
   position: absolute;
-  left: 12px;
-  bottom: 12px;
+  right: 12px;
+  top: 12px;
+  left: auto;
+  bottom: auto;
   z-index: 8;
-  width: min(280px, calc(100% - 24px));
+  width: min(220px, calc(100% - 24px));
   display: grid;
-  gap: 8px;
+  gap: 6px;
   pointer-events: auto;
 }
-.gesture-panel > .ghost-button {
+.gesture-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.gesture-panel > .ghost-button,
+.gesture-toolbar > .ghost-button {
   width: fit-content;
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
   background: rgba(5, 14, 26, 0.82);
 }
 .gesture-body {
@@ -1743,9 +1833,19 @@ button.label-pick.active {
   border-radius: 10px;
   background: rgba(5, 14, 26, 0.88);
   backdrop-filter: blur(10px);
-  padding: 10px;
+  padding: 8px;
   display: grid;
-  gap: 8px;
+  gap: 6px;
+  max-height: min(52vh, 420px);
+  overflow: auto;
+}
+.gesture-body.is-collapsed,
+.gesture-panel.is-minimized .gesture-body {
+  display: none;
+}
+.gesture-panel--compact .gesture-video {
+  aspect-ratio: 4 / 3;
+  max-height: 112px;
 }
 .gesture-video {
   width: 100%;
@@ -1778,7 +1878,7 @@ button.label-pick.active {
 .gesture-coach {
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 8px 10px;
+  padding: 6px 8px;
   background: rgba(0, 20, 36, 0.55);
 }
 .gesture-coach.ok {
@@ -1789,14 +1889,14 @@ button.label-pick.active {
 }
 .gesture-coach strong {
   display: block;
-  font-size: 13px;
-  margin-bottom: 4px;
+  font-size: 12px;
+  margin-bottom: 2px;
 }
 .gesture-coach p {
   margin: 0;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 11px;
+  line-height: 1.45;
 }
 .gesture-progress-wrap {
   display: grid;
@@ -1809,7 +1909,7 @@ button.label-pick.active {
   color: var(--muted);
 }
 .gesture-progress-track {
-  height: 8px;
+  height: 6px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   overflow: hidden;
@@ -1827,29 +1927,40 @@ button.label-pick.active {
 }
 .gesture-actions .primary-button,
 .gesture-actions .ghost-button {
-  min-height: 32px;
-  padding: 0 10px;
-  font-size: 12px;
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 11px;
 }
 .gesture-live {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text);
 }
 .gesture-status {
   color: var(--green);
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.gesture-help {
+  font-size: 11px;
+  color: var(--muted);
+}
+.gesture-help summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--text);
+  font-size: 11px;
 }
 .gesture-hint {
   color: var(--muted);
   font-size: 11px;
-  line-height: 1.55;
+  line-height: 1.5;
   display: grid;
   gap: 2px;
+  margin-top: 6px;
 }
 .gesture-organ,
 .gesture-selected {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text);
 }
 .gesture-cursor {
@@ -1871,9 +1982,15 @@ button.label-pick.active {
   box-shadow: 0 0 14px rgba(0, 229, 176, 0.55);
   background: rgba(0, 229, 176, 0.18);
 }
-.gesture-cursor[data-gesture="pinch"] .gesture-cursor-ring {
+.gesture-cursor[data-gesture="pinch"] .gesture-cursor-ring,
+.gesture-cursor[data-mode="rotate"] .gesture-cursor-ring {
   border-color: #ffb020;
   box-shadow: 0 0 14px rgba(255, 176, 32, 0.55);
+}
+.gesture-cursor[data-mode="zoom"] .gesture-cursor-ring,
+.gesture-cursor[data-gesture="two_hand_zoom"] .gesture-cursor-ring {
+  border-color: #00c2ff;
+  box-shadow: 0 0 14px rgba(0, 194, 255, 0.55);
 }
 .gesture-cursor[data-gesture="select"] .gesture-cursor-ring,
 .gesture-cursor[data-gesture="fist"] .gesture-cursor-ring {
