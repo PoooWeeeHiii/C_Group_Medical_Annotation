@@ -133,6 +133,8 @@ def _run_totalseg_organs(volume, spacing, label: str, model_id: str) -> dict[str
             status_code=503,
             detail=f"TotalSegmentator not ready: {exc}",
         ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:

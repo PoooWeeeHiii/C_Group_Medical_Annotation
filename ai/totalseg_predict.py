@@ -418,6 +418,19 @@ def predict_totalseg_organs(
     import shutil
 
     python = ensure_totalseg_ready()
+    array = np.asarray(volume)
+    if array.ndim == 2:
+        array = array.reshape((1, array.shape[0], array.shape[1]))
+    if array.ndim < 3:
+        raise ValueError(f"TotalSegmentator needs a 3D CT volume, got shape={tuple(array.shape)}")
+    depth = int(array.shape[0])
+    if depth < 8:
+        raise ValueError(
+            f"Volume too thin for TotalSegmentator / 3D MPR (depth={depth}). "
+            "Use a multi-slice DICOM series or NIfTI (e.g. Case0002–0004 with ~134 slices), "
+            "not a single-slice .dcm."
+        )
+    volume = array
     rois = resolve_roi_subset(label, model_id)
     device = _resolve_device(python)
     fast = _use_fast(device)
