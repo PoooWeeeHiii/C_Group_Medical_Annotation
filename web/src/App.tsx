@@ -7,7 +7,6 @@ import { AnnotationPage } from "./pages/AnnotationPage";
 import { CasesPage } from "./pages/CasesPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { ExportPage } from "./pages/ExportPage";
-import { InferencePage } from "./pages/InferencePage";
 import { QualityPage } from "./pages/QualityPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { TrainPage } from "./pages/TrainPage";
@@ -28,7 +27,6 @@ export default function App() {
               <Route path="annotation" element={<AnnotationPage refreshKey={refreshKey} />} />
               <Route path="annotation/:caseId" element={<AnnotationPage refreshKey={refreshKey} />} />
               <Route path="train" element={<TrainPage refreshKey={refreshKey} />} />
-              <Route path="inference" element={<InferencePage refreshKey={refreshKey} />} />
               <Route path="versions" element={<VersionsPage refreshKey={refreshKey} />} />
               <Route path="versions/:caseId" element={<VersionsPage refreshKey={refreshKey} />} />
               <Route path="quality" element={<QualityPage refreshKey={refreshKey} />} />

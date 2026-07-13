@@ -182,7 +182,7 @@ export function TrainPage({ refreshKey }: { refreshKey: number }) {
           </form>
           {job?.registered_model_id ? (
             <p style={{ marginTop: 12, color: "var(--green)" }}>
-              已注册模型：{job.registered_model_id}，可去推理中心选用。
+              已注册模型：{job.registered_model_id}，可去标注台选用预测。
             </p>
           ) : null}
           {job?.error ? <p className="panel-lead" style={{ color: "var(--danger, #ff6b6b)" }}>{job.error}</p> : null}

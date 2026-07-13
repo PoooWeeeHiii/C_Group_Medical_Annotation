@@ -48,21 +48,32 @@ export function DashboardPage({ refreshKey }: { refreshKey: number }) {
       <div className="dashboard-hero">
         <section className="hero-panel">
           <div className="hero-title">
-            <div className="holo-emblem" aria-hidden="true">
+            <div className="holo-emblem neu-holo" aria-hidden="true">
               <span className="holo-ring ring-a" />
               <span className="holo-ring ring-b" />
               <span className="holo-orbit orbit-a" />
               <span className="holo-orbit orbit-b" />
               <svg className="holo-symbol" viewBox="0 0 120 120">
-                <path d="M60 18l34 19v46l-34 19-34-19V37z" className="holo-hex" />
-                <path d="M34 65h16l7-22 12 42 9-20h10" className="holo-wave" />
-                <path d="M60 39v22M49 50h22" className="holo-cross" />
+                <circle className="neu-holo-core" cx="60" cy="60" r="42" />
+                <path className="neu-holo-mountain" d="M28 76 L42 46 L52 62 L64 34 L76 58 L88 44 L94 76 Z" />
+                <path className="neu-holo-mountain-edge" d="M28 76 L42 46 L52 62 L64 34 L76 58 L88 44 L94 76" />
+                <path className="neu-holo-water" d="M26 82 Q42 74 58 82 T90 82" />
+                <path className="neu-holo-water neu-holo-water-b" d="M30 90 Q48 84 62 90 T94 90" />
+                <text className="neu-holo-letters" x="60" y="66">
+                  NEU
+                </text>
+                <text className="neu-holo-motto" x="60" y="102">
+                  自强不息 · 知行合一
+                </text>
               </svg>
               <span className="holo-scan" />
+              <span className="holo-particle p1" />
+              <span className="holo-particle p2" />
+              <span className="holo-particle p3" />
             </div>
             <div>
               <h2>Medical Annotation</h2>
-              <div className="eyebrow">人机协同闭环标注系统 · React</div>
+              <div className="eyebrow">东北大学 NEU · 人机协同闭环标注</div>
             </div>
           </div>
           <p className="hero-copy">
@@ -137,7 +148,7 @@ export function DashboardPage({ refreshKey }: { refreshKey: number }) {
 AI 预测 -> v2_ai
 DeepEdit / 图割 -> v3_preview
 导出多类 Dataset -> 训练中心 U-Net
-注册模型 -> 推理中心选用`}
+注册模型 -> 标注台选用预测`}
           </div>
         </section>
       </div>

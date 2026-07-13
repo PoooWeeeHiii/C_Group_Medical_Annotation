@@ -28,6 +28,12 @@ export function VersionsPage({ refreshKey }: { refreshKey: number }) {
     hd95_mm?: number | null;
     pred_version?: string | null;
     ref_version?: string | null;
+    intersection?: number;
+    pred_voxels?: number;
+    ref_voxels?: number;
+    pred_volume_ml?: number;
+    ref_volume_ml?: number;
+    shape?: number[];
   } | null>(null);
   const [rejectNote, setRejectNote] = useState("");
 
@@ -350,11 +356,18 @@ export function VersionsPage({ refreshKey }: { refreshKey: number }) {
         </div>
       </section>
 
-      <section className="panel" style={{ marginTop: 18 }}>
-        <h2>版本 Diff / 回滚</h2>
-        <div className="toolbar-row" style={{ marginTop: 12 }}>
+      <section className="panel diff-panel" style={{ marginTop: 18 }}>
+        <div className="subsection-title">
+          <span>版本 Diff / 回滚</span>
+          <strong>三维 Mask 体素级对比</strong>
+        </div>
+        <p className="panel-lead">
+          将两个 NIfTI Mask 二值化（体素 &gt; 0）后计算重叠与表面距离。Dice / IoU 越接近 1 越相似；体积差为
+          A−B；HD95 为双向表面距离的 95 分位（mm）。
+        </p>
+        <div className="diff-controls">
           <label className="field">
-            <span>Mask A</span>
+            <span>Mask A（预测侧）</span>
             <select value={compareA} onChange={(e) => setCompareA(e.target.value)}>
               <option value="">选择 Mask</option>
               {masks.map((mask) => (
@@ -364,8 +377,11 @@ export function VersionsPage({ refreshKey }: { refreshKey: number }) {
               ))}
             </select>
           </label>
+          <div className="diff-vs" aria-hidden="true">
+            VS
+          </div>
           <label className="field">
-            <span>Mask B</span>
+            <span>Mask B（参考侧）</span>
             <select value={compareB} onChange={(e) => setCompareB(e.target.value)}>
               <option value="">选择 Mask</option>
               {masks.map((mask) => (
@@ -379,73 +395,87 @@ export function VersionsPage({ refreshKey }: { refreshKey: number }) {
             计算 Diff
           </button>
         </div>
-        <div className="grid cols-4" style={{ marginTop: 14 }}>
-          <article className="metric-card">
+        <div className="diff-metrics">
+          <article className="diff-metric-card">
             <div className="metric-label">Dice</div>
             <div className="metric-value">{diff ? Number(diff.dice).toFixed(4) : "-"}</div>
             <div className="metric-note">
-              {diff ? `${diff.pred_version} vs ${diff.ref_version}` : "GET /api/mask/{a}/compare/{b}"}
+              {diff ? `${diff.pred_version} vs ${diff.ref_version}` : "2|A∩B| / (|A|+|B|)"}
             </div>
           </article>
-          <article className="metric-card">
+          <article className="diff-metric-card">
             <div className="metric-label">IoU</div>
             <div className="metric-value">{diff ? Number(diff.iou).toFixed(4) : "-"}</div>
-            <div className="metric-note">重叠</div>
+            <div className="metric-note">{diff ? "重叠比" : "|A∩B| / |A∪B|"}</div>
           </article>
-          <article className="metric-card">
-            <div className="metric-label">体积差 ml</div>
-            <div className="metric-value">{diff ? Number(diff.volume_diff_ml).toFixed(3) : "-"}</div>
-            <div className="metric-note">A − B</div>
+          <article className="diff-metric-card">
+            <div className="metric-label">体积差</div>
+            <div className="metric-value">
+              {diff ? Number(diff.volume_diff_ml).toFixed(3) : "-"}
+              {diff ? <small> ml</small> : null}
+            </div>
+            <div className="metric-note">
+              {diff
+                ? `A ${Number(diff.pred_volume_ml || 0).toFixed(2)} − B ${Number(diff.ref_volume_ml || 0).toFixed(2)} ml`
+                : "体素数 × spacing"}
+            </div>
           </article>
-          <article className="metric-card">
-            <div className="metric-label">HD95 mm</div>
+          <article className="diff-metric-card">
+            <div className="metric-label">HD95</div>
             <div className="metric-value">
               {diff?.hd95_mm != null ? Number(diff.hd95_mm).toFixed(3) : "-"}
+              {diff?.hd95_mm != null ? <small> mm</small> : null}
             </div>
-            <div className="metric-note">表面距离</div>
+            <div className="metric-note">表面距离 95 分位</div>
           </article>
         </div>
-        <div className="table-wrap" style={{ marginTop: 14 }}>
-          <table>
-            <thead>
-              <tr>
-                <th>Mask</th>
-                <th>版本</th>
-                <th>标签</th>
-                <th>路径</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {masks.length ? (
-                masks.map((mask) => (
-                  <tr key={mask.mask_id}>
-                    <td>{mask.mask_id}</td>
-                    <td>{mask.version}</td>
-                    <td>{mask.label}</td>
-                    <td>
-                      <code>{mask.path}</code>
-                    </td>
-                    <td>
-                      <button
-                        className="ghost-button"
-                        type="button"
-                        onClick={() => void rollbackMask(mask.mask_id)}
-                      >
-                        回滚为 v3_preview
-                      </button>
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={5}>
-                    <div className="placeholder">当前病例暂无 3D NIfTI Mask</div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        {diff ? (
+          <div className="diff-detail">
+            <span>
+              相交体素 <b>{Number(diff.intersection || 0).toLocaleString("zh-CN")}</b>
+            </span>
+            <span>
+              A 体素 <b>{Number(diff.pred_voxels || 0).toLocaleString("zh-CN")}</b>
+            </span>
+            <span>
+              B 体素 <b>{Number(diff.ref_voxels || 0).toLocaleString("zh-CN")}</b>
+            </span>
+            <span>
+              尺寸 <b>{Array.isArray(diff.shape) ? diff.shape.join("×") : "-"}</b>
+            </span>
+          </div>
+        ) : null}
+        <h3 className="diff-list-title">本病例 3D Mask</h3>
+        <div className="mask-version-cards">
+          {masks.length ? (
+            masks.map((mask) => {
+              const pathText = String(mask.path || "");
+              const shortPath = pathText.split("/").slice(-2).join("/") || pathText;
+              return (
+                <article className="mask-version-card" key={mask.mask_id}>
+                  <div className="mask-version-card-head">
+                    <strong>{mask.mask_id}</strong>
+                    <span className="chip active-chip">{mask.version}</span>
+                  </div>
+                  <div className="mask-version-card-meta">
+                    <span>
+                      标签 <b>{mask.label || "-"}</b>
+                    </span>
+                    <code title={pathText}>{shortPath}</code>
+                  </div>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => void rollbackMask(mask.mask_id)}
+                  >
+                    回滚为 v3_preview
+                  </button>
+                </article>
+              );
+            })
+          ) : (
+            <div className="placeholder compact">当前病例暂无 3D NIfTI Mask</div>
+          )}
         </div>
       </section>
     </>

@@ -37,7 +37,7 @@ D:\hm_2_spleen\venv_nnunet_cpu\Scripts\python.exe -u scripts\e2e_spleen_api.py -
 ## 前端操作
 
 1. 打开「病例中心」，应能看到 `Case9001`
-2. 进入标注工作台或 AI 推理中心
+2. 进入标注工作台
 3. 点击 **AI预测** / **开始脾推理**
 4. Mask 列表出现 `v2_ai` / `spleen`
 

@@ -11,7 +11,6 @@ const TITLES: Record<string, string> = {
   "/cases": "病例中心",
   "/annotation": "标注工作台",
   "/train": "AI训练中心",
-  "/inference": "AI推理中心",
   "/versions": "版本审核",
   "/quality": "质量报告",
   "/export": "Dataset导出",
@@ -46,15 +45,22 @@ export function AppLayout({ onRefresh }: { onRefresh: () => void }) {
           <div className="brand">
             <div className="brand-mark" aria-hidden="true">
               <svg viewBox="0 0 80 80" role="img">
-                <rect x="12" y="14" width="56" height="52" rx="12" className="mark-frame" />
-                <path d="M24 43h10l5-13 8 25 6-12h9" className="mark-wave" />
-                <path d="M40 23v14M33 30h14" className="mark-cross" />
-                <line x1="18" y1="18" x2="18" y2="62" className="mark-scan" />
+                <circle className="neu-core" cx="40" cy="40" r="30" />
+                <circle className="neu-ring-inner" cx="40" cy="40" r="33" />
+                <circle className="neu-ring-tech" cx="40" cy="40" r="36" />
+                <path className="neu-mountain" d="M18 50 L28 32 L35 42 L43 24 L51 40 L58 30 L62 50 Z" />
+                <path className="neu-mountain-edge" d="M18 50 L28 32 L35 42 L43 24 L51 40 L58 30 L62 50" />
+                <path className="neu-water" d="M17 54 Q28 49 39 54 T61 54" />
+                <path className="neu-water neu-water-b" d="M19 59 Q31 55 41 59 T63 59" />
+                <text className="neu-letters" x="40" y="44">
+                  NEU
+                </text>
+                <circle className="neu-node" cx="40" cy="16" r="1.8" />
               </svg>
             </div>
             <div>
               <div className="brand-title">Medical Annotation</div>
-              <div className="brand-subtitle">C组医学标注平台</div>
+              <div className="brand-subtitle">NEU · C组医学标注平台</div>
             </div>
           </div>
 

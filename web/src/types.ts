@@ -231,7 +231,6 @@ export const NAV_ITEMS = [
   { path: "/cases", view: "cases", label: "病例中心", icon: "▤" },
   { path: "/annotation", view: "annotation", label: "标注工作台", icon: "◱" },
   { path: "/train", view: "train", label: "AI训练中心", icon: "↗" },
-  { path: "/inference", view: "inference", label: "AI推理中心", icon: "◈" },
   { path: "/versions", view: "versions", label: "版本审核", icon: "◎" },
   { path: "/quality", view: "quality", label: "质量报告", icon: "◇" },
   { path: "/export", view: "export", label: "Dataset导出", icon: "⇩" },

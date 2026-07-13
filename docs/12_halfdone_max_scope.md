@@ -28,7 +28,7 @@
 1. 导出 Dataset（勾选 materialize，尽量多 case）
 2. 打开「AI训练中心」，填 Dataset ID，开始训练（默认 **20 epoch / 320² / 2.5D radius=1**）
 3. 任务完成后自动 `register_model(backend=platform_unet)`
-4. 在「AI推理中心」选用该模型预测（推理含 3D 填洞 + 最大连通域后处理）
+4. 在「标注工作台」选用该模型预测（推理含 3D 填洞 + 最大连通域后处理）
 
 CLI：
 

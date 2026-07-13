@@ -68,7 +68,6 @@ const state = {
   models: [],
   selectedModelId: "",
   aiPredictTarget: localStorage.getItem("label_ai_predict_target") || "all",
-  inferencePreview: null,
   lastCompareResult: null,
   reviewQueue: [],
   versionDiff: null,
@@ -101,7 +100,6 @@ const titles = {
   cases: "病例中心",
   annotation: "标注工作台",
   train: "AI训练中心",
-  inference: "AI推理中心",
   versions: "版本审核",
   quality: "质量报告",
   export: "Dataset导出",
@@ -114,6 +112,39 @@ const roleText = {
   admin: "管理员",
   ai_service: "AI服务",
 };
+
+const LOGIN_ROLE_PRESETS = {
+  annotator: {
+    username: "annotator",
+    password: "annotator123",
+    hint: "演示口令：annotator123 · 可标注、预测、提交审核",
+  },
+  reviewer: {
+    username: "reviewer",
+    password: "reviewer123",
+    hint: "演示口令：reviewer123 · 可审核通过 / 驳回、查看队列",
+  },
+  admin: {
+    username: "admin",
+    password: "admin123",
+    hint: "演示口令：admin123 · 用户与系统设置全权限",
+  },
+};
+
+function applyLoginRolePreset(role) {
+  const preset = LOGIN_ROLE_PRESETS[role] || LOGIN_ROLE_PRESETS.annotator;
+  const userInput = $("#loginUsername");
+  const passInput = $("#loginPassword");
+  const hint = $("[data-login-hint]");
+  if (userInput) userInput.value = preset.username;
+  if (passInput) passInput.value = preset.password;
+  if (hint) hint.textContent = preset.hint;
+  document.querySelectorAll("[data-role-preset]").forEach((card) => {
+    const active = card.dataset.rolePreset === role;
+    card.classList.toggle("active", active);
+    card.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
 
 const DEFAULT_LABEL_CATALOG = [
   { label_id: 0, name: "background", display_name: "背景", color: "#1c2938", sort_order: 0, enabled: true },
@@ -328,7 +359,7 @@ function showToast(message) {
 }
 
 function setView(view) {
-  state.view = view;
+  state.view = view === "inference" ? "annotation" : view;
   document.querySelectorAll(".nav-item").forEach((item) => {
     item.classList.toggle("active", item.dataset.view === view);
   });
@@ -1365,7 +1396,7 @@ async function runAIPredict(event) {
   const request = resolveAiPredictRequest();
   const model = request.model;
   if (!model) {
-    showToast("暂无可用模型，请先在推理中心确认模型注册表");
+    showToast("暂无可用模型，请先在标注台确认模型列表已加载");
     return;
   }
 
@@ -1412,15 +1443,6 @@ async function runAIPredict(event) {
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
     allowCanvasMaskRestore(image.image_id);
-    state.inferencePreview = {
-      case_id: item.case_id,
-      image_id: image.image_id,
-      mask_id: state.active3DMaskId,
-      model_id: data.model_id,
-      version: data.version,
-      model_status: data.model_status,
-      backend: data.backend,
-    };
     if (request.target !== "all") {
       const catalogItem = effectiveLabelCatalog({ includeBackground: false, enabledOnly: true })
         .find((entry) => entry.name === request.target);
@@ -2005,15 +2027,19 @@ function renderDashboard() {
     <div class="dashboard-hero">
       <section class="hero-panel">
         <div class="hero-title">
-          <div class="holo-emblem" aria-hidden="true">
+          <div class="holo-emblem neu-holo" aria-hidden="true">
             <span class="holo-ring ring-a"></span>
             <span class="holo-ring ring-b"></span>
             <span class="holo-orbit orbit-a"></span>
             <span class="holo-orbit orbit-b"></span>
             <svg class="holo-symbol" viewBox="0 0 120 120">
-              <path d="M60 18l34 19v46l-34 19-34-19V37z" class="holo-hex" />
-              <path d="M34 65h16l7-22 12 42 9-20h10" class="holo-wave" />
-              <path d="M60 39v22M49 50h22" class="holo-cross" />
+              <circle class="neu-holo-core" cx="60" cy="60" r="42" />
+              <path class="neu-holo-mountain" d="M28 76 L42 46 L52 62 L64 34 L76 58 L88 44 L94 76 Z" />
+              <path class="neu-holo-mountain-edge" d="M28 76 L42 46 L52 62 L64 34 L76 58 L88 44 L94 76" />
+              <path class="neu-holo-water" d="M26 82 Q42 74 58 82 T90 82" />
+              <path class="neu-holo-water neu-holo-water-b" d="M30 90 Q48 84 62 90 T94 90" />
+              <text class="neu-holo-letters" x="60" y="66">NEU</text>
+              <text class="neu-holo-motto" x="60" y="102">自强不息 · 知行合一</text>
             </svg>
             <span class="holo-scan"></span>
             <span class="holo-particle p1"></span>
@@ -2022,7 +2048,7 @@ function renderDashboard() {
           </div>
           <div>
             <h2>Medical Annotation</h2>
-            <div class="eyebrow">人机协同闭环标注系统</div>
+            <div class="eyebrow">东北大学 NEU · 人机协同闭环标注</div>
           </div>
         </div>
         <p class="hero-copy">
@@ -2058,7 +2084,7 @@ function renderDashboard() {
 AI 预测 -> v2_ai（真实后端或失败提示）
 DeepEdit / 图割 -> v3_preview
 导出多类 Dataset -> 训练中心 U-Net
-注册模型 -> 推理中心选用</div>
+注册模型 -> 标注台选用预测</div>
       </section>
     </div>
   `;
@@ -4552,7 +4578,7 @@ function renderTrain() {
           <button class="ghost-button" data-refresh-train>刷新状态</button>
           <strong style="margin-left:12px">状态：${escapeHtml(status)}</strong>
         </div>
-        ${job?.registered_model_id ? `<p style="margin-top:12px;color:var(--green)">已注册模型：${escapeHtml(job.registered_model_id)}，可去推理中心选用。</p>` : ""}
+        ${job?.registered_model_id ? `<p style="margin-top:12px;color:var(--green)">已注册模型：${escapeHtml(job.registered_model_id)}，可去标注台选用预测。</p>` : ""}
       </section>
       <section class="panel">
         <h2>Val Dice</h2>
@@ -4648,145 +4674,6 @@ async function hydrateTrain() {
   }
 }
 
-function renderInference() {
-  const item = activeCase();
-  const image = activeImage();
-  const models = state.models || [];
-  const modelOptions = models.length
-    ? models.map((model) => `
-        <option value="${escapeHtml(model.model_id)}" ${state.selectedModelId === model.model_id ? "selected" : ""}>
-          ${escapeHtml(model.display_name || model.model_id)}${model.external_ready ? " · 外部权重就绪" : ""}
-        </option>
-      `).join("")
-    : `<option value="">加载中 / 暂无模型</option>`;
-  const caseOptions = state.cases.map((caseItem) => `
-    <option value="${escapeHtml(caseItem.case_id)}" ${item?.case_id === caseItem.case_id ? "selected" : ""}>
-      ${escapeHtml(caseItem.case_id)} · ${escapeHtml(statusText[caseItem.status] || caseItem.status)}
-    </option>
-  `).join("");
-  const preview = state.inferencePreview;
-  const previewMaskId = preview?.mask_id || latestMaskByVersion(masksForActiveImage(), "v2_ai")?.mask_id || "";
-  const previewImageId = preview?.image_id || image?.image_id || "";
-  const sliceIndex = currentSliceIndex("axial");
-  const selected = selectedModel();
-  return `
-    <section class="panel">
-      <h2>AI 推理中心</h2>
-      <p class="panel-lead">选择病例与模型后运行 predict，结果写入 <code>v2_ai</code>，可在此预览并跳转标注台修正。</p>
-      <div class="toolbar-row inference-toolbar">
-        <div class="field"><label>病例</label><select id="inferenceCaseSelect">${caseOptions || "<option value=''>暂无病例</option>"}</select></div>
-        <div class="field"><label>模型</label><select id="inferenceModelSelect">${modelOptions}</select></div>
-        <button class="primary-button" data-ai-predict ${item && image ? "" : "disabled"}>开始推理</button>
-        <button class="ghost-button" data-load-v2-ai ${previewMaskId || latestMaskByVersion(masksForActiveImage(), "v2_ai") ? "" : "disabled"}>预览并加载到 2D</button>
-        <button class="ghost-button" data-open-annotation-from-inference ${item ? "" : "disabled"}>打开标注台</button>
-      </div>
-      <div class="case-meta" style="margin-top:14px">
-        <div class="meta-line"><span>model_id</span><strong>${selected ? escapeHtml(selected.model_id) : "-"}</strong></div>
-        <div class="meta-line"><span>label</span><strong>${selected ? escapeHtml(selected.label) : "-"}</strong></div>
-        <div class="meta-line"><span>backend</span><strong>${selected ? escapeHtml(selected.backend) : "-"}</strong></div>
-        <div class="meta-line"><span>说明</span><strong>${selected ? escapeHtml(selected.description || "-") : "-"}</strong></div>
-      </div>
-    </section>
-    <div class="grid cols-3" style="margin-top:18px">
-      <section class="viewer">
-        <h2>原始图像</h2>
-        <div class="ct-frame inference-frame">
-          ${previewImageId ? `<img src="${apiUrl(`/api/image/${previewImageId}/slice/axial/${sliceIndex}.png?window=auto`)}" alt="原始切片" />` : `<div class="slice-empty">选择病例后显示</div>`}
-        </div>
-      </section>
-      <section class="viewer">
-        <h2>AI Mask (v2_ai)</h2>
-        <div class="ct-frame inference-frame">
-          ${previewMaskId ? `<img src="${apiUrl(`/api/mask/${previewMaskId}/slice/axial/${sliceIndex}`).replace('/slice/', '/slice/')}" alt="AI mask 占位" class="hidden" /><div class="mask-overlay inference-mask" data-inference-mask="${escapeHtml(previewMaskId)}" data-inference-slice="${sliceIndex}"></div><canvas id="inferenceMaskCanvas" class="inference-mask-canvas"></canvas>` : `<div class="slice-empty">推理后显示 v2_ai</div>`}
-        </div>
-      </section>
-      <section class="viewer">
-        <h2>叠加预览</h2>
-        <div class="ct-frame inference-frame">
-          ${previewImageId ? `<img src="${apiUrl(`/api/image/${previewImageId}/slice/axial/${sliceIndex}.png?window=auto`)}" alt="叠加底图" /><canvas id="inferenceOverlayCanvas" class="inference-mask-canvas"></canvas>` : `<div class="slice-empty">等待推理</div>`}
-        </div>
-      </section>
-    </div>
-    <section class="panel" style="margin-top:18px">
-      <h2>最近推理结果</h2>
-      ${preview ? `
-        <div class="case-meta">
-          <div class="meta-line"><span>病例</span><strong>${escapeHtml(preview.case_id)}</strong></div>
-          <div class="meta-line"><span>图像</span><strong>${escapeHtml(preview.image_id)}</strong></div>
-          <div class="meta-line"><span>Mask</span><strong>${escapeHtml(preview.mask_id)}</strong></div>
-          <div class="meta-line"><span>模型</span><strong>${escapeHtml(preview.model_id)}</strong></div>
-          <div class="meta-line"><span>版本</span><strong>${escapeHtml(preview.version)}</strong></div>
-        </div>
-      ` : `<div class="placeholder compact">尚未推理。未配置真实模型权重时预测会失败（不再静默使用 HU baseline）；可配置 TotalSeg / nnUNet / 平台 U-Net。</div>`}
-    </section>
-  `;
-}
-
-async function hydrateInference() {
-  const hadModels = state.models.length > 0;
-  await loadModels();
-  const item = activeCase();
-  if (item) {
-    await loadCaseDetail(item.case_id);
-    const image = activeImage();
-    if (image) {
-      await loadImageMasks(image.image_id);
-      await loadVolumeMeta(image.image_id).catch(() => null);
-      const aiMask = latestMaskByVersion(state.masksByImage[image.image_id] || [], "v2_ai");
-      if (aiMask && !state.inferencePreview) {
-        state.inferencePreview = {
-          case_id: item.case_id,
-          image_id: image.image_id,
-          mask_id: aiMask.mask_id,
-          model_id: selectedModel()?.model_id || "",
-          version: "v2_ai",
-        };
-      }
-    }
-  }
-  if (!hadModels && state.models.length) {
-    render();
-    return;
-  }
-  await paintInferencePreview();
-}
-
-async function paintInferencePreview() {
-  const preview = state.inferencePreview;
-  const image = activeImage();
-  const maskId = preview?.mask_id || latestMaskByVersion(masksForActiveImage(), "v2_ai")?.mask_id;
-  const imageId = preview?.image_id || image?.image_id;
-  if (!maskId || !imageId) return;
-  const sliceIndex = currentSliceIndex("axial");
-  try {
-    const data = await apiGet(`/api/mask/${maskId}/slice/axial/${sliceIndex}`);
-    const maskCanvas = $("#inferenceMaskCanvas");
-    const overlayCanvas = $("#inferenceOverlayCanvas");
-    const paint = (canvas, withImage) => {
-      if (!canvas) return;
-      canvas.width = data.width;
-      canvas.height = data.height;
-      const ctx = canvas.getContext("2d");
-      const imageData = ctx.createImageData(data.width, data.height);
-      const decoded = decodeMaskRle(data.mask, data.width, data.height);
-      for (let i = 0; i < decoded.length; i += 1) {
-        const offset = i * 4;
-        if (decoded[i] > 0) {
-          imageData.data[offset] = 0;
-          imageData.data[offset + 1] = 229;
-          imageData.data[offset + 2] = 176;
-          imageData.data[offset + 3] = withImage ? 140 : 220;
-        }
-      }
-      ctx.putImageData(imageData, 0, 0);
-    };
-    paint(maskCanvas, false);
-    paint(overlayCanvas, true);
-  } catch (error) {
-    console.warn("推理预览绘制失败：", error);
-  }
-}
-
 function renderVersions() {
   const item = activeCase();
   const versions = versionsForActiveCase();
@@ -4843,35 +4730,77 @@ function renderVersions() {
       ${renderVersionList(versions)}
     </section>
 
-    <section class="panel" style="margin-top:18px">
-      <h2>版本 Diff / 回滚</h2>
-      <div class="toolbar-row" style="margin-top:12px">
-        <div class="field"><label>Mask A</label><select id="versionCompareA">${maskOptionHtml(state.versionCompareA)}</select></div>
-        <div class="field"><label>Mask B</label><select id="versionCompareB">${maskOptionHtml(state.versionCompareB)}</select></div>
+    <section class="panel diff-panel" style="margin-top:18px">
+      <div class="subsection-title">
+        <span>版本 Diff / 回滚</span>
+        <strong>三维 Mask 体素级对比</strong>
+      </div>
+      <p class="panel-lead">
+        将两个 NIfTI Mask 二值化（体素 &gt; 0）后计算重叠与表面距离。
+        Dice / IoU 越接近 1 越相似；体积差为 A−B；HD95 为双向表面距离的 95 分位（mm）。
+      </p>
+      <div class="diff-controls">
+        <label class="field">
+          <span>Mask A（预测侧）</span>
+          <select id="versionCompareA">${maskOptionHtml(state.versionCompareA)}</select>
+        </label>
+        <div class="diff-vs" aria-hidden="true">VS</div>
+        <label class="field">
+          <span>Mask B（参考侧）</span>
+          <select id="versionCompareB">${maskOptionHtml(state.versionCompareB)}</select>
+        </label>
         <button class="primary-button" data-run-version-diff ${masks.length ? "" : "disabled"}>计算 Diff</button>
       </div>
-      <div class="grid cols-4" style="margin-top:14px">
-        ${metricCard("Dice", diff ? Number(diff.dice).toFixed(4) : "-", diff ? `${diff.pred_version} vs ${diff.ref_version}` : "GET /api/mask/{a}/compare/{b}")}
-        ${metricCard("IoU", diff ? Number(diff.iou).toFixed(4) : "-", "重叠")}
-        ${metricCard("体积差 ml", diff ? Number(diff.volume_diff_ml).toFixed(3) : "-", "A − B")}
-        ${metricCard("HD95 mm", diff?.hd95_mm != null ? Number(diff.hd95_mm).toFixed(3) : "-", "表面距离")}
+      <div class="diff-metrics">
+        <article class="diff-metric-card">
+          <div class="metric-label">Dice</div>
+          <div class="metric-value">${diff ? Number(diff.dice).toFixed(4) : "-"}</div>
+          <div class="metric-note">${diff ? `${escapeHtml(diff.pred_version || "")} vs ${escapeHtml(diff.ref_version || "")}` : "2|A∩B| / (|A|+|B|)"}</div>
+        </article>
+        <article class="diff-metric-card">
+          <div class="metric-label">IoU</div>
+          <div class="metric-value">${diff ? Number(diff.iou).toFixed(4) : "-"}</div>
+          <div class="metric-note">${diff ? "重叠比" : "|A∩B| / |A∪B|"}</div>
+        </article>
+        <article class="diff-metric-card">
+          <div class="metric-label">体积差</div>
+          <div class="metric-value">${diff ? `${Number(diff.volume_diff_ml).toFixed(3)}` : "-"}<small>${diff ? " ml" : ""}</small></div>
+          <div class="metric-note">${diff ? `A ${Number(diff.pred_volume_ml || 0).toFixed(2)} − B ${Number(diff.ref_volume_ml || 0).toFixed(2)} ml` : "体素数 × spacing"}</div>
+        </article>
+        <article class="diff-metric-card">
+          <div class="metric-label">HD95</div>
+          <div class="metric-value">${diff?.hd95_mm != null ? Number(diff.hd95_mm).toFixed(3) : "-"}<small>${diff?.hd95_mm != null ? " mm" : ""}</small></div>
+          <div class="metric-note">表面距离 95 分位</div>
+        </article>
       </div>
-      <section class="table-wrap" style="margin-top:14px">
-        <table>
-          <thead><tr><th>Mask</th><th>版本</th><th>标签</th><th>路径</th><th>操作</th></tr></thead>
-          <tbody>
-            ${masks.length ? masks.map((mask) => `
-              <tr>
-                <td>${escapeHtml(mask.mask_id)}</td>
-                <td>${escapeHtml(mask.version)}</td>
-                <td>${escapeHtml(mask.label)}</td>
-                <td><code>${escapeHtml(mask.path)}</code></td>
-                <td><button class="ghost-button" data-rollback-mask="${escapeHtml(mask.mask_id)}">回滚为 v3_preview</button></td>
-              </tr>
-            `).join("") : `<tr><td colspan="5">当前病例暂无 3D NIfTI Mask</td></tr>`}
-          </tbody>
-        </table>
-      </section>
+      ${diff ? `
+        <div class="diff-detail">
+          <span>相交体素 <b>${Number(diff.intersection || 0).toLocaleString("zh-CN")}</b></span>
+          <span>A 体素 <b>${Number(diff.pred_voxels || 0).toLocaleString("zh-CN")}</b></span>
+          <span>B 体素 <b>${Number(diff.ref_voxels || 0).toLocaleString("zh-CN")}</b></span>
+          <span>尺寸 <b>${Array.isArray(diff.shape) ? diff.shape.join("×") : "-"}</b></span>
+        </div>
+      ` : ""}
+      <h3 class="diff-list-title">本病例 3D Mask</h3>
+      <div class="mask-version-cards">
+        ${masks.length ? masks.map((mask) => {
+          const pathText = String(mask.path || "");
+          const shortPath = pathText.split("/").slice(-2).join("/") || pathText;
+          return `
+            <article class="mask-version-card">
+              <div class="mask-version-card-head">
+                <strong>${escapeHtml(mask.mask_id)}</strong>
+                <span class="chip active-chip">${escapeHtml(mask.version)}</span>
+              </div>
+              <div class="mask-version-card-meta">
+                <span>标签 <b>${escapeHtml(mask.label || "-")}</b></span>
+                <code title="${escapeHtml(pathText)}">${escapeHtml(shortPath)}</code>
+              </div>
+              <button class="ghost-button" data-rollback-mask="${escapeHtml(mask.mask_id)}">回滚为 v3_preview</button>
+            </article>
+          `;
+        }).join("") : `<div class="placeholder compact">当前病例暂无 3D NIfTI Mask</div>`}
+      </div>
     </section>
 
     <div class="grid cols-4" style="margin-top:18px">
@@ -5395,7 +5324,7 @@ function bindSettingsActions() {
 }
 
 function render() {
-  const views = { dashboard: renderDashboard, cases: renderCases, annotation: renderAnnotation, train: renderTrain, inference: renderInference, versions: renderVersions, quality: renderQuality, export: renderExport, settings: renderSettings };
+  const views = { dashboard: renderDashboard, cases: renderCases, annotation: renderAnnotation, train: renderTrain, versions: renderVersions, quality: renderQuality, export: renderExport, settings: renderSettings };
   $("#viewRoot").innerHTML = (views[state.view] || renderDashboard)();
   const uploadForm = $("#uploadForm");
   if (uploadForm) uploadForm.addEventListener("submit", uploadCase);
@@ -5404,6 +5333,10 @@ function render() {
   if (taskForm) taskForm.addEventListener("submit", createTaskAssignment);
   const loginForm = $("#loginForm");
   if (loginForm) loginForm.addEventListener("submit", handleLogin);
+  document.querySelectorAll("[data-role-preset]").forEach((card) => {
+    card.addEventListener("click", () => applyLoginRolePreset(card.dataset.rolePreset));
+  });
+  applyLoginRolePreset("annotator");
   bindSettingsActions();
   document.querySelectorAll("[data-view-mode]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -5655,30 +5588,6 @@ function render() {
   if (compareMasksButton) {
     compareMasksButton.addEventListener("click", compareActiveMasks);
   }
-  const openAnnotationFromInference = $("[data-open-annotation-from-inference]");
-  if (openAnnotationFromInference) {
-    openAnnotationFromInference.addEventListener("click", () => setView("annotation"));
-  }
-  const inferenceCaseSelect = $("#inferenceCaseSelect");
-  if (inferenceCaseSelect) {
-    inferenceCaseSelect.addEventListener("change", async () => {
-      state.activeCaseId = inferenceCaseSelect.value || null;
-      state.activeImageId = null;
-      state.inferencePreview = null;
-      delete state.caseDetails[state.activeCaseId];
-      await loadCaseDetail(state.activeCaseId);
-      render();
-    });
-  }
-  const inferenceModelSelect = $("#inferenceModelSelect");
-  if (inferenceModelSelect) {
-    inferenceModelSelect.addEventListener("change", () => {
-      state.selectedModelId = inferenceModelSelect.value;
-      const model = selectedModel();
-      if (model?.label) state.annotationLabel = model.label;
-      render();
-    });
-  }
   const active3DMaskSelect = $("#active3DMaskSelect");
   if (active3DMaskSelect) {
     active3DMaskSelect.addEventListener("change", () => {
@@ -5873,7 +5782,6 @@ function render() {
   }
   if (state.view === "annotation") hydrateAnnotation();
   if (state.view === "versions") hydrateVersions();
-  if (state.view === "inference") hydrateInference();
   if (state.view === "quality") hydrateQuality();
   if (state.view === "train" || state.view === "dashboard") hydrateTrain();
 }

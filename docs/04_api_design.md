@@ -1035,7 +1035,7 @@ uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 
 - 前端应从 `GET /api/models` 选择 `model_id`，不要写死脾脏。
 - 若配置了 `SPLEEN_NNUNET_PREDICT_COMMAND`（Person B 提供 `checkpoint_best.pth`），脾脏模型走外部 nnU-Net；否则回退内置 baseline。
-- 推理中心页流程：选 case → 选模型 → predict → 预览 `v2_ai` → 可一键加载到 2D 修正。
+- 标注工作台流程：选 case → 选模型 → predict → 预览 / 加载 `v2_ai` 到 2D 修正。
 
 ### POST `/api/masks/compare`
 
