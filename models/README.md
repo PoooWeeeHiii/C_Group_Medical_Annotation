@@ -109,13 +109,13 @@ TOTALSEG_DEVICE=auto
 
 First prediction downloads official weights. This is **inference**, separate from using TotalSeg zip as DeepEdit training data.
 
-### Human-in-the-loop（v3_fusion → DeepEdit 再训）
+### Human-in-the-loop（v3_fusion → DeepEdit / nnUNet 再训）
 
 ```powershell
-D:\anaconda\python.exe scripts\prepare_deepedit_from_fusion.py
-D:\anaconda\python.exe scripts\train_deepedit.py --manifest E:\lxy\hm_2_deepedit\dataset\manifest.json --resume --epochs 10 --crop 64 128 128
+D:\anaconda\python.exe scripts\run_hitl_retrain.py --prepare-deepedit --prepare-nnunet
+D:\anaconda\python.exe scripts\run_hitl_retrain.py --prepare-deepedit --train-deepedit --epochs 10
 .\scripts\start_deepedit.ps1
 ```
 
-联调清单见 `docs/13_person_b_joint_debug_checklist.md`。
+联调清单见 `docs/13_person_b_joint_debug_checklist.md`；闭环说明见 `docs/16_hitl_fusion_loop.md`。
 

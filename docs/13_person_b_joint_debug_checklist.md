@@ -9,8 +9,9 @@
 | `feature-b` 已 merge 最新 `feature-a` | ✅ |
 | DeepEdit 服务 `http://127.0.0.1:8010/health` | ✅ `model_loaded=true` |
 | 权重 | `models/deepedit/deepedit_unet.pth`（交付包同目录） |
-| 多器官自动标注 | TotalSeg 模型：`totalseg_organs` + heart/lung/kidney 单器官 ID |
-| 人机闭环脚本 | `scripts/prepare_deepedit_from_fusion.py` + `train_deepedit.py --resume` |
+| 多器官自动标注 | TotalSeg + Plan A `Model0010`–`Model0013` |
+| 人机闭环脚本 | `run_hitl_retrain` + fusion→DeepEdit/nnUNet；`docs/16` | ✅ |
+| React DeepEdit / promote | `AnnotationPage` 正点/负点 + refine + v3_fusion | ✅ |
 
 ## Day1（联调日）
 
@@ -30,7 +31,7 @@
 4. 打开前端（legacy）：浏览器访问 `http://127.0.0.1:8000/`  
    或 React：`cd web; npm run dev`
 5. 平台验收：
-   - AI 预测选 `totalseg_organs` 或 `totalseg_liver` / `totalseg_heart` → 出 `v2_ai`
+   - AI 预测选 `totalseg_organs` 或 `Model0011` 等 → 出 `v2_ai`
    - DeepEdit：欠分割正点 / 过分割负点 → 出 `v3_preview` / `v3_fusion`
 6. 烟测：
    ```powershell
@@ -39,13 +40,16 @@
 
 ## Day2（能力缺口）
 
-1. **多器官自动标注**：UI 选 `totalseg_organs`；单器官用 `totalseg_heart` / `totalseg_left_lung` / `totalseg_kidney` 等（与 DeepEdit label 对齐）。
+1. **多器官自动标注**：UI 选 `totalseg_organs` 或 Person B 自训 `Model0010`–`Model0013`。
 2. **人机再训练**（有人工修正 mask 后）：
    ```powershell
-   D:\anaconda\python.exe scripts\prepare_deepedit_from_fusion.py
-   D:\anaconda\python.exe scripts\train_deepedit.py --manifest E:\lxy\hm_2_deepedit\dataset\manifest.json --resume --epochs 10 --crop 64 128 128 --limit 40
+   D:\anaconda\python.exe scripts\run_hitl_retrain.py --prepare-deepedit --prepare-nnunet
+   D:\anaconda\python.exe scripts\run_hitl_retrain.py --prepare-deepedit --train-deepedit --epochs 10
+   # 或无真实 fusion 时先冒烟：
+   # D:\anaconda\python.exe scripts\run_hitl_retrain.py --seed-from-v2 --prepare-deepedit --prepare-nnunet
    # 重启 DeepEdit 服务加载新权重
    ```
+   详见 `docs/16_hitl_fusion_loop.md`。
 3. **脾 nnUNet**：本地默认 `3d_fullres`（`SPLEEN_*` 见 `.env`）；演示优先用 TotalSeg，脾专项可用 `Model0002`。
 4. **交付**：权重走 `deliverables/deepedit_for_person_a/`（勿把 `.pth` 推 Git）；代码推 `feature-b`。
 
