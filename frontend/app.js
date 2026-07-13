@@ -68,6 +68,10 @@ const state = {
   models: [],
   selectedModelId: "",
   aiPredictTarget: localStorage.getItem("label_ai_predict_target") || "all",
+  gestureHeroBusy: false,
+  gestureHeroBusyLabel: "",
+  gestureHeroActive: false,
+  gestureSurgeryActive: false,
   lastCompareResult: null,
   reviewQueue: [],
   versionDiff: null,
@@ -1418,37 +1422,63 @@ async function runAIPredict(event) {
     showToast(tumorHint);
   }
   try {
-    const modelId = String(model.model_id || "").toLowerCase();
-    const backend = String(model.backend || "").toLowerCase();
-    const allowBaseline = backend.includes("builtin") ||
-      modelId.startsWith("builtin_") ||
-      backend.includes("ct_threshold");
-    const data = await apiPost("/api/ai/predict", {
-      case_id: item.case_id,
-      image_id: image.image_id,
-      model_id: model.model_id,
-      label: request.label,
-      allow_baseline: allowBaseline,
-    }, { timeoutMs: isHeavy ? 30 * 60 * 1000 : 120 * 1000 });
-    await loadImageMasks(image.image_id, { force: true });
-    await loadCaseVersions(item.case_id, { force: true });
-    await refreshCases();
-    // Prefer multiclass「全部标注」as the active 3D / overlay mask.
-    const masks = state.masksByImage[image.image_id] || [];
-    const allLabelsMask = masks.find((mask) => mask.mask_id === data.mask_id)
-      || masks.find((mask) => String(mask.label || "") === "全部标注" && mask.version === "v2_ai")
-      || masks.find((mask) => mask.mask_id === data.mask_id);
-    state.active3DMaskId = (allLabelsMask && allLabelsMask.mask_id) || data.mask_id;
-    state.volumeViewMode = "3d";
-    state.volumeLoadingKey = null;
-    state.propagatedSliceLoads = {};
-    allowCanvasMaskRestore(image.image_id);
-    if (request.target !== "all") {
-      const catalogItem = effectiveLabelCatalog({ includeBackground: false, enabledOnly: true })
-        .find((entry) => entry.name === request.target);
-      if (catalogItem) setActiveAnnotationLabel(catalogItem.label_id);
-      else state.annotationLabel = request.target;
-    }
+    const data = await executeAiPredictRequest(request, { silentToasts: false });
+    render();
+    return data;
+  } catch (error) {
+    showToast(error.message || "AI 预测失败");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+async function executeAiPredictRequest(request, { silentToasts = false } = {}) {
+  const item = activeCase();
+  const image = activeImage();
+  const model = request.model;
+  if (!item || !image || !model) {
+    throw new Error("缺少病例、图像或模型");
+  }
+  const isHeavy = String(model.label || "").toLowerCase().includes("spleen") ||
+    String(model.model_id || "").toLowerCase().includes("spleen") ||
+    String(model.model_id || "").toLowerCase().includes("totalseg") ||
+    String(model.model_id || "").toLowerCase().includes("tumor") ||
+    String(model.backend || "").toLowerCase().includes("totalsegmentator") ||
+    String(model.backend || "").toLowerCase().includes("tumor_residual") ||
+    request.target === "all" ||
+    request.target === "tumor";
+  const modelId = String(model.model_id || "").toLowerCase();
+  const backend = String(model.backend || "").toLowerCase();
+  const allowBaseline = backend.includes("builtin") ||
+    modelId.startsWith("builtin_") ||
+    backend.includes("ct_threshold");
+  const data = await apiPost("/api/ai/predict", {
+    case_id: item.case_id,
+    image_id: image.image_id,
+    model_id: model.model_id,
+    label: request.label,
+    allow_baseline: allowBaseline,
+  }, { timeoutMs: isHeavy ? 30 * 60 * 1000 : 120 * 1000 });
+  await loadImageMasks(image.image_id, { force: true });
+  await loadCaseVersions(item.case_id, { force: true });
+  await refreshCases();
+  const masks = state.masksByImage[image.image_id] || [];
+  const allLabelsMask = masks.find((mask) => mask.mask_id === data.mask_id)
+    || masks.find((mask) => String(mask.label || "") === "全部标注" && mask.version === "v2_ai")
+    || masks.find((mask) => mask.mask_id === data.mask_id);
+  state.active3DMaskId = (allLabelsMask && allLabelsMask.mask_id) || data.mask_id;
+  state.volumeViewMode = "3d";
+  state.volumeLoadingKey = null;
+  state.propagatedSliceLoads = {};
+  allowCanvasMaskRestore(image.image_id);
+  if (request.target !== "all") {
+    const catalogItem = effectiveLabelCatalog({ includeBackground: false, enabledOnly: true })
+      .find((entry) => entry.name === request.target);
+    if (catalogItem) setActiveAnnotationLabel(catalogItem.label_id);
+    else state.annotationLabel = request.target;
+  }
+  if (!silentToasts) {
     const statusText = data.model_status || data.backend || "unknown";
     const hasAll = Array.isArray(data.organ_labels) && data.organ_labels.includes("全部标注");
     showToast(
@@ -1456,18 +1486,151 @@ async function runAIPredict(event) {
         ? `AI 预测完成 [${statusText}]：已生成「全部标注」· ${data.organ_count || 1} 个器官`
         : `AI 预测完成 [${statusText}]：${request.targetLabel} · ${data.mask_id}`,
     );
-    if (data.fallback_reason) {
-      showToast(`注意：${data.fallback_reason}`);
-    }
+    if (data.fallback_reason) showToast(`注意：${data.fallback_reason}`);
     if (Array.isArray(data.organ_labels) && data.organ_labels.length > 1) {
       showToast(`已写入：${data.organ_labels.slice(0, 12).join(", ")}${data.organ_labels.length > 12 ? " ..." : ""}`);
     }
-    render();
+  }
+  return data;
+}
+
+function getVolumeViewerApi() {
+  const container = $("#volumeContainer");
+  return container?.__volumeViewerApi || null;
+}
+
+async function waitForVolumeViewer(timeoutMs = 45000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const container = $("#volumeContainer");
+    if (container?.dataset?.ready === "true" && container.__volumeViewerApi) {
+      return container.__volumeViewerApi;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return getVolumeViewerApi();
+}
+
+async function ensureGestureVolumeReady(image) {
+  const meta = await loadVolumeMeta(image.image_id);
+  const depth = Math.max(Number(meta?.slice_count || 0), 0);
+  const width = Number(meta?.width || 0);
+  const height = Number(meta?.height || 0);
+  if (depth < 8) {
+    throw new Error(
+      `当前图像仅 ${width}×${height}×${depth}（单层/过薄），无法做 TotalSeg、MPR 与模拟手术。请改用 Case0002–0004 等约 134 层的体数据，不要用单张 .dcm。`,
+    );
+  }
+  return meta;
+}
+
+async function ensureTotalSegReadyForGesture() {
+  try {
+    const health = await apiGet("/api/ai/health");
+    const message = String(health?.message || "");
+    if (/TotalSegmentator ready/i.test(message)) return health;
+    if (health?.ready && /totalseg/i.test(message)) return health;
+    throw new Error(message || "TotalSegmentator 未就绪");
   } catch (error) {
-    showToast(error.message || "AI 预测失败");
+    const detail = error?.message || String(error);
+    if (/not importable|No module named ['\"]totalsegmentator['\"]|pip install TotalSegmentator/i.test(detail)) {
+      throw new Error(
+        `TotalSegmentator 未安装到 TOTALSEG_PYTHON 环境。请在该 Python 中执行：pip install TotalSegmentator。详情：${detail}`,
+      );
+    }
+    throw new Error(`AI 环境未就绪：${detail}`);
+  }
+}
+
+async function runGestureHeroFlow(event) {
+  const button = event.currentTarget;
+  const item = activeCase();
+  const image = activeImage();
+  if (!item || !image) {
+    showToast("请先选择病例和图像");
+    return;
+  }
+  if (state.gestureHeroBusy) return;
+
+  state.gestureHeroBusy = true;
+  state.gestureHeroBusyLabel = "环境检查中…";
+  button.disabled = true;
+  button.textContent = state.gestureHeroBusyLabel;
+
+  let organsOk = false;
+  let tumorOk = false;
+  try {
+    await ensureGestureVolumeReady(image);
+    await ensureTotalSegReadyForGesture();
+    await loadModels();
+
+    state.gestureHeroBusyLabel = "全器官预测中…";
+    button.textContent = state.gestureHeroBusyLabel;
+    showToast("手势准备：先跑 TotalSeg 全器官（可能数分钟）…");
+
+    const prevTarget = state.aiPredictTarget;
+    try {
+      state.aiPredictTarget = "all";
+      const allReq = resolveAiPredictRequest();
+      if (!allReq.model) throw new Error("未找到 TotalSeg / 多器官模型");
+      await executeAiPredictRequest(allReq, { silentToasts: true });
+      organsOk = true;
+      showToast("全器官预测完成，继续疑似肿瘤…");
+    } catch (error) {
+      throw new Error(`全器官预测失败：${error.message || error}。模拟手术需要全器官 Mask，已中止（不会空开摄像头）。`);
+    }
+
+    state.gestureHeroBusyLabel = "疑似肿瘤预测中…";
+    button.textContent = state.gestureHeroBusyLabel;
+    try {
+      state.aiPredictTarget = "tumor";
+      const tumorReq = resolveAiPredictRequest();
+      if (tumorReq.model) {
+        await executeAiPredictRequest(tumorReq, { silentToasts: true });
+        tumorOk = true;
+        showToast("疑似肿瘤已生成（非诊断结果）");
+      }
+    } catch (error) {
+      showToast(`疑似肿瘤预测失败：${error.message || error}（可仅用器官做模拟手术）`);
+    } finally {
+      state.aiPredictTarget = prevTarget || "all";
+    }
+
+    // Prefer multiclass「全部标注」mask for 3D.
+    const masks = await loadImageMasks(image.image_id, { force: true });
+    const multi = masks.find((m) => String(m.label || "") === "全部标注" && m.version === "v2_ai")
+      || latestMaskByVersion(masks, "v2_ai");
+    if (multi) state.active3DMaskId = multi.mask_id;
+    state.volumeViewMode = "3d";
+    state.volumeLoadingKey = null;
+    render();
+
+    state.gestureHeroBusyLabel = "启动摄像头…";
+    button.textContent = state.gestureHeroBusyLabel;
+    const api = await waitForVolumeViewer();
+    if (!api) throw new Error("3D 视图未就绪，请稍后重试");
+    api.setOrgansReady?.(organsOk);
+    const started = await api.startGestureAfterPrep?.();
+    state.gestureHeroActive = Boolean(started);
+    if (started) {
+      showToast(
+        organsOk
+          ? "手势已开启。请在下方「手势控制」区点击红色按钮「进入模拟手术」。"
+          : "手势已开启，但全器官未就绪；「进入模拟手术」会显示为不可用。",
+      );
+    } else {
+      showToast("摄像头/手势启动失败，请检查浏览器权限后用手势区「开启手势」重试");
+    }
+  } catch (error) {
+    showToast(error.message || "手势控制启动失败");
   } finally {
+    state.gestureHeroBusy = false;
+    state.gestureHeroBusyLabel = "";
     button.disabled = false;
-    button.textContent = previousText;
+    // Avoid full render() here: it remounts 3D and tears down the running camera/gesture.
+    button.textContent = state.gestureHeroActive
+      ? "手势控制中 · 再次点击可聚焦"
+      : "开始手势控制";
   }
 }
 
@@ -2441,7 +2604,7 @@ function renderToolButtons() {
       `<button class="tool-button ${state.annotationTool === tool ? "active" : ""}" data-annotation-tool="${tool}" title="${title}" aria-label="${title}">${label}</button>`,
     );
   }
-  return `${parts.join("")}${renderAiPredictControl()}`;
+  return `${parts.join("")}${renderAiPredictControl()}${renderGestureControl()}`;
 }
 
 function renderAiPredictControl() {
@@ -2458,6 +2621,24 @@ function renderAiPredictControl() {
         </select>
       </label>
       <button type="button" class="tool-button ai-predict-button" data-ai-predict>开始AI预测</button>
+    </div>
+  `;
+}
+
+function renderGestureControl() {
+  const busy = Boolean(state.gestureHeroBusy);
+  const active = Boolean(state.gestureHeroActive);
+  const surgery = Boolean(state.gestureSurgeryActive);
+  let label = "开始手势控制";
+  if (busy) label = state.gestureHeroBusyLabel || "准备中…";
+  else if (surgery) label = "模拟手术中";
+  else if (active) label = "手势控制中 · 再次点击可聚焦";
+  return `
+    <div class="gesture-hero-row">
+      <button type="button" class="tool-button ai-predict-button gesture-hero-button" data-gesture-hero ${busy ? "disabled" : ""}>
+        ${escapeHtml(label)}
+      </button>
+      <small class="panel-lead">与 AI 预测同级入口：先自动 TotalSeg 全器官 + 疑似肿瘤，再开摄像头；随后可进入模拟手术。</small>
     </div>
   `;
 }
@@ -2639,7 +2820,7 @@ function renderSmartRefineHint() {
         <strong class="prompt-positive" id="promptPositiveCount">正点 ${counts.positive}</strong>
         <strong class="prompt-negative" id="promptNegativeCount">负点 ${counts.negative}</strong>
       </div>
-      <small>画笔/多边形/矩形 = 正向标注；智能橡皮擦记为负点。「DeepEdit 神经网络」需独立服务；无服务时请用「图割修正」。</small>
+      <small>画笔/多边形/矩形 = 正向标注；智能橡皮擦记为负点。「AI 智能精修」需启动 DeepEdit 服务；未启动时请用「按灰度边界修正」。</small>
     </div>
   `;
 }
@@ -2859,6 +3040,7 @@ function render3DViewer(item, image, volume, masks = []) {
       <div id="volumeContainer" class="volume-container" data-image-id="${image?.image_id || ""}" data-mask-id="${active3DMask?.mask_id || ""}" data-highlight-mask="true">
         <div class="volume-status">${canRender ? "正在初始化 VTK 综合重建..." : "正在读取体数据..."}</div>
       </div>
+      <div id="gestureDock" class="gesture-dock" aria-label="手势控制区"></div>
       ${mprGrid}
       ${mipGrid}
       ${maskOverlayPanel}
@@ -2901,6 +3083,9 @@ function renderAnnotation() {
         <div class="case-meta">
           <div class="meta-line"><span>尺寸</span><strong id="volumeSize">${volume ? `${volume.width} × ${volume.height} × ${volume.slice_count}` : "加载中"}</strong></div>
           <div class="meta-line"><span>读取器</span><strong id="volumeSource">${volume?.source || "-"}</strong></div>
+          ${volume && Number(volume.slice_count || 0) < 8
+            ? `<div class="reject-note-box"><span>体数据过薄</span><strong>当前仅 ${escapeHtml(String(volume.slice_count))} 层，无法可靠做 TotalSeg / MPR / 模拟手术。请切换到 Case0002–0004（约 134 层）。</strong></div>`
+            : ""}
         </div>
         <h3 style="margin-top:24px">AI 模型</h3>
         <div class="case-meta">
@@ -2924,18 +3109,16 @@ function renderAnnotation() {
         ${renderSmartRefineHint()}
         ${renderRefineParamControls()}
         <div class="grid action-stack" style="margin-top:18px">
-          <button class="primary-button" data-save-mask ${image && canAnnotate() ? "" : "disabled"}>保存 Mask</button>
-          <button class="ghost-button" data-load-v2-ai ${image && aiMask ? "" : "disabled"}>从 v2_ai 加载到 2D</button>
-          <button class="ghost-button" data-submit-case ${image && (currentRole() === "annotator" || currentRole() === "admin") ? "" : "disabled"}>提交审核</button>
-          <button class="ghost-button" data-smart-3d-refine ${image && canAnnotate() ? "" : "disabled"}>DeepEdit 神经网络</button>
-          <button class="ghost-button" data-graph-cut-refine ${image && canAnnotate() ? "" : "disabled"}>图割修正</button>
-          <button class="ghost-button" data-confirm-fusion ${previewMask && canAnnotate() ? "" : "disabled"}>确认 v3_fusion</button>
-          <button class="ghost-button" data-final-mask ${(previewMask || fusionMask) && canConfirmFinal() ? "" : "disabled"}>确认 final</button>
-          <button class="ghost-button" data-compare-masks ${image ? "" : "disabled"}>计算 Dice</button>
-          <button class="ghost-button" data-approve-case ${item && canReview() ? "" : "disabled"}>审核通过</button>
-          <button class="danger-button" data-reject-case ${item && canReview() ? "" : "disabled"}>驳回</button>
-          <button class="ghost-button" data-export-mask-nifti ${image && canAnnotate() ? "" : "disabled"}>导出 3D Mask</button>
-          <button class="ghost-button" data-start-3d-render ${image ? "" : "disabled"}>导出 3D 图像</button>
+          <button class="primary-button tip-button" data-save-mask data-tip="把当前切片上的手动画笔/多边形等标注保存为人工版本（v1_manual）。" ${image && canAnnotate() ? "" : "disabled"}>保存当前标注</button>
+          <button class="ghost-button tip-button" data-load-v2-ai data-tip="把 AI 自动分割结果（v2_ai）放到 2D 画布上，方便继续手工修改。" ${image && aiMask ? "" : "disabled"}>载入 AI 结果到画布</button>
+          <button class="ghost-button tip-button" data-smart-3d-refine data-tip="用 DeepEdit 神经网络，根据你的正点/负点智能修正三维分割。需本机 DeepEdit 服务（:8010）；未启动请改用下方「按灰度边界修正」。" ${image && canAnnotate() ? "" : "disabled"}>AI 智能精修</button>
+          <button class="ghost-button tip-button" data-graph-cut-refine data-tip="不依赖外部 AI 服务：按 CT 灰度边界，结合正点/负点做图割式修正，结果写入精修预览（v3_preview）。" ${image && canAnnotate() ? "" : "disabled"}>按灰度边界修正</button>
+          <button class="ghost-button tip-button" data-confirm-fusion data-tip="把精修预览（v3_preview）确认为「人机确认版」（v3_fusion），表示这版可以留作后续训练/审核参考。" ${previewMask && canAnnotate() ? "" : "disabled"}>确认精修结果</button>
+          <button class="ghost-button tip-button" data-final-mask data-tip="把已确认的精修结果提升为最终定稿（final）。定稿后一般用于导出与金标准。" ${(previewMask || fusionMask) && canConfirmFinal() ? "" : "disabled"}>标记为最终版</button>
+          <button class="ghost-button tip-button" data-compare-masks data-tip="自动比较：AI 初标（优先 v2_ai）与人工确认版（优先 final，否则 v3_fusion / v3_preview）的重合度，给出 Dice / IoU。" ${image ? "" : "disabled"}>对比 AI 与人工重合度</button>
+          <button class="ghost-button tip-button" data-export-mask-nifti data-tip="把三维分割 Mask 导出为 NIfTI 等文件，便于下载或外部软件查看。" ${image && canAnnotate() ? "" : "disabled"}>导出分割文件</button>
+          <button class="ghost-button tip-button" data-start-3d-render data-tip="导出或打开当前病例的三维图像/渲染视图，用于整体查看解剖结构。" ${image ? "" : "disabled"}>导出三维图像</button>
+          <p class="panel-lead" style="margin:8px 0 0">送审 / 通过 / 驳回请到「版本审核」页操作。</p>
         </div>
         ${state.lastCompareResult ? `<div class="compare-result-box"><span>最近 Dice</span><strong>${Number(state.lastCompareResult.dice).toFixed(4)}</strong><small>${escapeHtml(state.lastCompareResult.pred_mask_id)} vs ${escapeHtml(state.lastCompareResult.ref_mask_id)}</small></div>` : ""}
         <h3 style="margin-top:22px">当前 Mask</h3>
@@ -4691,12 +4874,12 @@ function renderVersions() {
 
   return `
     <section class="panel">
-      <h2>审核队列（pending）</h2>
-      <p class="panel-lead">审核员无需打开标注台即可通过/驳回。通过将自动 promote 最新 v3_preview/v3_fusion → final。</p>
+      <h2>待审队列</h2>
+      <p class="panel-lead">审核员可在此直接通过或驳回。通过后会把最新的精修预览/确认版提升为最终版（final）。</p>
       ${canReview() ? `
         <section class="table-wrap" style="margin-top:12px">
           <table>
-            <thead><tr><th>病例</th><th>患者</th><th>可 promote</th><th>Mask 数</th><th>操作</th></tr></thead>
+            <thead><tr><th>病例</th><th>患者</th><th>可定稿版本</th><th>Mask 数</th><th>操作</th></tr></thead>
             <tbody>
               ${queue.length ? queue.map((entry) => `
                 <tr>
@@ -4705,25 +4888,25 @@ function renderVersions() {
                   <td>${entry.promotable_mask_id ? `${escapeHtml(entry.promotable_version)} / ${escapeHtml(entry.promotable_mask_id)}` : "<span class='muted'>无</span>"}</td>
                   <td>${escapeHtml(entry.mask_count)}</td>
                   <td class="review-actions">
-                    <button class="ghost-button" data-focus-case="${escapeHtml(entry.case_id)}">查看版本</button>
-                    <button class="primary-button" data-queue-approve="${escapeHtml(entry.case_id)}" ${entry.promotable_mask_id ? "" : "disabled"}>通过→final</button>
-                    <button class="danger-button" data-queue-reject="${escapeHtml(entry.case_id)}">驳回</button>
+                    <button class="ghost-button tip-button" data-tip="在下方版本管理中选中该病例并查看各版本记录。" data-focus-case="${escapeHtml(entry.case_id)}">查看版本</button>
+                    <button class="primary-button tip-button" data-tip="病例须为待审状态。通过后自动把最新精修结果定为 final。" data-queue-approve="${escapeHtml(entry.case_id)}" ${entry.promotable_mask_id ? "" : "disabled"}>通过并定稿</button>
+                    <button class="danger-button tip-button" data-tip="退回给标注员继续修改；已有 AI/精修版本会保留，不会删除。" data-queue-reject="${escapeHtml(entry.case_id)}">驳回修改</button>
                   </td>
                 </tr>
-              `).join("") : `<tr><td colspan="5">当前没有 pending 病例</td></tr>`}
+              `).join("") : `<tr><td colspan="5">当前没有待审病例</td></tr>`}
             </tbody>
           </table>
         </section>
-      ` : `<div class="placeholder compact">请使用 reviewer / admin 账号查看审核队列。</div>`}
+      ` : `<div class="placeholder compact">请使用 reviewer / admin 账号查看待审队列。</div>`}
     </section>
 
     <section class="panel" style="margin-top:18px">
       <h2>版本管理</h2>
       <div class="toolbar-row" style="margin-top:12px">
         <div class="field"><label>病例</label><select id="versionCaseSelect">${caseOptions || "<option value=''>暂无病例</option>"}</select></div>
-        <button class="ghost-button" data-submit-case ${item && (currentRole() === "annotator" || currentRole() === "admin") ? "" : "disabled"}>提交审核</button>
-        <button class="primary-button" data-approve-case ${item && canReview() ? "" : "disabled"}>审核通过→final</button>
-        <button class="danger-button" data-reject-case ${item && canReview() ? "" : "disabled"}>驳回</button>
+        <button class="ghost-button tip-button" data-tip="标注完成后点这里送审：病例变为「待审核」，进入上方待审队列。" data-submit-case ${item && (currentRole() === "annotator" || currentRole() === "admin") ? "" : "disabled"}>送审</button>
+        <button class="primary-button tip-button" data-tip="仅对待审病例有效。通过后自动提升最新精修版为最终版（final）。" data-approve-case ${item && canReview() ? "" : "disabled"}>通过并定稿</button>
+        <button class="danger-button tip-button" data-tip="退回标注：状态回到已标注，并记录驳回意见；版本文件仍保留。" data-reject-case ${item && canReview() ? "" : "disabled"}>驳回修改</button>
       </div>
       <div class="timeline" style="margin-top:14px">${["v1_manual", "v2_ai", "v3_preview", "v3_fusion", "final"].map((version) => `<span class="chip ${versions.some((entry) => entry.version === version) ? "active-chip" : ""}">${version}</span>`).join("")}</div>
       ${item?.reject_note ? `<div class="reject-note-box" style="margin-top:12px"><span>最近驳回意见</span><strong>${escapeHtml(item.reject_note)}</strong></div>` : ""}
@@ -5580,6 +5763,9 @@ function render() {
   document.querySelectorAll("[data-ai-predict]").forEach((button) => {
     button.addEventListener("click", runAIPredict);
   });
+  document.querySelectorAll("[data-gesture-hero]").forEach((button) => {
+    button.addEventListener("click", runGestureHeroFlow);
+  });
   const loadV2AiButton = $("[data-load-v2-ai]");
   if (loadV2AiButton) {
     loadV2AiButton.addEventListener("click", loadV2AiTo2D);
@@ -5797,7 +5983,7 @@ async function startVolumeViewer(image) {
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/volume_viewer.js?v=focus-select-20260713`);
+    const module = await import(`/frontend/volume_viewer.js?v=surgery-confirm-roi-20260713`);
     if (maskId) {
       loadMaskQuality(maskId)
         .then(() => updateMaskQualitySummary(maskId))
@@ -5826,6 +6012,66 @@ async function startVolumeViewer(image) {
       const name = event.detail?.name || `label_${event.detail?.labelId}`;
       showToast(`手势选中器官：${name}`);
     });
+    container.addEventListener("gesture-surgery-ready", (event) => {
+      state.gestureSurgeryActive = Boolean(event.detail?.surgery);
+      state.gestureHeroActive = Boolean(container.__volumeViewerApi?.isGestureRunning?.());
+      // Soft refresh label on hero button without full page rebuild if possible.
+      const hero = document.querySelector("[data-gesture-hero]");
+      if (hero && !state.gestureHeroBusy) {
+        hero.textContent = state.gestureSurgeryActive
+          ? "模拟手术中"
+          : state.gestureHeroActive
+            ? "手势控制中 · 再次点击可聚焦"
+            : "开始手势控制";
+      }
+    });
+    container.addEventListener("surgery-result-save", async (event) => {
+      const snap = event.detail || {};
+      const item = activeCase();
+      const image = activeImage();
+      if (!item || !image) {
+        showToast("缺少病例/图像，无法保存手术 ROI");
+        return;
+      }
+      if (!snap.cuboid?.min || !snap.cuboid?.max || !snap.labelId) {
+        showToast("请先选中器官并生成立体 ROI");
+        return;
+      }
+      try {
+        const organ = snap.organ || {};
+        const data = await apiPost("/api/surgery_results", {
+          case_id: item.case_id,
+          image_id: image.image_id,
+          mask_id: container.dataset.maskId || state.active3DMaskId || null,
+          label_id: Number(snap.labelId),
+          organ_name: snap.organ_name || organ.name || null,
+          organ_display_name: snap.organ_display_name || organ.display_name || null,
+          organ_color: snap.organ_color || organ.color || null,
+          organ: {
+            label_id: Number(snap.labelId),
+            name: snap.organ_name || organ.name || null,
+            display_name: snap.organ_display_name || organ.display_name || null,
+            color: snap.organ_color || organ.color || null,
+          },
+          roi_margin_pct: Number(snap.roiMarginPct ?? 18),
+          knife_radius: Number(snap.knifeRadius ?? 2),
+          cuboid_min: snap.cuboid.min,
+          cuboid_max: snap.cuboid.max,
+          cut_planes: Array.isArray(snap.cutPlanes) ? snap.cutPlanes : [],
+          carved_voxels: Number(snap.carvedVoxels || 0),
+          note: `模拟手术ROI · 器官=${snap.organ_display_name || snap.labelId} · 刀痕${Array.isArray(snap.cutPlanes) ? snap.cutPlanes.length : 0}面`,
+        });
+        showToast(data.message || `手术 ROI 已入库：${data.result_id}（${snap.organ_display_name || ""}）`);
+        const status = document.querySelector("[data-gesture-status]");
+        if (status) status.textContent = `已保存 ${data.result_id}`;
+      } catch (error) {
+        showToast(error.message || "保存手术 ROI 失败");
+      }
+    });
+    // If hero flow already marked organs ready before viewer remount, re-apply.
+    if (state.gestureHeroActive || state.gestureHeroBusy) {
+      container.__volumeViewerApi?.setOrgansReady?.(true);
+    }
   } catch (error) {
     container.dataset.ready = "false";
     container.innerHTML = `<div class="volume-status error">3D 体渲染加载失败：${error.message}</div>`;

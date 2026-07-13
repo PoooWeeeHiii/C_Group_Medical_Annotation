@@ -173,6 +173,39 @@ CREATE INDEX IF NOT EXISTS idx_masks_annotation_id ON masks(annotation_id);
 CREATE INDEX IF NOT EXISTS idx_masks_version ON masks(version);
 CREATE INDEX IF NOT EXISTS idx_versions_case_id ON versions(case_id);
 CREATE INDEX IF NOT EXISTS idx_versions_version ON versions(version);
+
+-- Simulated surgery polyhedral ROI results (cuboid + knife cut planes)
+CREATE TABLE IF NOT EXISTS surgery_results (
+    result_id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL,
+    image_id TEXT NOT NULL,
+    mask_id TEXT,
+    label_id INTEGER NOT NULL,
+    organ_name TEXT,
+    organ_display_name TEXT,
+    organ_color TEXT,
+    organ_json TEXT,
+    roi_margin_pct REAL NOT NULL DEFAULT 18,
+    knife_radius INTEGER NOT NULL DEFAULT 2,
+    cuboid_min TEXT NOT NULL,
+    cuboid_max TEXT NOT NULL,
+    cut_planes TEXT NOT NULL DEFAULT '[]',
+    carved_voxels INTEGER NOT NULL DEFAULT 0,
+    user_id INTEGER,
+    username TEXT,
+    note TEXT,
+    create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time TEXT,
+    FOREIGN KEY (case_id) REFERENCES cases(case_id) ON DELETE CASCADE,
+    FOREIGN KEY (image_id) REFERENCES images(image_id) ON DELETE CASCADE,
+    FOREIGN KEY (mask_id) REFERENCES masks(mask_id) ON DELETE SET NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_surgery_results_case ON surgery_results(case_id);
+CREATE INDEX IF NOT EXISTS idx_surgery_results_image ON surgery_results(image_id);
+CREATE INDEX IF NOT EXISTS idx_surgery_results_mask ON surgery_results(mask_id);
+CREATE INDEX IF NOT EXISTS idx_surgery_results_label ON surgery_results(label_id);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_case_id ON tasks(case_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_id ON tasks(assignee_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
