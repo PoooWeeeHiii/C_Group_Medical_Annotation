@@ -1,0 +1,75 @@
+{
+  "dataset_id": "DatasetSmokeP4c",
+  "name": "smoke",
+  "version": "v3_fusion",
+  "format": "nnunet",
+  "materialize": true,
+  "create_time": "2026-07-11T20:11:58",
+  "counts": {
+    "train": 1,
+    "val": 0,
+    "test": 0,
+    "total": 1
+  },
+  "label_map": {
+    "background": 0,
+    "label": 1
+  },
+  "records": [
+    {
+      "split": "train",
+      "case_id": "Case0002",
+      "image_id": "Image0002",
+      "image_path": "dataset/raw/Case0002/patient1.zip",
+      "mask_id": "Mask0415",
+      "mask_path": "dataset/labels/Case0002/v3_fusion/Case0002_Image0002_Mask0415_v3_fusion_label.nii.gz",
+      "version": "v3_fusion",
+      "label": "label",
+      "nnunet_id": "Case0002",
+      "spacing_check": "ok"
+    }
+  ],
+  "missing_masks": [],
+  "export_dir": "dataset/exports/DatasetSmokeP4c",
+  "dataset_json": "dataset/exports/DatasetSmokeP4c/dataset.json",
+  "splits_final": "dataset/exports/DatasetSmokeP4c/splits_final.json",
+  "report": {
+    "success_count": 1,
+    "skipped_count": 0,
+    "missing_masks": [],
+    "spacing_checks": [
+      {
+        "case_id": "Case0002",
+        "image_id": "Image0002",
+        "mask_id": "Mask0415",
+        "status": "ok",
+        "image_spacing": [
+          0.9765624999999998,
+          0.9765624999999998,
+          2.999999999999999
+        ],
+        "mask_spacing": [
+          0.9765625,
+          0.9765625,
+          3.0
+        ],
+        "image_shape": [
+          134,
+          512,
+          512
+        ],
+        "mask_shape": [
+          134,
+          512,
+          512
+        ],
+        "detail": null
+      }
+    ],
+    "materialized_files": [
+      "dataset/exports/DatasetSmokeP4c/imagesTr/Case0002_0000.nii.gz",
+      "dataset/exports/DatasetSmokeP4c/labelsTr/Case0002.nii.gz"
+    ],
+    "export_dir": "dataset/exports/DatasetSmokeP4c"
+  }
+}

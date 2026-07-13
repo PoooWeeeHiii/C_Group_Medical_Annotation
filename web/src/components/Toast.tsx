@@ -1,0 +1,35 @@
+import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
+
+interface ToastState {
+  showToast: (message: string) => void;
+}
+
+const ToastContext = createContext<ToastState | null>(null);
+
+export function ToastProvider({ children }: { children: ReactNode }) {
+  const [message, setMessage] = useState("");
+  const [visible, setVisible] = useState(false);
+
+  const showToast = useCallback((text: string) => {
+    setMessage(text);
+    setVisible(true);
+    window.setTimeout(() => setVisible(false), 2800);
+  }, []);
+
+  const value = useMemo(() => ({ showToast }), [showToast]);
+
+  return (
+    <ToastContext.Provider value={value}>
+      {children}
+      <div className={`toast ${visible ? "show" : ""}`} role="status">
+        {message}
+      </div>
+    </ToastContext.Provider>
+  );
+}
+
+export function useToast() {
+  const ctx = useContext(ToastContext);
+  if (!ctx) throw new Error("useToast must be used within ToastProvider");
+  return ctx;
+}

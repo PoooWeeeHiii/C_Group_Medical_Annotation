@@ -17,6 +17,9 @@ env/
 .vscode/
 *.swp
 
+# Frontend dependencies
+node_modules/
+
 # Local secrets and environment files
 .env
 .env.*
@@ -38,22 +41,28 @@ dataset/raw/**
 dataset/images/**
 dataset/labels/**
 dataset/splits/**
+dataset/exports/**
+dataset/weak_supervise_runs/**
 !dataset/raw/.gitkeep
 !dataset/images/.gitkeep
 !dataset/labels/.gitkeep
 !dataset/splits/.gitkeep
+!dataset/exports/.gitkeep
+!dataset/splits/*.json
 
 # Model weights and training outputs
 models/**
 !models/README.md
+!models/*.md
 !models/.gitkeep
 *.pt
 *.pth
 *.ckpt
 *.onnx
 *.h5
-runs/
 checkpoints/
+ai/checkpoints/
+ai/runs/
 wandb/
 
 # Large reference materials
@@ -62,7 +71,14 @@ knowledge/
 
 # Logs and generated files
 *.log
+database/dev_*.json
+database/*.db
+database/*.db-shm
+database/*.db-wal
 outputs/
 tmp/
 temp/
+_cases.json
+web/dist/
+web/tsconfig.tsbuildinfo
 
