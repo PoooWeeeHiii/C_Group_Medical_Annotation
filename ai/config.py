@@ -17,6 +17,21 @@ MASK_ID_FMT = "Mask{:04d}"
 DATASET_ID = "Dataset0001"
 MODEL_ID = "Model0001"
 SPLEEN_MODEL_ID = "Model0002"
+# Plan A organ aliases (Person B style, parallel to Model0002)
+HEART_MODEL_ID = "Model0010"
+LIVER_MODEL_ID = "Model0011"
+LUNG_MODEL_ID = "Model0012"
+KIDNEY_MODEL_ID = "Model0013"
+ORGAN_MODEL_ALIASES = {
+    HEART_MODEL_ID: "heart_nnunet_ds510",
+    LIVER_MODEL_ID: "liver_nnunet_ds511",
+    LUNG_MODEL_ID: "lung_nnunet_ds512",
+    KIDNEY_MODEL_ID: "kidney_nnunet_ds513",
+    "model0010": "heart_nnunet_ds510",
+    "model0011": "liver_nnunet_ds511",
+    "model0012": "lung_nnunet_ds512",
+    "model0013": "kidney_nnunet_ds513",
+}
 
 # Version tags for labels/
 VERSION_MANUAL = "v1_manual"
@@ -49,8 +64,8 @@ IMAGES_DIR = DATASET_ROOT / "images"
 LABELS_DIR = DATASET_ROOT / "labels"
 SPLITS_DIR = DATASET_ROOT / "splits"
 
-# Local spleen nnUNet weights (kept outside the git repo)
-_DEFAULT_SPLEEN_ROOT = Path(os.environ.get("SPLEEN_NNUNET_ROOT", r"D:\hm_2_spleen"))
+# Local spleen nnUNet weights (Person B machine: E:\lxy\hm_2_spleen)
+_DEFAULT_SPLEEN_ROOT = Path(os.environ.get("SPLEEN_NNUNET_ROOT", r"E:\lxy\hm_2_spleen"))
 SPLEEN_NNUNET_ROOT = _DEFAULT_SPLEEN_ROOT
 SPLEEN_NNUNET_RESULTS = Path(
     os.environ.get("nnUNet_results", str(SPLEEN_NNUNET_ROOT / "nnUNet_results"))
@@ -65,26 +80,45 @@ SPLEEN_MODEL_DIR = Path(
         str(
             SPLEEN_NNUNET_RESULTS
             / "Dataset506_Spleen"
-            / "nnUNetTrainer_100epochs__nnUNetPlans__2d"
+            / "nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres"
         ),
     )
 )
 SPLEEN_CHECKPOINT_NAME = os.environ.get("SPLEEN_CHECKPOINT_NAME", "checkpoint_best.pth")
 SPLEEN_DATASET_ID = os.environ.get("SPLEEN_DATASET_ID", "506")
-SPLEEN_CONFIGURATION = os.environ.get("SPLEEN_CONFIGURATION", "2d")
+SPLEEN_CONFIGURATION = os.environ.get("SPLEEN_CONFIGURATION", "3d_fullres")
 SPLEEN_TRAINER = os.environ.get("SPLEEN_TRAINER", "nnUNetTrainer_100epochs")
 SPLEEN_FOLD = os.environ.get("SPLEEN_FOLD", "0")
 SPLEEN_NNUNET_PYTHON = os.environ.get(
     "SPLEEN_NNUNET_PYTHON",
-    str(SPLEEN_NNUNET_ROOT / "venv_nnunet_cpu" / "Scripts" / "python.exe"),
+    r"D:\anaconda\python.exe",
+)
+
+# Plan A multi-organ nnUNet (heart/liver/lung/kidney) — keep separate from spleen root
+_DEFAULT_ORGANS_ROOT = Path(os.environ.get("ORGANS_NNUNET_ROOT", r"E:\lxy\hm_2_organs_nnunet"))
+ORGANS_NNUNET_ROOT = _DEFAULT_ORGANS_ROOT
+ORGANS_NNUNET_RESULTS = Path(
+    os.environ.get("ORGANS_NNUNET_RESULTS", str(ORGANS_NNUNET_ROOT / "nnUNet_results"))
+)
+ORGANS_NNUNET_RAW = Path(os.environ.get("ORGANS_NNUNET_RAW", str(ORGANS_NNUNET_ROOT / "nnUNet_raw")))
+ORGANS_NNUNET_PREPROCESSED = Path(
+    os.environ.get("ORGANS_NNUNET_PREPROCESSED", str(ORGANS_NNUNET_ROOT / "nnUNet_preprocessed"))
+)
+ORGANS_TRAINER = os.environ.get("ORGANS_TRAINER", "nnUNetTrainer_100epochs")
+ORGANS_CONFIGURATION = os.environ.get("ORGANS_CONFIGURATION", "3d_fullres")
+ORGANS_FOLD = os.environ.get("ORGANS_FOLD", "0")
+ORGANS_CHECKPOINT_NAME = os.environ.get("ORGANS_CHECKPOINT_NAME", "checkpoint_best.pth")
+ORGANS_NNUNET_PYTHON = os.environ.get(
+    "ORGANS_NNUNET_PYTHON",
+    os.environ.get("SPLEEN_NNUNET_PYTHON", r"D:\anaconda\python.exe"),
 )
 
 # TotalSegmentator inference (official package; weights download on first run)
-_DEFAULT_TOTALSEG_ROOT = Path(os.environ.get("TOTALSEG_ROOT", r"D:\hm_2_totalseg"))
+_DEFAULT_TOTALSEG_ROOT = Path(os.environ.get("TOTALSEG_ROOT", r"E:\lxy\hm_2_totalseg"))
 TOTALSEG_ROOT = _DEFAULT_TOTALSEG_ROOT
 TOTALSEG_PYTHON = os.environ.get(
     "TOTALSEG_PYTHON",
-    str(SPLEEN_NNUNET_ROOT / "venv_nnunet_cpu" / "Scripts" / "python.exe"),
+    r"D:\anaconda\python.exe",
 )
 TOTALSEG_DEVICE = os.environ.get("TOTALSEG_DEVICE", "auto")  # auto: prefer GPU via TOTALSEG_PYTHON, else CPU
 TOTALSEG_FAST = os.environ.get("TOTALSEG_FAST", "")  # empty = auto (fast on CPU, full on GPU)

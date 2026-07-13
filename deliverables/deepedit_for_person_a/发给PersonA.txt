@@ -1,0 +1,30 @@
+【DeepEdit 权重交付 - Person B】
+
+1) 文件（见 deliverables/deepedit_for_person_a/）
+   - deepedit_unet.pth   （MONAI UNet checkpoint，约 19MB）
+   - config.json
+   - deepedit_unet.train_meta.json（训练指标）
+   - README.md（完整对接说明）
+
+2) 放到你们仓库
+   models/deepedit/deepedit_unet.pth
+   models/deepedit/config.json
+
+3) 后端 .env
+   DEEPEDIT_SERVICE_URL=http://127.0.0.1:8010
+   DEEPEDIT_SERVICE_TIMEOUT_SECONDS=120
+   （若你用 8011，告诉我，我启动时改端口）
+
+4) 我这边启动服务
+   powershell -ExecutionPolicy Bypass -File scripts\start_deepedit.ps1
+   健康检查：curl http://127.0.0.1:8010/health  → model_loaded=true
+
+5) 模型约定
+   - 格式：monai_unet_checkpoint
+   - 输入 4 通道（CT + 正点 + 负点 + 当前 mask）
+   - 输出 2 通道前景/背景
+   - 支持：heart / liver / spleen / left_lung / right_lung / left_kidney / right_kidney
+   - 当前 best val Dice ≈ 0.53（8 例×50 epoch，可联调）
+
+6) 注意
+   权重有、服务没开 → 按钮仍会失败。联调前先确认 /health。

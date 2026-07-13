@@ -7,6 +7,7 @@ Only keep model notes, configuration examples, or download links here.
 Current notes:
 
 - [spleen_nnunet.md](spleen_nnunet.md): local Dataset506 spleen nnUNet weights for `POST /api/ai/predict`
+- [organ_nnunet.md](organ_nnunet.md): Plan A heart/liver/lung/kidney nnUNet (`*_nnunet_ds51x` / `Model0010`–`Model0013`)；联调见 [docs/15_organ_ai_predict.md](../docs/15_organ_ai_predict.md)
 
 Recommended layout:
 
@@ -14,6 +15,7 @@ Recommended layout:
 models/
   README.md
   spleen_nnunet.md
+  organ_nnunet.md
   deepedit/
     model.ts          # local only, ignored by Git
   model_registry.md
@@ -92,17 +94,28 @@ Platform model IDs (select in UI):
 
 - `totalseg_organs` — **推荐**：一次约 24 个器官，每个器官一条 `v2_ai` mask
 - `totalseg_total` — 全量 100+ 结构（更慢）
-- `totalseg_spleen` / `totalseg_liver` / `totalseg_lung` — 单器官
+- `totalseg_spleen` / `totalseg_liver` / `totalseg_lung` / `totalseg_heart` / `totalseg_kidney`
+- `totalseg_left_lung` / `totalseg_right_lung` — 与 DeepEdit label 对齐
 
 ```powershell
 # Install once into the inference env
-D:\hm_2_spleen\venv_nnunet_cpu\Scripts\python.exe -m pip install TotalSegmentator
+D:\anaconda\python.exe -m pip install TotalSegmentator
 
-# .env
-TOTALSEG_PYTHON=D:\hm_2_spleen\venv_nnunet_cpu\Scripts\python.exe
+# .env（Person B 本机示例）
+TOTALSEG_PYTHON=D:\anaconda\python.exe
 TOTALSEG_DEVICE=auto
 # TOTALSEG_FAST=true   # recommended on CPU
 ```
 
 First prediction downloads official weights. This is **inference**, separate from using TotalSeg zip as DeepEdit training data.
+
+### Human-in-the-loop（v3_fusion → DeepEdit / nnUNet 再训）
+
+```powershell
+D:\anaconda\python.exe scripts\run_hitl_retrain.py --prepare-deepedit --prepare-nnunet
+D:\anaconda\python.exe scripts\run_hitl_retrain.py --prepare-deepedit --train-deepedit --epochs 10
+.\scripts\start_deepedit.ps1
+```
+
+联调清单见 `docs/13_person_b_joint_debug_checklist.md`；闭环说明见 `docs/16_hitl_fusion_loop.md`。
 

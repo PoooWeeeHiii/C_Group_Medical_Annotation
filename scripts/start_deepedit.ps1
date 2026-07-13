@@ -30,6 +30,8 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Root "models\deepedit") | 
 $Python = $env:DEEPEDIT_PYTHON
 if (-not $Python) {
     $candidates = @(
+        "D:\anaconda\python.exe",
+        "E:\lxy\hm_2_spleen\venv_nnunet_cpu\Scripts\python.exe",
         "D:\hm_2_spleen\venv_nnunet_cpu\Scripts\python.exe",
         "D:\hm_2_spleen\venv_nnunet\Scripts\python.exe",
         (Join-Path $Root ".venv\Scripts\python.exe"),

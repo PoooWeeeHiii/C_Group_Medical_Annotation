@@ -237,6 +237,23 @@ def get_ai_health():
         spleen_message = str(exc)
         spleen_model_id = "Model0002"
 
+    organ_ready_n = 0
+    organ_total = 0
+    organ_message = ""
+    try:
+        from ai.config import ORGANS_NNUNET_PYTHON
+        from ai.organ_nnunet import list_ready_organ_models
+
+        if not nnunet_python:
+            nnunet_python = str(ORGANS_NNUNET_PYTHON)
+        rows = list_ready_organ_models()
+        organ_total = len(rows)
+        organ_ready_n = sum(1 for r in rows if r.get("ready"))
+        names = ",".join(r["label"] for r in rows if r.get("ready")) or "none"
+        organ_message = f"organ nnUNet ready {organ_ready_n}/{organ_total} ({names})"
+    except Exception as exc:
+        organ_message = f"organ nnUNet: {exc}"
+
     totalseg_ready = False
     totalseg_message = ""
     try:
@@ -248,8 +265,8 @@ def get_ai_health():
     except Exception as exc:
         totalseg_message = str(exc)
 
-    ready = spleen_ready or totalseg_ready
-    parts = [spleen_message, totalseg_message]
+    ready = spleen_ready or totalseg_ready or organ_ready_n > 0
+    parts = [spleen_message, organ_message, totalseg_message]
     return AiHealthResponse(
         success=True,
         ready=ready,
@@ -277,7 +294,28 @@ def _run_local_spleen_nnunet(volume, spacing) -> np.ndarray | None:
         return None
 
 
+def _run_local_organ_nnunet(volume, spacing, model_id: str, label: str) -> tuple[np.ndarray, str] | None:
+    """Try Plan A heart/liver/lung/kidney nnUNet weights."""
+    try:
+        from ai.organ_nnunet import predict_organ_volume
+
+        mask, spec = predict_organ_volume(
+            model_id=model_id,
+            label=label,
+            volume=volume,
+            spacing=tuple(float(v) for v in spacing[:3]),
+        )
+        return mask, spec.label
+    except FileNotFoundError as exc:
+        print(f"[ai_service] organ nnUNet missing weights: {exc}")
+        return None
+    except Exception as exc:
+        print(f"[ai_service] organ nnUNet unavailable: {exc}")
+        return None
+
+
 def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
+    from ai.organ_nnunet import is_organ_nnunet_request
     from ai.totalseg_predict import is_multi_organ_model
     from backend.app.services.model_service import get_model, resolve_predict_label
 
@@ -286,6 +324,23 @@ def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
     if model_id in {"Model0002", "model0002"}:
         model_id = "spleen_nnunetv2_task506"
         label = label if label and label != "label" else "spleen"
+    # Person B Plan A aliases Model0010–0013 → *_nnunet_ds51x
+    from ai.config import ORGAN_MODEL_ALIASES
+
+    if model_id in ORGAN_MODEL_ALIASES:
+        mapped = ORGAN_MODEL_ALIASES[model_id]
+        if not label or label == "label":
+            from ai.organ_nnunet import ORGAN_MODELS
+
+            label = ORGAN_MODELS[mapped].label
+        model_id = mapped
+    elif model_id.lower() in ORGAN_MODEL_ALIASES:
+        mapped = ORGAN_MODEL_ALIASES[model_id.lower()]
+        if not label or label == "label":
+            from ai.organ_nnunet import ORGAN_MODELS
+
+            label = ORGAN_MODELS[mapped].label
+        model_id = mapped
 
     image_record, volume = load_volume(request.image_id)
     if image_record.get("case_id") != request.case_id:
@@ -320,6 +375,25 @@ def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
             organ_masks = {label: mask_stack}
             model_status = "platform_unet"
             backend_name = "platform_unet"
+        elif (
+            (backend_name and backend_name.lower() in {"organ_nnunet_local", "organ_nnunet"})
+            or is_organ_nnunet_request(model_id, label, backend_name)
+        ):
+            organ_result = _run_local_organ_nnunet(volume.array, volume.spacing, model_id, label)
+            if organ_result is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Organ nnUNet weights unavailable for model_id={model_id!r}. "
+                        "Check ORGANS_NNUNET_ROOT and Plan A checkpoints "
+                        "(see models/organ_nnunet.md / docs/14_planA_organs_nnunet.md)."
+                    ),
+                )
+            mask_stack, organ_label = organ_result
+            label = organ_label
+            organ_masks = {organ_label: mask_stack}
+            model_status = "organ_nnunet"
+            backend_name = "organ_nnunet_local"
         elif _is_tumor_request(label, model_id):
             # 疑似肿瘤：TotalSeg 器官并集 → 体内残差软组织连通域（heuristic，非诊断）
             from ai.tumor_heuristic import predict_suspected_tumor
@@ -403,7 +477,7 @@ def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
                     status_code=422,
                     detail=(
                         f"Real AI backend unavailable for model_id={model_id!r}, label={label!r}. "
-                        "Configure TotalSegmentator / spleen nnUNet / platform_unet weights, "
+                        "Configure TotalSegmentator / organ nnUNet / spleen nnUNet / platform_unet weights, "
                         "or pass allow_baseline=true to use the HU-threshold demo baseline."
                     ),
                 )
@@ -491,6 +565,7 @@ def run_ai_prediction(request: AIPredictRequest) -> AIPredictResponse:
         "lung_lower_lobe_right": name_to_id.get("lung", 3),
         "tumor": name_to_id.get("tumor", 4),
         "spleen": name_to_id.get("spleen", 5),
+        "heart": name_to_id.get("heart", 9),
         "pancreas": name_to_id.get("pancreas", 6),
         "stomach": name_to_id.get("stomach", 7),
         "gallbladder": name_to_id.get("gallbladder", 8),

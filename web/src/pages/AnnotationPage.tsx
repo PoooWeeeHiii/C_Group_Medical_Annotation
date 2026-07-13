@@ -14,7 +14,7 @@ import type { CaseDetail, CaseItem, ImageItem, LabelItem, VolumeMeta } from "../
 import { STATUS_TEXT } from "../types";
 
 type Axis = "axial" | "coronal" | "sagittal";
-type Tool = "brush" | "erase";
+type Tool = "brush" | "erase" | "pos" | "neg";
 
 interface SliceData {
   width: number;
@@ -22,6 +22,21 @@ interface SliceData {
   values: Float32Array;
   valueMin: number;
   valueMax: number;
+}
+
+interface PromptPoint {
+  x: number;
+  y: number;
+  z: number;
+  kind: "pos" | "neg";
+}
+
+interface MaskListItem {
+  mask_id: string;
+  version?: string;
+  label?: string;
+  path?: string;
+  mask_format?: string;
 }
 
 function encodeMaskRle(data: Uint8Array): Array<[number, number]> {
@@ -84,6 +99,11 @@ export function AnnotationPage({ refreshKey }: { refreshKey: number }) {
   const [brushSize, setBrushSize] = useState(4);
   const [saving, setSaving] = useState(false);
   const [sliceLoading, setSliceLoading] = useState(false);
+  const [refining, setRefining] = useState(false);
+  const [promoting, setPromoting] = useState(false);
+  const [promptPoints, setPromptPoints] = useState<PromptPoint[]>([]);
+  const [masks3d, setMasks3d] = useState<MaskListItem[]>([]);
+  const [activeMaskId, setActiveMaskId] = useState("");
 
   const imageCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -105,6 +125,40 @@ export function AnnotationPage({ refreshKey }: { refreshKey: number }) {
     (imgId: string, ax: Axis, index: number) => `${imgId}:${ax}:${index}`,
     [],
   );
+
+  const loadMasks3d = useCallback(async (imgId: string) => {
+    if (!imgId) {
+      setMasks3d([]);
+      setActiveMaskId("");
+      return;
+    }
+    try {
+      const data = await apiGet<{ items?: MaskListItem[]; masks?: MaskListItem[] }>(
+        `/api/image/${imgId}/masks`,
+      );
+      const items = data.items || data.masks || [];
+      const nifti = items.filter(
+        (m) =>
+          (m.mask_format || "").includes("nii") ||
+          (m.path || "").endsWith(".nii.gz") ||
+          ["v2_ai", "v3_preview", "v3_fusion", "final"].includes(m.version || ""),
+      );
+      setMasks3d(nifti.length ? nifti : items);
+      const prefer =
+        nifti.find((m) => m.version === "v3_preview") ||
+        nifti.find((m) => m.version === "v2_ai") ||
+        nifti.find((m) => m.version === "v3_fusion") ||
+        nifti[0] ||
+        items[0];
+      setActiveMaskId((prev) => (prev && items.some((m) => m.mask_id === prev) ? prev : prefer?.mask_id || ""));
+    } catch {
+      setMasks3d([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadMasks3d(imageId);
+  }, [imageId, loadMasks3d, refreshKey]);
 
   const loadCases = useCallback(async () => {
     try {
@@ -375,6 +429,20 @@ export function AnnotationPage({ refreshKey }: { refreshKey: number }) {
     }
     const point = canvasPoint(event);
     if (!point) return;
+
+    if (tool === "pos" || tool === "neg") {
+      if (axis !== "axial") {
+        showToast("DeepEdit 点击请在 axial 平面进行");
+        return;
+      }
+      setPromptPoints((prev) => [
+        ...prev,
+        { x: Math.round(point.x), y: Math.round(point.y), z: sliceIndex, kind: tool },
+      ]);
+      showToast(`${tool === "pos" ? "正点" : "负点"} @ (${Math.round(point.x)}, ${Math.round(point.y)}, z=${sliceIndex})`);
+      return;
+    }
+
     drawingRef.current = true;
     lastPointRef.current = point;
     paintLine(point, point);
@@ -458,6 +526,89 @@ export function AnnotationPage({ refreshKey }: { refreshKey: number }) {
       showToast(error instanceof Error ? error.message : "Mask 保存失败");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function runDeepEditRefine() {
+    if (!caseId || !imageId) {
+      showToast("请先选择病例和图像");
+      return;
+    }
+    const positive = promptPoints.filter((p) => p.kind === "pos").map((p) => [p.x, p.y, p.z]);
+    const negative = promptPoints.filter((p) => p.kind === "neg").map((p) => [p.x, p.y, p.z]);
+    if (!positive.length && !negative.length) {
+      showToast("请先用「正点/负点」工具在 axial 上点击");
+      return;
+    }
+    const current = masks3d.find((m) => m.mask_id === activeMaskId) || masks3d[0];
+    setRefining(true);
+    try {
+      const data = await apiPost<{
+        mask_id: string;
+        refinement_mode?: string;
+        model_status?: string;
+      }>("/api/deepedit/refine", {
+        case_id: caseId,
+        image_id: imageId,
+        source_version: "v1_manual",
+        current_mask_version: current?.version || "v2_ai",
+        current_mask_id: current?.mask_id || null,
+        output_version: "v3_preview",
+        label: selectedLabel?.name || current?.label || "label",
+        model_id: "DeepEdit",
+        require_neural: true,
+        positive_points: positive,
+        negative_points: negative,
+        interaction: {
+          type: "deepedit",
+          prompt_source: "react_annotation_page",
+          positive_count: positive.length,
+          negative_count: negative.length,
+        },
+      });
+      await apiPost("/api/version", {
+        case_id: caseId,
+        version: "v3_preview",
+        annotation: data.mask_id,
+        model: data.refinement_mode || "deepedit",
+        dataset: null,
+      });
+      setActiveMaskId(data.mask_id);
+      await loadMasks3d(imageId);
+      showToast(`DeepEdit 完成：${data.mask_id} · ${data.model_status || data.refinement_mode}`);
+    } catch (error) {
+      showToast(
+        error instanceof Error
+          ? error.message
+          : "DeepEdit 失败（请确认 :8010 服务已启动）",
+      );
+    } finally {
+      setRefining(false);
+    }
+  }
+
+  async function promoteToFusion() {
+    const current =
+      masks3d.find((m) => m.mask_id === activeMaskId && m.version === "v3_preview") ||
+      masks3d.find((m) => m.version === "v3_preview");
+    if (!current) {
+      showToast("请先 DeepEdit 生成 v3_preview");
+      return;
+    }
+    setPromoting(true);
+    try {
+      const data = await apiPost<{ mask_id?: string; mask?: { mask_id?: string } }>(
+        `/api/mask/${current.mask_id}/promote`,
+        { target_version: "v3_fusion" },
+      );
+      const newId = data.mask_id || data.mask?.mask_id;
+      if (newId) setActiveMaskId(newId);
+      await loadMasks3d(imageId);
+      showToast(`已确认 v3_fusion：${newId || current.mask_id}`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "promote 失败");
+    } finally {
+      setPromoting(false);
     }
   }
 
@@ -603,6 +754,20 @@ export function AnnotationPage({ refreshKey }: { refreshKey: number }) {
           >
             橡皮
           </button>
+          <button
+            type="button"
+            className={`tool-button ${tool === "pos" ? "active" : ""}`}
+            onClick={() => setTool("pos")}
+          >
+            正点
+          </button>
+          <button
+            type="button"
+            className={`tool-button ${tool === "neg" ? "active" : ""}`}
+            onClick={() => setTool("neg")}
+          >
+            负点
+          </button>
         </div>
         <div className="label-picker" style={{ marginTop: 14 }}>
           <div className="label-picker-header">
@@ -639,7 +804,10 @@ export function AnnotationPage({ refreshKey }: { refreshKey: number }) {
         </label>
         <div className="annotation-state-line" style={{ marginTop: 12 }}>
           <span>
-            当前工具：<strong>{tool === "brush" ? "画笔" : "橡皮"}</strong>
+            当前工具：
+            <strong>
+              {tool === "brush" ? "画笔" : tool === "erase" ? "橡皮" : tool === "pos" ? "正点" : "负点"}
+            </strong>
           </span>
           <span>
             当前 label：
@@ -647,6 +815,46 @@ export function AnnotationPage({ refreshKey }: { refreshKey: number }) {
               {selectedLabel?.name || "-"} #{selectedLabel?.label_id ?? labelId}
             </strong>
           </span>
+        </div>
+        <div className="deepedit-controls" style={{ marginTop: 16 }}>
+          <h3 style={{ margin: "0 0 8px", fontSize: 14 }}>DeepEdit / Fusion</h3>
+          <label className="field" style={{ display: "block" }}>
+            <span>当前 3D Mask</span>
+            <select value={activeMaskId} onChange={(e) => setActiveMaskId(e.target.value)}>
+              <option value="">选择 mask</option>
+              {masks3d.map((m) => (
+                <option key={m.mask_id} value={m.mask_id}>
+                  {m.version || "?"} · {m.label || "-"} · {m.mask_id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p style={{ margin: "8px 0", fontSize: 12 }}>
+            正点 {promptPoints.filter((p) => p.kind === "pos").length} / 负点{" "}
+            {promptPoints.filter((p) => p.kind === "neg").length}
+            <button type="button" className="ghost-button" style={{ marginLeft: 8 }} onClick={() => setPromptPoints([])}>
+              清空点
+            </button>
+          </p>
+          <div className="toolbar-row">
+            <button
+              type="button"
+              className="primary-button"
+              disabled={!canAnnotate || !imageId || refining}
+              onClick={() => void runDeepEditRefine()}
+            >
+              {refining ? "DeepEdit…" : "DeepEdit 修正"}
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              disabled={!canAnnotate || !imageId || promoting}
+              onClick={() => void promoteToFusion()}
+            >
+              {promoting ? "确认中…" : "确认 v3_fusion"}
+            </button>
+          </div>
+          <small>需 DeepEdit 服务 :8010；确认后可用 scripts/run_hitl_retrain.py 收割再训。</small>
         </div>
         <div className="toolbar-row" style={{ marginTop: 18 }}>
           <button
@@ -662,8 +870,8 @@ export function AnnotationPage({ refreshKey }: { refreshKey: number }) {
           </button>
         </div>
         <p className="panel-lead" style={{ marginTop: 16 }}>
-          切片来自 <code>/api/image/{"{id}"}/slice/{"{axis}"}/{"{index}"}/values</code>；保存走{" "}
-          <code>/api/save_mask</code>（RLE JSON）并写入版本 <code>v1_manual</code>。
+          画笔保存 → <code>v1_manual</code>；DeepEdit → <code>v3_preview</code>；确认 →{" "}
+          <code>v3_fusion</code>。详见 <code>docs/16_hitl_fusion_loop.md</code>。
         </p>
       </aside>
     </div>

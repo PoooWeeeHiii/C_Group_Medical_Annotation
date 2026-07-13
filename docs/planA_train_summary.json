@@ -1,0 +1,49 @@
+{
+  "epochs": 100,
+  "trainer": "nnUNetTrainer_100epochs",
+  "note": "best_val_dice_parsed may be training-time Pseudo Dice peaks; prefer mean_validation_dice for reporting.",
+  "mean_validation_dice": {
+    "lung": 0.95,
+    "liver": 0.921,
+    "kidney": 0.813,
+    "heart": 0.613
+  },
+  "organs": {
+    "liver": {
+      "dataset_id": 511,
+      "status": "ok",
+      "returncode": 0,
+      "elapsed_sec": 8803.4,
+      "mean_validation_dice": 0.9208,
+      "best_val_dice_parsed": 0.9246,
+      "fold_dir": "E:\\lxy\\hm_2_organs_nnunet\\nnUNet_results\\Dataset511_DeepEdit_Liver\\nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres\\fold_0"
+    },
+    "kidney": {
+      "dataset_id": 513,
+      "status": "ok",
+      "returncode": 0,
+      "elapsed_sec": 8811.9,
+      "mean_validation_dice": 0.813,
+      "best_val_dice_parsed": 0.9297,
+      "fold_dir": "E:\\lxy\\hm_2_organs_nnunet\\nnUNet_results\\Dataset513_DeepEdit_Kidney\\nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres\\fold_0"
+    },
+    "lung": {
+      "dataset_id": 512,
+      "status": "ok",
+      "returncode": 0,
+      "elapsed_sec": 8873.0,
+      "mean_validation_dice": 0.9497,
+      "best_val_dice_parsed": 0.9635,
+      "fold_dir": "E:\\lxy\\hm_2_organs_nnunet\\nnUNet_results\\Dataset512_DeepEdit_Lung\\nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres\\fold_0"
+    },
+    "heart": {
+      "dataset_id": 510,
+      "status": "ok",
+      "returncode": 0,
+      "elapsed_sec": 9099.6,
+      "mean_validation_dice": 0.6128,
+      "best_val_dice_parsed": 0.8722,
+      "fold_dir": "E:\\lxy\\hm_2_organs_nnunet\\nnUNet_results\\Dataset510_DeepEdit_Heart\\nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres\\fold_0"
+    }
+  }
+}
