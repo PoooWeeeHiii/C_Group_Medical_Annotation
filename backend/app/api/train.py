@@ -55,6 +55,7 @@ def start_training(request: TrainStartRequest) -> TrainStartResponse:
 
 
 @router.get("/train", response_model=TrainJobListResponse)
+@router.get("/train/jobs", response_model=TrainJobListResponse)
 def read_train_jobs() -> TrainJobListResponse:
     items = [_to_record(job) for job in list_train_jobs()]
     return TrainJobListResponse(items=items, count=len(items))

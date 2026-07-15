@@ -86,6 +86,10 @@ const state = {
   qualityRefMaskId: "",
   qualityReport: null,
   qualityMasks: [],
+  qualityMarkdown: "",
+  qualityReportTitle: "",
+  qualityPolishTone: "clinical",
+  qualityPolishStatus: null,
   // P5: few-shot / coarse / weak
   annotationMode: "dense", // dense | coarse | scribble
   fewShotMinSlices: 3,
@@ -735,11 +739,108 @@ async function loadQualityReport() {
         precision: data.overlap.precision,
         recall: data.overlap.recall,
       };
+      if (Number(data.overlap.dice) >= 0.999) {
+        showToast("Dice≈1.0：当前评价 Mask 与参考 GT 体素几乎完全相同（可能是同文件副本）");
+      }
     }
     render();
   } catch (error) {
     showToast(error.message || "质量指标加载失败");
   }
+}
+
+async function refreshQualityPolishStatus() {
+  try {
+    state.qualityPolishStatus = await apiGet("/api/quality/report/polish/status");
+  } catch {
+    state.qualityPolishStatus = { configured: false, message: "无法读取润色服务状态" };
+  }
+}
+
+async function generateQualityReportDoc() {
+  const maskId = state.qualityMaskId || $("#qualityMaskSelect")?.value;
+  const refId = state.qualityRefMaskId || $("#qualityRefSelect")?.value || "";
+  const caseId = state.qualityCaseId || activeCase()?.case_id || "";
+  if (!maskId) {
+    showToast("请先选择要评价的 Mask 版本");
+    return;
+  }
+  state.qualityMaskId = maskId;
+  state.qualityRefMaskId = refId;
+  try {
+    const data = await apiPost("/api/quality/report/generate", {
+      mask_id: maskId,
+      ref_mask_id: refId || null,
+      case_id: caseId || null,
+      include_error_slices: true,
+    });
+    state.qualityReport = data.metrics || state.qualityReport;
+    state.qualityMarkdown = data.markdown || "";
+    state.qualityReportTitle = data.title || "";
+    if (data.metrics?.overlap && Number(data.metrics.overlap.dice) >= 0.999) {
+      showToast("报告已生成；Dice≈1.0 表示 Pred 与 GT 几乎完全一致");
+    } else {
+      showToast("质量报告已生成");
+    }
+    render();
+  } catch (error) {
+    showToast(error.message || "质量报告生成失败");
+  }
+}
+
+async function polishQualityReportDoc() {
+  const draft = ($("#qualityReportEditor")?.value ?? state.qualityMarkdown ?? "").trim();
+  if (!draft) {
+    showToast("请先生成或填写报告草稿");
+    return;
+  }
+  state.qualityMarkdown = draft;
+  try {
+    const data = await apiPost("/api/quality/report/polish", {
+      draft_markdown: draft,
+      tone: state.qualityPolishTone || "clinical",
+      case_id: state.qualityCaseId || null,
+      mask_id: state.qualityMaskId || null,
+      metrics: state.qualityReport || null,
+    });
+    if (data.markdown) state.qualityMarkdown = data.markdown;
+    showToast(data.polished ? (data.message || "AI 润色完成") : (data.message || "未完成润色，已保留原文"));
+    await refreshQualityPolishStatus();
+    render();
+  } catch (error) {
+    showToast(error.message || "AI 润色失败");
+  }
+}
+
+async function copyQualityReportDoc() {
+  const text = ($("#qualityReportEditor")?.value ?? state.qualityMarkdown ?? "").trim();
+  if (!text) {
+    showToast("报告内容为空");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("报告已复制到剪贴板");
+  } catch {
+    showToast("复制失败，请手动选择文本");
+  }
+}
+
+function downloadQualityReportDoc() {
+  const text = ($("#qualityReportEditor")?.value ?? state.qualityMarkdown ?? "").trim();
+  if (!text) {
+    showToast("报告内容为空");
+    return;
+  }
+  const safeId = String(state.qualityMaskId || state.qualityCaseId || "report").replace(/[^\w.-]+/g, "_");
+  const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `quality_report_${safeId}.md`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+  showToast("已下载 Markdown 报告");
 }
 
 function selectedModel() {
@@ -5201,6 +5302,7 @@ async function hydrateVersions() {
 
 function renderTrain() {
   const job = state.trainJob;
+  const jobs = state.trainJobs || [];
   const defaults = state.pendingTrainDefaults || {};
   const exportId = defaults.dataset_id || state.datasetExportResult?.dataset_id || "";
   const modelDefault = defaults.model_id || job?.model_id || "";
@@ -5212,14 +5314,30 @@ function renderTrain() {
         return `<div class="bar" style="height:${Math.round(dice * 100)}%" title="E${row.epoch}"></div>`;
       }).join("")
     : `<div class="placeholder compact">训练开始后显示 Val Dice</div>`;
-  const logs = (job?.logs || []).slice(-40).join("\n") || "等待开始训练…\n同类病例会 append 进 Dataset_tumor / Dataset_other；勾选 resume 从已有权重增量续训。";
+  const logs = (job?.logs || []).slice(-40).join("\n") || "等待开始训练…\n同类病例会 append 进 Dataset_tumor / Dataset_other；勾选 resume 从已有权重增量续训。也可查看 Person B 已完成任务。";
   const status = job?.status || "idle";
+  const jobRows = jobs.length
+    ? jobs.map((item) => {
+        const source = item.metrics?.source || (String(item.job_id || "").startsWith("TrainJob_PersonB") ? "person_b" : "platform");
+        const dice = item.val_dice ?? item.metrics?.best_val_dice;
+        return `<tr>
+          <td><strong>${escapeHtml(item.job_id)}</strong></td>
+          <td><span class="status-badge">${escapeHtml(source)}</span></td>
+          <td>${escapeHtml(item.dataset_id || "-")}</td>
+          <td>${escapeHtml(item.registered_model_id || item.model_id || "-")}</td>
+          <td>${dice != null ? Number(dice).toFixed(4) : "-"}</td>
+          <td><span class="status-badge">${escapeHtml(item.status || "-")}</span></td>
+          <td>${item.current_epoch ?? "-"} / ${item.epochs ?? "-"}</td>
+          <td><button class="ghost-button" data-select-train="${escapeHtml(item.job_id)}">查看</button></td>
+        </tr>`;
+      }).join("")
+    : `<tr><td colspan="8"><div class="placeholder">暂无训练任务。</div></td></tr>`;
   return `
     <div class="grid cols-2">
       <section class="panel">
         <h2>训练配置</h2>
         ${renderRecommendedTrainPipeline("train")}
-        <p class="panel-lead">基于导出的 nnUNet 目录训练平台 <strong>2.5D U-Net</strong>。同类标注并入固定 Dataset（如 <code>Dataset_tumor</code>），勾选 <strong>resume</strong> 从 <code>ModelUNet_tumor</code> 等 checkpoint 增量续训。含「其他」(id=8) 时 Classes ≥ <strong>9</strong>。</p>
+        <p class="panel-lead">下方列表已包含 Person B 完成的 <strong>脾 nnUNet / Plan A 四器官 / DeepEdit / 平台 U-Net Demo</strong>。也可启动平台 <strong>2.5D U-Net</strong>：同类标注并入 <code>Dataset_tumor</code> / <code>Dataset_other</code>，勾选 <strong>resume</strong> 增量续训（含「其他」时 Classes ≥ 9）。</p>
         <div class="toolbar-row inference-toolbar" style="margin-top:14px; flex-wrap:wrap; gap:10px">
           <div class="field"><label>Dataset ID</label><input id="trainDatasetId" value="${escapeHtml(exportId)}" placeholder="Dataset_tumor" /></div>
           <div class="field"><label>Model ID</label><input id="trainModelId" value="${escapeHtml(modelDefault)}" placeholder="ModelUNet_tumor" /></div>
@@ -5247,9 +5365,21 @@ function renderTrain() {
           <div class="meta-line"><span>epoch</span><strong>${job?.current_epoch ?? "-"}</strong></div>
           <div class="meta-line"><span>train_loss</span><strong>${job?.train_loss != null ? Number(job.train_loss).toFixed(4) : "-"}</strong></div>
           <div class="meta-line"><span>val_dice</span><strong>${job?.val_dice != null ? Number(job.val_dice).toFixed(4) : "-"}</strong></div>
+          <div class="meta-line"><span>best_val_dice</span><strong>${job?.metrics?.best_val_dice != null ? Number(job.metrics.best_val_dice).toFixed(4) : "-"}</strong></div>
         </div>
       </section>
     </div>
+    <section class="panel" style="margin-top:18px">
+      <h2>训练任务列表</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Job</th><th>来源</th><th>Dataset</th><th>Model</th><th>Val Dice</th><th>状态</th><th>Epoch</th><th>操作</th></tr>
+          </thead>
+          <tbody>${jobRows}</tbody>
+        </table>
+      </div>
+    </section>
     <section class="panel" style="margin-top:18px">
       <h2>训练日志</h2>
       <div class="log-box" id="trainLogBox">${escapeHtml(logs)}</div>
@@ -5295,11 +5425,16 @@ async function refreshTrainJob(jobId) {
   if (!id) {
     const list = await apiGet("/api/train");
     state.trainJobs = list.items || [];
-    if (state.trainJobs[0]) state.trainJob = state.trainJobs[0];
+    const preferred =
+      state.trainJobs.find((item) => item.status === "completed" && item.metrics?.best_val_dice != null) ||
+      state.trainJobs[0];
+    if (preferred) state.trainJob = preferred;
     return state.trainJob;
   }
   const data = await apiGet(`/api/train/${id}`);
   state.trainJob = data.job;
+  const others = (state.trainJobs || []).filter((item) => item.job_id !== data.job.job_id);
+  state.trainJobs = [data.job, ...others];
   return data.job;
 }
 
@@ -5482,6 +5617,11 @@ function renderQuality() {
   const geometric = report?.geometric;
   const overlap = report?.overlap;
   const errorSlices = report?.error_slices || [];
+  const polishStatus = state.qualityPolishStatus;
+  const diceHint =
+    overlap && Number(overlap.dice) >= 0.999
+      ? `<p class="panel-lead" style="color:var(--warn,#f0c674);margin-top:8px">Dice=1.0000 表示两份 Mask 体素几乎完全相同。演示数据里 <code>*_fusion</code> 常与 AI/精标是同一份拷贝，请换真实人工 GT 再评价。</p>`
+      : "";
   const caseOptions = state.cases.map((caseItem) => `
     <option value="${escapeHtml(caseItem.case_id)}" ${caseId === caseItem.case_id ? "selected" : ""}>
       ${escapeHtml(caseItem.case_id)} · ${escapeHtml(statusText[caseItem.status] || caseItem.status)}
@@ -5505,12 +5645,14 @@ function renderQuality() {
   return `
     <section class="panel">
       <h2>质量报告</h2>
-      <p class="panel-lead">无 GT 时展示体积/连通域；有 GT 时请求 <code>/api/mask/{id}/metrics?ref=...</code> 返回 Dice / IoU / HD95 与错误切片。</p>
+      <p class="panel-lead">先拉取指标或直接<strong>生成质量报告</strong>（Markdown）。可选 AI 润色需配置 <code>REPORT_POLISH_API_KEY</code>。</p>
+      ${diceHint}
       <div class="toolbar-row" style="margin-top:12px">
         <div class="field"><label>病例</label><select id="qualityCaseSelect">${caseOptions || "<option value=''>暂无病例</option>"}</select></div>
         <div class="field"><label>评价 Mask</label><select id="qualityMaskSelect">${maskOptions}</select></div>
         <div class="field"><label>参考 GT</label><select id="qualityRefSelect">${refOptions}</select></div>
-        <button class="primary-button" data-load-quality ${masks.length ? "" : "disabled"}>拉取指标</button>
+        <button class="ghost-button" data-load-quality ${masks.length ? "" : "disabled"}>拉取指标</button>
+        <button class="primary-button" data-generate-quality-report ${masks.length ? "" : "disabled"}>生成质量报告</button>
       </div>
     </section>
 
@@ -5532,7 +5674,7 @@ function renderQuality() {
             <div class="meta-line"><span>最大连通域占比</span><strong>${formatPercent(geometric.largest_component_ratio)}</strong></div>
             <div class="meta-line"><span>切片范围</span><strong>${formatSliceRange(geometric.slice_range)}</strong></div>
           </div>
-        ` : `<div class="placeholder compact">选择 Mask 后点击「拉取指标」。</div>`}
+        ` : `<div class="placeholder compact">选择 Mask 后点击「拉取指标」或「生成质量报告」。</div>`}
       </section>
       <section class="panel">
         <h2>重叠指标（有 GT）</h2>
@@ -5546,6 +5688,33 @@ function renderQuality() {
         ` : `<div class="placeholder compact">未选择参考 GT 时仅显示几何质量。</div>`}
       </section>
     </div>
+
+    <section class="panel" style="margin-top:18px">
+      <div class="toolbar-row" style="justify-content:space-between;align-items:flex-end">
+        <div>
+          <h2 style="margin:0">${escapeHtml(state.qualityReportTitle || "报告正文（Markdown）")}</h2>
+          <p class="panel-lead" style="margin-top:6px">
+            ${polishStatus?.configured
+              ? `AI 润色已配置 · 模型 ${escapeHtml(polishStatus.model || "-")}`
+              : escapeHtml(polishStatus?.message || "未配置 AI 润色时仍可生成本地报告")}
+          </p>
+        </div>
+        <div class="toolbar-row" style="margin:0">
+          <div class="field" style="min-width:120px">
+            <label>润色风格</label>
+            <select id="qualityPolishTone">
+              <option value="clinical" ${state.qualityPolishTone === "clinical" ? "selected" : ""}>临床专业</option>
+              <option value="concise" ${state.qualityPolishTone === "concise" ? "selected" : ""}>简洁</option>
+              <option value="detailed" ${state.qualityPolishTone === "detailed" ? "selected" : ""}>详细解读</option>
+            </select>
+          </div>
+          <button class="ghost-button" data-copy-quality-report ${state.qualityMarkdown ? "" : "disabled"}>复制</button>
+          <button class="ghost-button" data-download-quality-report ${state.qualityMarkdown ? "" : "disabled"}>下载 .md</button>
+          <button class="primary-button" data-polish-quality-report ${state.qualityMarkdown ? "" : "disabled"}>AI 润色</button>
+        </div>
+      </div>
+      <textarea id="qualityReportEditor" class="quality-report-editor" rows="16" spellcheck="false" placeholder="点击「生成质量报告」后将在此显示 Markdown；也可手工编辑后再润色。">${escapeHtml(state.qualityMarkdown || "")}</textarea>
+    </section>
 
     <section class="panel" style="margin-top:18px">
       <h2>错误切片列表（可选）</h2>
@@ -5573,6 +5742,9 @@ async function hydrateQuality() {
   if (state._hydratingQuality) return;
   state._hydratingQuality = true;
   try {
+    if (!state.qualityPolishStatus) {
+      await refreshQualityPolishStatus();
+    }
     const caseId = state.qualityCaseId || activeCase()?.case_id || state.cases[0]?.case_id || "";
     if (!caseId) return;
     const needsCaseSwitch = state.qualityCaseId !== caseId || !state.qualityMasks.length;
@@ -5585,6 +5757,8 @@ async function hydrateQuality() {
         state.qualityMaskId = state.qualityMasks[0]?.mask_id || "";
       }
       state.qualityReport = null;
+      state.qualityMarkdown = "";
+      state.qualityReportTitle = "";
       render();
       return;
     }
@@ -6233,6 +6407,8 @@ function render() {
     qualityMaskSelect.addEventListener("change", () => {
       state.qualityMaskId = qualityMaskSelect.value;
       state.qualityReport = null;
+      state.qualityMarkdown = "";
+      state.qualityReportTitle = "";
     });
   }
   const qualityRefSelect = $("#qualityRefSelect");
@@ -6240,11 +6416,41 @@ function render() {
     qualityRefSelect.addEventListener("change", () => {
       state.qualityRefMaskId = qualityRefSelect.value;
       state.qualityReport = null;
+      state.qualityMarkdown = "";
+      state.qualityReportTitle = "";
     });
   }
   const loadQualityButton = $("[data-load-quality]");
   if (loadQualityButton) {
     loadQualityButton.addEventListener("click", loadQualityReport);
+  }
+  const generateQualityButton = $("[data-generate-quality-report]");
+  if (generateQualityButton) {
+    generateQualityButton.addEventListener("click", generateQualityReportDoc);
+  }
+  const polishQualityButton = $("[data-polish-quality-report]");
+  if (polishQualityButton) {
+    polishQualityButton.addEventListener("click", polishQualityReportDoc);
+  }
+  const copyQualityButton = $("[data-copy-quality-report]");
+  if (copyQualityButton) {
+    copyQualityButton.addEventListener("click", copyQualityReportDoc);
+  }
+  const downloadQualityButton = $("[data-download-quality-report]");
+  if (downloadQualityButton) {
+    downloadQualityButton.addEventListener("click", downloadQualityReportDoc);
+  }
+  const qualityPolishTone = $("#qualityPolishTone");
+  if (qualityPolishTone) {
+    qualityPolishTone.addEventListener("change", () => {
+      state.qualityPolishTone = qualityPolishTone.value || "clinical";
+    });
+  }
+  const qualityReportEditor = $("#qualityReportEditor");
+  if (qualityReportEditor) {
+    qualityReportEditor.addEventListener("input", () => {
+      state.qualityMarkdown = qualityReportEditor.value;
+    });
   }
   const finalMaskButton = $("[data-final-mask]");
   if (finalMaskButton) {
@@ -6339,6 +6545,18 @@ function render() {
       }
     });
   }
+  document.querySelectorAll("[data-select-train]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const jobId = button.getAttribute("data-select-train");
+      if (!jobId) return;
+      try {
+        await refreshTrainJob(jobId);
+        render();
+      } catch (error) {
+        showToast(error.message || "加载训练任务失败");
+      }
+    });
+  });
   const renderAnnotation3DButton = $("[data-render-annotation-3d]");
   if (renderAnnotation3DButton) {
     renderAnnotation3DButton.addEventListener("click", renderAnnotationMaskIn3D);

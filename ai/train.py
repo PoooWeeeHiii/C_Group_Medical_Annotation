@@ -48,12 +48,19 @@ class ExportSliceDataset(Dataset):
         pairs: list[tuple[Path, Path]] = []
 
         if export_dir and export_dir.is_dir():
-            images = sorted((export_dir / "imagesTr").glob("*_0000.nii.gz"))
-            for image_path in images:
-                stem = image_path.name.replace("_0000.nii.gz", "")
-                label_path = export_dir / "labelsTr" / f"{stem}.nii.gz"
-                if label_path.exists():
-                    pairs.append((image_path, label_path))
+            if split in {"val", "test"}:
+                image_dirs = [export_dir / "imagesTs"]
+            elif split == "all":
+                image_dirs = [export_dir / "imagesTr", export_dir / "imagesTs"]
+            else:
+                image_dirs = [export_dir / "imagesTr"]
+            for image_dir in image_dirs:
+                label_dir = export_dir / ("labelsTs" if image_dir.name == "imagesTs" else "labelsTr")
+                for image_path in sorted(image_dir.glob("*_0000.nii.gz")):
+                    stem = image_path.name.replace("_0000.nii.gz", "")
+                    label_path = label_dir / f"{stem}.nii.gz"
+                    if label_path.exists():
+                        pairs.append((image_path, label_path))
             # Use Ts as extra train data when train split is thin.
             if split in {"train", "all"} and len(pairs) < 4:
                 for image_path in sorted((export_dir / "imagesTs").glob("*_0000.nii.gz")):

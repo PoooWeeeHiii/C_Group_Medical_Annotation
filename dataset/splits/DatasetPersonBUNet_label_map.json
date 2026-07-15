@@ -1,0 +1,8 @@
+{
+  "background": 0,
+  "liver": 1,
+  "kidney": 2,
+  "lung": 3,
+  "spleen": 4,
+  "heart": 5
+}

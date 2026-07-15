@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.api import ai, auth, cases, datasets, images, labels, masks, surgery, tasks, train, upload, versions
+from backend.app.api import ai, auth, cases, datasets, images, labels, masks, report, surgery, tasks, train, upload, versions
 from backend.app.core.config import PROJECT_ROOT, ensure_project_dirs
 from backend.app.services.sqlite_service import ensure_sqlite_ready
 
@@ -67,6 +67,7 @@ app.include_router(upload.router)
 app.include_router(cases.router)
 app.include_router(images.router)
 app.include_router(masks.router)
+app.include_router(report.router)
 app.include_router(versions.router)
 app.include_router(surgery.router)
 app.include_router(datasets.router)

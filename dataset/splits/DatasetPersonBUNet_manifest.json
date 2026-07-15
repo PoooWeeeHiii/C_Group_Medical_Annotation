@@ -1,0 +1,146 @@
+{
+  "dataset_id": "DatasetPersonBUNet",
+  "name": "person_b_platform_unet_from_deepedit",
+  "version": "pseudo_deepedit",
+  "label_set": "dense",
+  "format": "nnunet",
+  "materialize": true,
+  "counts": {
+    "train": 9,
+    "val": 3,
+    "test": 0,
+    "total": 12
+  },
+  "label_map": {
+    "background": 0,
+    "liver": 1,
+    "kidney": 2,
+    "lung": 3,
+    "spleen": 4,
+    "heart": 5
+  },
+  "records": [
+    {
+      "split": "train",
+      "case_id": "spleen_10",
+      "image_id": "spleen_10",
+      "image_path": "dataset/exports/DatasetPersonBUNet/imagesTr/spleen_10_0000.nii.gz",
+      "mask_path": "dataset/exports/DatasetPersonBUNet/labelsTr/spleen_10.nii.gz",
+      "nnunet_id": "spleen_10",
+      "label": "multiclass",
+      "version": "pseudo_deepedit"
+    },
+    {
+      "split": "train",
+      "case_id": "spleen_12",
+      "image_id": "spleen_12",
+      "image_path": "dataset/exports/DatasetPersonBUNet/imagesTr/spleen_12_0000.nii.gz",
+      "mask_path": "dataset/exports/DatasetPersonBUNet/labelsTr/spleen_12.nii.gz",
+      "nnunet_id": "spleen_12",
+      "label": "multiclass",
+      "version": "pseudo_deepedit"
+    },
+    {
+      "split": "train",
+      "case_id": "spleen_13",
+      "image_id": "spleen_13",
+      "image_path": "dataset/exports/DatasetPersonBUNet/imagesTr/spleen_13_0000.nii.gz",
+      "mask_path": "dataset/exports/DatasetPersonBUNet/labelsTr/spleen_13.nii.gz",
+      "nnunet_id": "spleen_13",
+      "label": "multiclass",
+      "version": "pseudo_deepedit"
+    },
+    {
+      "split": "train",
+      "case_id": "spleen_14",
+      "image_id": "spleen_14",
+      "image_path": "dataset/exports/DatasetPersonBUNet/imagesTr/spleen_14_0000.nii.gz",
+      "mask_path": "dataset/exports/DatasetPersonBUNet/labelsTr/spleen_14.nii.gz",
+      "nnunet_id": "spleen_14",
+      "label": "multiclass",
+      "version": "pseudo_deepedit"
+    },
+    {
+      "split": "train",
+      "case_id": "spleen_16",
+      "image_id": "spleen_16",
+      "image_path": "dataset/exports/DatasetPersonBUNet/imagesTr/spleen_16_0000.nii.gz",
+      "mask_path": "dataset/exports/DatasetPersonBUNet/labelsTr/spleen_16.nii.gz",
+      "nnunet_id": "spleen_16",
+      "label": "multiclass",
+      "version": "pseudo_deepedit"
+    },
+    {
+      "split": "train",
+      "case_id": "spleen_17",
+      "image_id": "spleen_17",
+      "image_path": "dataset/exports/DatasetPersonBUNet/imagesTr/spleen_17_0000.nii.gz",
+      "mask_path": "dataset/exports/DatasetPersonBUNet/labelsTr/spleen_17.nii.gz",
+      "nnunet_id": "spleen_17",
+      "label": "multiclass",
+      "version": "pseudo_deepedit"
+    },
+    {
+      "split": "train",
+      "case_id": "spleen_18",
+      "image_id": "spleen_18",
+      "image_path": "dataset/exports/DatasetPersonBUNet/imagesTr/spleen_18_0000.nii.gz",
+      "mask_path": "dataset/exports/DatasetPersonBUNet/labelsTr/spleen_18.nii.gz",
+      "nnunet_id": "spleen_18",
+      "label": "multiclass",
+      "version": "pseudo_deepedit"
+    },
+    {
+      "split": "train",
+      "case_id": "spleen_19",
+      "image_id": "spleen_19",
+      "image_path": "dataset/exports/DatasetPersonBUNet/imagesTr/spleen_19_0000.nii.gz",
+      "mask_path": "dataset/exports/DatasetPersonBUNet/labelsTr/spleen_19.nii.gz",
+      "nnunet_id": "spleen_19",
+      "label": "multiclass",
+      "version": "pseudo_deepedit"
+    },
+    {
+      "split": "train",
+      "case_id": "spleen_2",
+      "image_id": "spleen_2",
+      "image_path": "dataset/exports/DatasetPersonBUNet/imagesTr/spleen_2_0000.nii.gz",
+      "mask_path": "dataset/exports/DatasetPersonBUNet/labelsTr/spleen_2.nii.gz",
+      "nnunet_id": "spleen_2",
+      "label": "multiclass",
+      "version": "pseudo_deepedit"
+    },
+    {
+      "split": "val",
+      "case_id": "spleen_20",
+      "image_id": "spleen_20",
+      "image_path": "dataset/exports/DatasetPersonBUNet/imagesTs/spleen_20_0000.nii.gz",
+      "mask_path": "dataset/exports/DatasetPersonBUNet/labelsTs/spleen_20.nii.gz",
+      "nnunet_id": "spleen_20",
+      "label": "multiclass",
+      "version": "pseudo_deepedit"
+    },
+    {
+      "split": "val",
+      "case_id": "spleen_21",
+      "image_id": "spleen_21",
+      "image_path": "dataset/exports/DatasetPersonBUNet/imagesTs/spleen_21_0000.nii.gz",
+      "mask_path": "dataset/exports/DatasetPersonBUNet/labelsTs/spleen_21.nii.gz",
+      "nnunet_id": "spleen_21",
+      "label": "multiclass",
+      "version": "pseudo_deepedit"
+    },
+    {
+      "split": "val",
+      "case_id": "spleen_22",
+      "image_id": "spleen_22",
+      "image_path": "dataset/exports/DatasetPersonBUNet/imagesTs/spleen_22_0000.nii.gz",
+      "mask_path": "dataset/exports/DatasetPersonBUNet/labelsTs/spleen_22.nii.gz",
+      "nnunet_id": "spleen_22",
+      "label": "multiclass",
+      "version": "pseudo_deepedit"
+    }
+  ],
+  "export_dir": "dataset/exports/DatasetPersonBUNet",
+  "notes": "Built for observable platform 2.5D U-Net demo; labels are DeepEdit/TotalSeg pseudo."
+}

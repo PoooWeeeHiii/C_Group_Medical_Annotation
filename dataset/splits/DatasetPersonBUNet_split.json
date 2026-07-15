@@ -1,0 +1,20 @@
+{
+  "dataset_id": "DatasetPersonBUNet",
+  "train": [
+    "spleen_10",
+    "spleen_12",
+    "spleen_13",
+    "spleen_14",
+    "spleen_16",
+    "spleen_17",
+    "spleen_18",
+    "spleen_19",
+    "spleen_2"
+  ],
+  "val": [
+    "spleen_20",
+    "spleen_21",
+    "spleen_22"
+  ],
+  "test": []
+}

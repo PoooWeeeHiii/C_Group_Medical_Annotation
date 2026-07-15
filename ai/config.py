@@ -64,7 +64,14 @@ IMAGES_DIR = DATASET_ROOT / "images"
 LABELS_DIR = DATASET_ROOT / "labels"
 SPLITS_DIR = DATASET_ROOT / "splits"
 
-# Local spleen nnUNet weights (Person B machine: E:\lxy\hm_2_spleen)
+# Local spleen nnUNet weights (bundled under models/nnunet when present)
+_BUNDLED_SPLEEN_MODEL = (
+    PROJECT_ROOT
+    / "models"
+    / "nnunet"
+    / "Dataset506_Spleen"
+    / "nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres"
+)
 _DEFAULT_SPLEEN_ROOT = Path(os.environ.get("SPLEEN_NNUNET_ROOT", r"E:\lxy\hm_2_spleen"))
 SPLEEN_NNUNET_ROOT = _DEFAULT_SPLEEN_ROOT
 SPLEEN_NNUNET_RESULTS = Path(
@@ -74,16 +81,16 @@ SPLEEN_NNUNET_RAW = Path(os.environ.get("nnUNet_raw", str(SPLEEN_NNUNET_ROOT / "
 SPLEEN_NNUNET_PREPROCESSED = Path(
     os.environ.get("nnUNet_preprocessed", str(SPLEEN_NNUNET_ROOT / "nnUNet_preprocessed"))
 )
-SPLEEN_MODEL_DIR = Path(
-    os.environ.get(
-        "SPLEEN_MODEL_DIR",
-        str(
-            SPLEEN_NNUNET_RESULTS
-            / "Dataset506_Spleen"
-            / "nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres"
-        ),
+_default_spleen_model = (
+    _BUNDLED_SPLEEN_MODEL
+    if (_BUNDLED_SPLEEN_MODEL / "fold_0" / "checkpoint_best.pth").exists()
+    else (
+        SPLEEN_NNUNET_RESULTS
+        / "Dataset506_Spleen"
+        / "nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres"
     )
 )
+SPLEEN_MODEL_DIR = Path(os.environ.get("SPLEEN_MODEL_DIR", str(_default_spleen_model)))
 SPLEEN_CHECKPOINT_NAME = os.environ.get("SPLEEN_CHECKPOINT_NAME", "checkpoint_best.pth")
 SPLEEN_DATASET_ID = os.environ.get("SPLEEN_DATASET_ID", "506")
 SPLEEN_CONFIGURATION = os.environ.get("SPLEEN_CONFIGURATION", "3d_fullres")
@@ -94,11 +101,18 @@ SPLEEN_NNUNET_PYTHON = os.environ.get(
     r"D:\anaconda\python.exe",
 )
 
-# Plan A multi-organ nnUNet (heart/liver/lung/kidney) — keep separate from spleen root
+# Plan A multi-organ nnUNet (heart/liver/lung/kidney)
+# Prefer bundled models/nnunet when Dataset510 checkpoint exists.
+_BUNDLED_ORGANS_RESULTS = PROJECT_ROOT / "models" / "nnunet"
 _DEFAULT_ORGANS_ROOT = Path(os.environ.get("ORGANS_NNUNET_ROOT", r"E:\lxy\hm_2_organs_nnunet"))
 ORGANS_NNUNET_ROOT = _DEFAULT_ORGANS_ROOT
+_default_organs_results = (
+    _BUNDLED_ORGANS_RESULTS
+    if (_BUNDLED_ORGANS_RESULTS / "Dataset511_DeepEdit_Liver" / "nnUNetTrainer_100epochs__nnUNetPlans__3d_fullres" / "fold_0" / "checkpoint_best.pth").exists()
+    else (ORGANS_NNUNET_ROOT / "nnUNet_results")
+)
 ORGANS_NNUNET_RESULTS = Path(
-    os.environ.get("ORGANS_NNUNET_RESULTS", str(ORGANS_NNUNET_ROOT / "nnUNet_results"))
+    os.environ.get("ORGANS_NNUNET_RESULTS", str(_default_organs_results))
 )
 ORGANS_NNUNET_RAW = Path(os.environ.get("ORGANS_NNUNET_RAW", str(ORGANS_NNUNET_ROOT / "nnUNet_raw")))
 ORGANS_NNUNET_PREPROCESSED = Path(
