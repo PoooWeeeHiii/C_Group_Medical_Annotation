@@ -1991,9 +1991,11 @@ function renderWithWebGL({
             <canvas class="gesture-overlay" data-gesture-overlay></canvas>
             <div class="gesture-frame-guide" aria-hidden="true"></div>
           </div>
-          <div class="gesture-live" data-gesture-live>当前：-</div>
-          <div class="gesture-organ" data-gesture-organ>悬停：-</div>
-          <div class="gesture-selected" data-gesture-selected>已选：无</div>
+          <div class="gesture-live-row">
+            <div class="gesture-live" data-gesture-live>当前：-</div>
+            <div class="gesture-organ" data-gesture-organ>悬停：-</div>
+            <div class="gesture-selected" data-gesture-selected>已选：无</div>
+          </div>
         </div>
         <div class="gesture-stage-side">
           <div class="gesture-status" data-gesture-status>摄像头未开启</div>
@@ -2017,40 +2019,43 @@ function renderWithWebGL({
           <div class="gesture-surgery-panel hidden" data-surgery-panel>
             <div class="surgery-status" data-surgery-status>模拟手术待命</div>
             <div class="surgery-steps" data-surgery-steps>
-              <span data-step-chip="select">1. 选器官</span>
-              <span data-step-chip="roi">2. 确定ROI大小</span>
-              <span data-step-chip="cut">3. 开始切割</span>
+              <span data-step-chip="select">1 选器官</span>
+              <span data-step-chip="roi">2 定 ROI</span>
+              <span data-step-chip="cut">3 切割</span>
             </div>
-            <small class="surgery-step-tip" data-surgery-step-tip>先选中器官，再调节并确认长方体 ROI，最后才可在盒内切割。</small>
-            <label class="surgery-row">
-              <span>疑似肿瘤高亮</span>
-              <input type="checkbox" data-surgery-tumor-hl checked />
-            </label>
-            <label class="surgery-row">
-              <span>ROI 边距 <em data-roi-margin-label>18%</em></span>
-              <input type="range" min="0" max="40" step="1" value="18" data-roi-margin />
-            </label>
+            <small class="surgery-step-tip" data-surgery-step-tip>选器官 → 确认 ROI → 盒内切割</small>
+            <div class="surgery-controls-grid">
+              <label class="surgery-row surgery-row--check">
+                <span>肿瘤高亮</span>
+                <input type="checkbox" data-surgery-tumor-hl checked />
+              </label>
+              <label class="surgery-row">
+                <span>ROI 边距 <em data-roi-margin-label>18%</em></span>
+                <input type="range" min="0" max="40" step="1" value="18" data-roi-margin />
+              </label>
+              <label class="surgery-row">
+                <span>刀厚 <em data-knife-radius-label>2</em></span>
+                <input type="range" min="1" max="8" step="1" value="2" data-knife-radius />
+              </label>
+            </div>
             <button type="button" class="primary-button surgery-confirm-roi hidden" data-surgery-confirm-roi>
               确定长方体 ROI 大小
             </button>
-            <label class="surgery-row">
-              <span>刀面厚度 <em data-knife-radius-label>2</em></span>
-              <input type="range" min="1" max="8" step="1" value="2" data-knife-radius />
-            </label>
             <div class="gesture-actions surgery-actions">
-              <button type="button" class="ghost-button" data-surgery-swap-hands>对调刀/视图手</button>
-              <button type="button" class="ghost-button" data-surgery-undo>撤销上一刀</button>
-              <button type="button" class="ghost-button" data-surgery-reset>重置切割</button>
-              <button type="button" class="primary-button" data-surgery-save>保存手术ROI到数据库</button>
-              <button type="button" class="danger-button" data-surgery-exit>退出模拟手术</button>
+              <button type="button" class="ghost-button" data-surgery-swap-hands>对调双手</button>
+              <button type="button" class="ghost-button" data-surgery-undo>撤销</button>
+              <button type="button" class="ghost-button" data-surgery-reset>重置</button>
+              <button type="button" class="primary-button" data-surgery-save>保存 ROI</button>
+              <button type="button" class="ghost-button" data-surgery-export-robot>导出路径 JSON</button>
+              <button type="button" class="danger-button" data-surgery-exit>退出手术</button>
             </div>
-            <details class="gesture-help" open>
-              <summary>模拟手术流程</summary>
+            <details class="gesture-help surgery-help">
+              <summary>流程说明</summary>
               <div class="gesture-hint">
-                <div><b>第1步</b>：左手指向器官 → 捏一下选中</div>
-                <div><b>第2步</b>：调节「ROI 边距」预览长方体大小 → 点「确定长方体 ROI 大小」</div>
-                <div><b>第3步</b>：右手立掌在已确认的长方体内切割 · 捏合收刀留痕</div>
-                <div><b>结果</b>：确认后的长方体 + 刀痕切面 = 精修多面体 ROI，可保存入库</div>
+                <div><b>1</b> 指向器官 → 捏选中</div>
+                <div><b>2</b> 调边距 →「确定 ROI」</div>
+                <div><b>3</b> 立掌切割 · 捏合收刀留痕</div>
+                <div><b>保存</b> 生成 LPS/RAS 机器臂路径草案</div>
               </div>
             </details>
           </div>
@@ -2118,6 +2123,8 @@ function renderWithWebGL({
   /** Completed knife faces that refine the cuboid ROI into a polyhedron. */
   let cutPlanes = [];
   let pendingCutPlane = null;
+  let pendingCutStartedAt = null;
+  let lastSavedSurgeryResultId = null;
   /** Surgery workflow: select organ → confirm cuboid size → cut */
   let surgeryStep = "select"; // select | roi | cut
   let roiConfirmed = false;
@@ -2336,12 +2343,16 @@ function renderWithWebGL({
     const keepSign = chooseKeepSign(plane, box);
     const polygon = planeBoxIntersection(plane, box);
     if (polygon.length < 3) return null;
+    const endedAt = new Date().toISOString();
     const cut = {
       origin: [...plane.origin],
       normal: [...plane.normal],
       keepSign,
       polygon,
+      started_at: pendingCutStartedAt || endedAt,
+      ended_at: endedAt,
     };
+    pendingCutStartedAt = null;
     cutPlanes.push(cut);
     if (cutPlanes.length > 24) cutPlanes.shift();
     return cut;
@@ -2660,6 +2671,7 @@ function renderWithWebGL({
     const navHelp = gesturePanel.querySelector("[data-nav-help]");
     const ready = Boolean(organsReady || inferOrgansReadyFromMask());
     if (!organsReady && ready) organsReady = true;
+    gesturePanel.classList.toggle("is-surgery", Boolean(surgeryMode));
     if (entry) {
       // Always show the entry while gesture is on, so users can find「模拟手术」.
       entry.classList.toggle("hidden", !runningGesture || surgeryMode);
@@ -2672,8 +2684,8 @@ function renderWithWebGL({
     }
     if (hint) {
       hint.textContent = ready
-        ? "已就绪：将高亮疑似肿瘤，并启用双手刀/视图控制。"
-        : "暂不可用：尚未检测到多器官 Mask。请用「开始手势控制」先跑全器官，或手动 AI 预测「全部标注」。";
+        ? "已就绪：双手刀/视图 · 疑似肿瘤可高亮"
+        : "需先有多器官 Mask（「开始手势控制」或 AI「全部标注」）";
     }
     if (panel) panel.classList.toggle("hidden", !surgeryMode);
     if (navHelp) navHelp.classList.toggle("hidden", surgeryMode);
@@ -2986,6 +2998,10 @@ function renderWithWebGL({
     const ok = requestSaveSurgeryResult();
     if (ok) gestureStatus("正在保存手术 ROI 到数据库…");
   });
+  gesturePanel.querySelector("[data-surgery-export-robot]")?.addEventListener("click", () => {
+    requestExportRobotPath();
+    gestureStatus("正在导出机器臂路径 JSON…");
+  });
   gesturePanel.querySelector("[data-surgery-confirm-roi]")?.addEventListener("click", () => {
     confirmCuboidRoi();
   });
@@ -3128,6 +3144,7 @@ function renderWithWebGL({
                   pushUndoSnapshot();
                   knifeStrokeActive = true;
                   pendingCutPlane = null;
+                  pendingCutStartedAt = new Date().toISOString();
                   surgeryStep = "cut";
                   syncSurgeryStepUi("cut");
                 }
@@ -3291,6 +3308,9 @@ function renderWithWebGL({
       || (Array.isArray(viewerState.labelPalette?.[labelId])
         ? `#${viewerState.labelPalette[labelId].map((v) => Math.round(Number(v) * 255).toString(16).padStart(2, "0")).join("")}`
         : "#00e5b0");
+    const dims = Array.isArray(volumeData?.dimensions)
+      ? volumeData.dimensions.map((v) => Number(v) || 0)
+      : null;
     return {
       surgeryMode,
       labelId,
@@ -3308,6 +3328,15 @@ function renderWithWebGL({
       carvedVoxels,
       roiConfirmed,
       surgeryStep,
+      lastSavedSurgeryResultId,
+      volumeMeta: {
+        width: dims ? dims[0] : undefined,
+        height: dims ? dims[1] : undefined,
+        slice_count: dims ? dims[2] : undefined,
+        spacing: Array.isArray(volumeData?.spacing) ? volumeData.spacing.map(Number) : null,
+        origin: Array.isArray(volumeData?.origin) ? volumeData.origin.map(Number) : null,
+        direction: Array.isArray(volumeData?.direction) ? volumeData.direction.map(Number) : null,
+      },
       cuboid: box
         ? {
             min: [...box.min],
@@ -3320,6 +3349,12 @@ function renderWithWebGL({
         normal: [...cut.normal],
         keepSign: cut.keepSign,
         polygon: (cut.polygon || []).map((p) => [...p]),
+        started_at: cut.started_at || null,
+        ended_at: cut.ended_at || null,
+      })),
+      cut_timestamps: cutPlanes.map((cut) => ({
+        started_at: cut.started_at || null,
+        ended_at: cut.ended_at || null,
       })),
     };
   }
@@ -3338,6 +3373,23 @@ function renderWithWebGL({
     return true;
   }
 
+  function requestExportRobotPath() {
+    const snap = getSurgerySnapshot();
+    container.dispatchEvent(
+      new CustomEvent("surgery-robot-path-export", {
+        detail: {
+          ...snap,
+          result_id: lastSavedSurgeryResultId,
+        },
+      }),
+    );
+    return true;
+  }
+
+  function setLastSavedSurgeryResultId(resultId) {
+    lastSavedSurgeryResultId = resultId ? String(resultId) : null;
+  }
+
   const viewerApi = {
     startGestureAfterPrep,
     enterSurgeryMode,
@@ -3345,6 +3397,8 @@ function renderWithWebGL({
     setOrgansReady,
     getSurgerySnapshot,
     requestSaveSurgeryResult,
+    requestExportRobotPath,
+    setLastSavedSurgeryResultId,
     isGestureRunning: () => Boolean(gestureController?.isRunning?.()),
     isSurgeryMode: () => surgeryMode,
   };

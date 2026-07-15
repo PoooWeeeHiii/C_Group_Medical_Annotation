@@ -194,6 +194,7 @@ CREATE TABLE IF NOT EXISTS surgery_results (
     user_id INTEGER,
     username TEXT,
     note TEXT,
+    robot_plan_json TEXT,
     create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_time TEXT,
     FOREIGN KEY (case_id) REFERENCES cases(case_id) ON DELETE CASCADE,
