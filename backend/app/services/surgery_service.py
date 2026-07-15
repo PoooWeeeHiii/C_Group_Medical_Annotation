@@ -69,6 +69,8 @@ def ensure_surgery_schema(connection=None) -> None:
             alter_statements.append("ALTER TABLE surgery_results ADD COLUMN organ_color TEXT")
         if "organ_json" not in cols:
             alter_statements.append("ALTER TABLE surgery_results ADD COLUMN organ_json TEXT")
+        if "robot_plan_json" not in cols:
+            alter_statements.append("ALTER TABLE surgery_results ADD COLUMN robot_plan_json TEXT")
         for sql in alter_statements:
             connection.execute(sql)
         if owns:
@@ -124,6 +126,8 @@ def _normalize_cut_planes(raw_planes: list[Any]) -> list[dict[str, Any]]:
                 "normal": normal,
                 "keepSign": keep_sign,
                 "polygon": polygon,
+                "started_at": data.get("started_at"),
+                "ended_at": data.get("ended_at"),
             }
         )
     return planes
@@ -180,6 +184,20 @@ def _resolve_organ_fields(request: SaveSurgeryResultRequest) -> dict[str, Any]:
     }
 
 
+def _parse_robot_plan(raw: Any) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
 def _public(row: dict[str, Any] | Any) -> SurgeryResultRecord:
     data = dict(row)
     organ_json = data.get("organ_json")
@@ -218,7 +236,33 @@ def _public(row: dict[str, Any] | Any) -> SurgeryResultRecord:
         note=str(data["note"]) if data.get("note") else None,
         create_time=str(data.get("create_time") or ""),
         update_time=str(data["update_time"]) if data.get("update_time") else None,
+        robot_plan=_parse_robot_plan(data.get("robot_plan_json")),
     )
+
+
+def _overrides_dict(request: SaveSurgeryResultRequest) -> dict[str, Any]:
+    raw = request.robot_plan_overrides
+    if raw is None:
+        return {}
+    if hasattr(raw, "model_dump"):
+        data = raw.model_dump(exclude_none=True)
+    else:
+        data = dict(raw or {})
+    return {k: v for k, v in data.items() if v is not None}
+
+
+def _cut_timestamps_from_request(request: SaveSurgeryResultRequest, cut_planes: list[dict]) -> list[dict[str, Any]]:
+    if request.cut_timestamps:
+        return list(request.cut_timestamps)
+    out: list[dict[str, Any]] = []
+    for plane in cut_planes:
+        out.append(
+            {
+                "started_at": plane.get("started_at"),
+                "ended_at": plane.get("ended_at"),
+            }
+        )
+    return out
 
 
 def save_surgery_result(
@@ -255,17 +299,36 @@ def save_surgery_result(
     user_id = int(user["id"]) if user and user.get("id") is not None else None
     username = str(user.get("username") or "") if user else None
 
+    from backend.app.services.robot_plan_service import build_robot_plan
+
     with connect() as connection:
         ensure_surgery_schema(connection)
         result_id = _next_result_id(connection)
+        robot_plan = build_robot_plan(
+            image_id=str(request.image_id),
+            case_id=str(request.case_id),
+            mask_id=str(request.mask_id) if request.mask_id else None,
+            label_id=int(request.label_id),
+            organ=organ_fields["organ"],
+            cuboid_min=cuboid_min,
+            cuboid_max=cuboid_max,
+            cut_planes=cut_planes,
+            knife_radius=int(request.knife_radius),
+            carved_voxels=max(0, int(request.carved_voxels or 0)),
+            result_id=result_id,
+            cut_timestamps=_cut_timestamps_from_request(request, cut_planes),
+            overrides=_overrides_dict(request),
+            volume_meta=request.volume_meta,
+        )
         connection.execute(
             """
             INSERT INTO surgery_results (
                 result_id, case_id, image_id, mask_id, label_id,
                 organ_name, organ_display_name, organ_color, organ_json,
                 roi_margin_pct, knife_radius, cuboid_min, cuboid_max,
-                cut_planes, carved_voxels, user_id, username, note, create_time
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cut_planes, carved_voxels, user_id, username, note, create_time,
+                robot_plan_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 result_id,
@@ -287,6 +350,7 @@ def save_surgery_result(
                 username,
                 (request.note or "").strip() or None,
                 now,
+                json.dumps(robot_plan, ensure_ascii=False),
             ),
         )
         connection.commit()
@@ -294,7 +358,6 @@ def save_surgery_result(
             "SELECT * FROM surgery_results WHERE result_id = ?",
             (result_id,),
         ).fetchone()
-
     item = _public(row)
     try:
         from backend.app.services.workflow_service import append_audit_log
@@ -313,18 +376,22 @@ def save_surgery_result(
                 "organ": organ_fields["organ"],
                 "cut_planes": len(cut_planes),
                 "carved_voxels": item.carved_voxels,
+                "robot_plan_status": (robot_plan or {}).get("status"),
             },
         )
     except Exception:
         pass
 
+    path_count = len((robot_plan or {}).get("tool_paths") or [])
     return SaveSurgeryResultResponse(
         success=True,
         result_id=result_id,
         item=item,
+        robot_plan=robot_plan,
         message=(
             f"手术 ROI 已保存：{result_id}"
-            f"（器官={organ_fields['organ_display_name']}，刀痕面 {len(cut_planes)}）"
+            f"（器官={organ_fields['organ_display_name']}，刀痕面 {len(cut_planes)}，"
+            f"机器臂路径 {path_count} 段）"
         ),
     )
 
@@ -362,3 +429,28 @@ def get_surgery_result(result_id: str) -> SurgeryResultRecord:
     if row is None:
         raise HTTPException(status_code=404, detail=f"Surgery result not found: {result_id}")
     return _public(row)
+
+
+def export_robot_path(result_id: str, *, rebuild: bool = False) -> dict[str, Any]:
+    """Return robot_plan JSON for download; rebuild if missing or requested."""
+    from backend.app.services.robot_plan_service import rebuild_robot_plan_from_record
+
+    item = get_surgery_result(result_id)
+    if item.robot_plan and not rebuild:
+        plan = dict(item.robot_plan)
+        plan["result_id"] = item.result_id
+        return plan
+    plan = rebuild_robot_plan_from_record(item)
+    # Persist rebuilt plan for next export.
+    with connect() as connection:
+        ensure_surgery_schema(connection)
+        connection.execute(
+            """
+            UPDATE surgery_results
+            SET robot_plan_json = ?, update_time = ?
+            WHERE result_id = ?
+            """,
+            (json.dumps(plan, ensure_ascii=False), _now_iso(), result_id),
+        )
+        connection.commit()
+    return plan

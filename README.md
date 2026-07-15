@@ -335,7 +335,10 @@ USE_REACT_FRONTEND=1 uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 1. 在 3D 中选中目标器官  
 2. 确认长方体 ROI 大小（未确认前不可切割）  
 3. 进入切割；收刀后保留刀痕面  
-4. 保存：写入 `surgery_results`（含 `organ_name` / `organ_display_name` / `organ_color` 等）  
+4. 保存：写入 `surgery_results`（含 `organ_name` / `organ_display_name` / `organ_color` 等），并自动生成 **机器臂路径草案** `robot_plan`（LPS 为主、并行 RAS、模拟配准）  
+5. 导出：面板「导出机器臂路径 JSON」，或 `GET /api/surgery_results/{result_id}/robot_path`  
+
+坐标约定与 schema 见 [`docs/19_robot_path_coord_convention.md`](docs/19_robot_path_coord_convention.md)。  
 
 ### 8. 审核与导出
 
@@ -418,6 +421,7 @@ uvicorn backend.app.main:app --host 127.0.0.1 --port 8001
 | [`docs/16_hitl_fusion_loop.md`](docs/16_hitl_fusion_loop.md) | 人机闭环再训 |
 | [`docs/17_system_test_plan.md`](docs/17_system_test_plan.md) | 系统测试计划 |
 | [`docs/18_manual_ui_checklist.md`](docs/18_manual_ui_checklist.md) | 人工 UI 检查 |
+| [`docs/19_robot_path_coord_convention.md`](docs/19_robot_path_coord_convention.md) | 手术机器臂路径坐标约定与导出 |
 | [`backend/README.md`](backend/README.md) | 后端说明 |
 | [`web/README.md`](web/README.md) | React 前端说明 |
 | [`models/README.md`](models/README.md) | 权重布局 |
