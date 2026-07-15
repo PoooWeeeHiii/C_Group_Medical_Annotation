@@ -160,7 +160,10 @@ export interface MaskMetricsReport {
     volume_ml?: number;
     connected_component_count?: number;
     largest_component_ratio?: number;
-    slice_range?: number[] | string;
+    slice_range?:
+      | number[]
+      | string
+      | { start?: number | null; end?: number | null; count?: number | null };
   } | null;
   overlap?: {
     dice?: number;
@@ -177,6 +180,33 @@ export interface MaskMetricsReport {
     pred_voxels?: number;
     ref_voxels?: number;
   }>;
+}
+
+export interface QualityReportGenerateResult {
+  success?: boolean;
+  mask_id: string;
+  ref_mask_id?: string | null;
+  case_id?: string | null;
+  title: string;
+  markdown: string;
+  metrics?: MaskMetricsReport;
+  message?: string;
+}
+
+export interface ReportPolishStatus {
+  success?: boolean;
+  configured: boolean;
+  model?: string | null;
+  base_url?: string | null;
+  message?: string;
+}
+
+export interface ReportPolishResult {
+  success?: boolean;
+  polished: boolean;
+  markdown: string;
+  model?: string | null;
+  message?: string;
 }
 
 export interface DatasetExportResult {

@@ -1,16 +1,47 @@
 import { useCallback, useEffect, useState } from "react";
-import { apiGet } from "../api/client";
+import { apiGet, apiPost } from "../api/client";
 import { useToast } from "../components/Toast";
-import type { CaseDetail, CaseItem, ImageItem, MaskItem, MaskMetricsReport } from "../types";
+import type {
+  CaseDetail,
+  CaseItem,
+  ImageItem,
+  MaskItem,
+  MaskMetricsReport,
+  QualityReportGenerateResult,
+  ReportPolishResult,
+  ReportPolishStatus,
+} from "../types";
 import { STATUS_TEXT } from "../types";
 
 function isNiftiMask(mask: MaskItem) {
   return mask.mask_format === "nii.gz" || String(mask.path || "").endsWith(".nii.gz");
 }
 
-function formatSliceRange(range: number[] | string | undefined) {
+function formatSliceRange(
+  range?:
+    | number[]
+    | string
+    | { start?: number | null; end?: number | null; count?: number | null }
+    | null,
+) {
+  if (range == null) return "-";
   if (Array.isArray(range)) return range.join(" - ");
-  return range || "-";
+  if (typeof range === "object") {
+    if (range.start == null && range.end == null) return "-";
+    const base = `${range.start ?? "-"} – ${range.end ?? "-"}`;
+    return range.count != null ? `${base}（${range.count} 层）` : base;
+  }
+  return String(range);
+}
+
+function downloadText(filename: string, content: string) {
+  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 export function QualityPage({ refreshKey }: { refreshKey: number }) {
@@ -21,7 +52,13 @@ export function QualityPage({ refreshKey }: { refreshKey: number }) {
   const [maskId, setMaskId] = useState("");
   const [refMaskId, setRefMaskId] = useState("");
   const [report, setReport] = useState<MaskMetricsReport | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [markdown, setMarkdown] = useState("");
+  const [reportTitle, setReportTitle] = useState("");
+  const [tone, setTone] = useState<"clinical" | "concise" | "detailed">("clinical");
+  const [polishStatus, setPolishStatus] = useState<ReportPolishStatus | null>(null);
+  const [loadingMetrics, setLoadingMetrics] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [polishing, setPolishing] = useState(false);
 
   const loadCases = useCallback(async () => {
     try {
@@ -68,13 +105,29 @@ export function QualityPage({ refreshKey }: { refreshKey: number }) {
     }
   }, []);
 
+  const loadPolishStatus = useCallback(async () => {
+    try {
+      const data = await apiGet<ReportPolishStatus>("/api/quality/report/polish/status");
+      setPolishStatus(data);
+    } catch {
+      setPolishStatus({
+        success: false,
+        configured: false,
+        message: "无法读取润色服务状态",
+      });
+    }
+  }, []);
+
   useEffect(() => {
     void loadCases();
-  }, [loadCases, refreshKey]);
+    void loadPolishStatus();
+  }, [loadCases, loadPolishStatus, refreshKey]);
 
   useEffect(() => {
     void loadMasks(caseId);
     setReport(null);
+    setMarkdown("");
+    setReportTitle("");
   }, [caseId, loadMasks, refreshKey]);
 
   async function loadMetrics() {
@@ -82,7 +135,7 @@ export function QualityPage({ refreshKey }: { refreshKey: number }) {
       showToast("请先选择要评价的 Mask 版本");
       return;
     }
-    setLoading(true);
+    setLoadingMetrics(true);
     try {
       const query = refMaskId ? `?ref=${encodeURIComponent(refMaskId)}` : "";
       const data = await apiGet<MaskMetricsReport>(`/api/mask/${maskId}/metrics${query}`);
@@ -91,21 +144,97 @@ export function QualityPage({ refreshKey }: { refreshKey: number }) {
     } catch (error) {
       showToast(error instanceof Error ? error.message : "质量指标加载失败");
     } finally {
-      setLoading(false);
+      setLoadingMetrics(false);
     }
+  }
+
+  async function generateReport() {
+    if (!maskId) {
+      showToast("请先选择要评价的 Mask 版本");
+      return;
+    }
+    setGenerating(true);
+    try {
+      const data = await apiPost<QualityReportGenerateResult>("/api/quality/report/generate", {
+        mask_id: maskId,
+        ref_mask_id: refMaskId || null,
+        case_id: caseId || null,
+        include_error_slices: true,
+      });
+      setReport(data.metrics || null);
+      setMarkdown(data.markdown || "");
+      setReportTitle(data.title || "");
+      showToast("质量报告已生成");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "质量报告生成失败");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function polishReport() {
+    if (!markdown.trim()) {
+      showToast("请先生成或填写报告草稿");
+      return;
+    }
+    setPolishing(true);
+    try {
+      const data = await apiPost<ReportPolishResult>("/api/quality/report/polish", {
+        draft_markdown: markdown,
+        tone,
+        case_id: caseId || null,
+        mask_id: maskId || null,
+        metrics: report || null,
+      });
+      if (data.markdown) setMarkdown(data.markdown);
+      if (data.polished) {
+        showToast(data.message || "AI 润色完成");
+      } else {
+        showToast(data.message || "未启用 AI 润色，已保留原文");
+      }
+      void loadPolishStatus();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "AI 润色失败");
+    } finally {
+      setPolishing(false);
+    }
+  }
+
+  async function copyMarkdown() {
+    if (!markdown.trim()) {
+      showToast("报告内容为空");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(markdown);
+      showToast("报告已复制到剪贴板");
+    } catch {
+      showToast("复制失败，请手动选择文本");
+    }
+  }
+
+  function downloadMarkdown() {
+    if (!markdown.trim()) {
+      showToast("报告内容为空");
+      return;
+    }
+    const safeId = (maskId || caseId || "report").replace(/[^\w.-]+/g, "_");
+    downloadText(`quality_report_${safeId}.md`, markdown);
+    showToast("已下载 Markdown 报告");
   }
 
   const geometric = report?.geometric;
   const overlap = report?.overlap;
   const errorSlices = report?.error_slices || [];
+  const busy = loadingMetrics || generating || polishing;
 
   return (
     <>
       <section className="panel">
         <h2>质量报告</h2>
         <p className="panel-lead">
-          无 GT 时展示体积/连通域；有 GT 时请求 <code>/api/mask/{"{id}"}/metrics?ref=...</code> 返回 Dice /
-          IoU / HD95 与错误切片。
+          先拉取指标或直接生成 Markdown 报告；可选接入 OpenAI 兼容接口做 AI 润色（需配置{" "}
+          <code>REPORT_POLISH_API_KEY</code>）。
         </p>
         <div className="toolbar-row" style={{ marginTop: 12 }}>
           <label className="field">
@@ -144,12 +273,20 @@ export function QualityPage({ refreshKey }: { refreshKey: number }) {
             </select>
           </label>
           <button
-            className="primary-button"
+            className="ghost-button"
             type="button"
-            disabled={!masks.length || loading}
+            disabled={!masks.length || busy}
             onClick={() => void loadMetrics()}
           >
-            {loading ? "加载中…" : "拉取指标"}
+            {loadingMetrics ? "加载中…" : "拉取指标"}
+          </button>
+          <button
+            className="primary-button"
+            type="button"
+            disabled={!masks.length || busy}
+            onClick={() => void generateReport()}
+          >
+            {generating ? "生成中…" : "生成质量报告"}
           </button>
         </div>
       </section>
@@ -214,7 +351,7 @@ export function QualityPage({ refreshKey }: { refreshKey: number }) {
               </div>
             </div>
           ) : (
-            <div className="placeholder compact">选择 Mask 后点击「拉取指标」。</div>
+            <div className="placeholder compact">选择 Mask 后点击「拉取指标」或「生成质量报告」。</div>
           )}
         </section>
         <section className="panel">
@@ -247,6 +384,55 @@ export function QualityPage({ refreshKey }: { refreshKey: number }) {
           )}
         </section>
       </div>
+
+      <section className="panel" style={{ marginTop: 18 }}>
+        <div className="toolbar-row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <h2 style={{ margin: 0 }}>{reportTitle || "报告正文（Markdown）"}</h2>
+            <p className="panel-lead" style={{ marginTop: 6 }}>
+              {polishStatus?.configured
+                ? `AI 润色已配置 · 模型 ${polishStatus.model || "-"}`
+                : polishStatus?.message || "未配置 AI 润色密钥时仍可生成本地报告"}
+            </p>
+          </div>
+          <div className="toolbar-row" style={{ margin: 0 }}>
+            <label className="field" style={{ minWidth: 120 }}>
+              <span>润色风格</span>
+              <select
+                value={tone}
+                onChange={(e) => setTone(e.target.value as "clinical" | "concise" | "detailed")}
+              >
+                <option value="clinical">临床专业</option>
+                <option value="concise">简洁</option>
+                <option value="detailed">详细解读</option>
+              </select>
+            </label>
+            <button className="ghost-button" type="button" disabled={!markdown || busy} onClick={() => void copyMarkdown()}>
+              复制
+            </button>
+            <button className="ghost-button" type="button" disabled={!markdown || busy} onClick={downloadMarkdown}>
+              下载 .md
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              disabled={!markdown || busy}
+              onClick={() => void polishReport()}
+              title={polishStatus?.configured ? "调用润色 AI" : "未配置密钥时将返回原文并提示"}
+            >
+              {polishing ? "润色中…" : "AI 润色"}
+            </button>
+          </div>
+        </div>
+        <textarea
+          className="quality-report-editor"
+          value={markdown}
+          onChange={(e) => setMarkdown(e.target.value)}
+          placeholder="点击「生成质量报告」后将在此显示 Markdown；也可手工编辑后再润色。"
+          rows={18}
+          spellCheck={false}
+        />
+      </section>
 
       <section className="panel" style={{ marginTop: 18 }}>
         <h2>错误切片列表</h2>

@@ -78,6 +78,10 @@ const state = {
   qualityRefMaskId: "",
   qualityReport: null,
   qualityMasks: [],
+  qualityMarkdown: "",
+  qualityReportTitle: "",
+  qualityPolishTone: "clinical",
+  qualityPolishStatus: null,
   // P5: few-shot / coarse / weak
   annotationMode: "dense", // dense | coarse | scribble
   fewShotMinSlices: 3,
@@ -688,11 +692,108 @@ async function loadQualityReport() {
         precision: data.overlap.precision,
         recall: data.overlap.recall,
       };
+      if (Number(data.overlap.dice) >= 0.999) {
+        showToast("Dice≈1.0：当前评价 Mask 与参考 GT 体素几乎完全相同（可能是同文件副本）");
+      }
     }
     render();
   } catch (error) {
     showToast(error.message || "质量指标加载失败");
   }
+}
+
+async function refreshQualityPolishStatus() {
+  try {
+    state.qualityPolishStatus = await apiGet("/api/quality/report/polish/status");
+  } catch {
+    state.qualityPolishStatus = { configured: false, message: "无法读取润色服务状态" };
+  }
+}
+
+async function generateQualityReportDoc() {
+  const maskId = state.qualityMaskId || $("#qualityMaskSelect")?.value;
+  const refId = state.qualityRefMaskId || $("#qualityRefSelect")?.value || "";
+  const caseId = state.qualityCaseId || activeCase()?.case_id || "";
+  if (!maskId) {
+    showToast("请先选择要评价的 Mask 版本");
+    return;
+  }
+  state.qualityMaskId = maskId;
+  state.qualityRefMaskId = refId;
+  try {
+    const data = await apiPost("/api/quality/report/generate", {
+      mask_id: maskId,
+      ref_mask_id: refId || null,
+      case_id: caseId || null,
+      include_error_slices: true,
+    });
+    state.qualityReport = data.metrics || state.qualityReport;
+    state.qualityMarkdown = data.markdown || "";
+    state.qualityReportTitle = data.title || "";
+    if (data.metrics?.overlap && Number(data.metrics.overlap.dice) >= 0.999) {
+      showToast("报告已生成；Dice≈1.0 表示 Pred 与 GT 几乎完全一致");
+    } else {
+      showToast("质量报告已生成");
+    }
+    render();
+  } catch (error) {
+    showToast(error.message || "质量报告生成失败");
+  }
+}
+
+async function polishQualityReportDoc() {
+  const draft = ($("#qualityReportEditor")?.value ?? state.qualityMarkdown ?? "").trim();
+  if (!draft) {
+    showToast("请先生成或填写报告草稿");
+    return;
+  }
+  state.qualityMarkdown = draft;
+  try {
+    const data = await apiPost("/api/quality/report/polish", {
+      draft_markdown: draft,
+      tone: state.qualityPolishTone || "clinical",
+      case_id: state.qualityCaseId || null,
+      mask_id: state.qualityMaskId || null,
+      metrics: state.qualityReport || null,
+    });
+    if (data.markdown) state.qualityMarkdown = data.markdown;
+    showToast(data.polished ? (data.message || "AI 润色完成") : (data.message || "未完成润色，已保留原文"));
+    await refreshQualityPolishStatus();
+    render();
+  } catch (error) {
+    showToast(error.message || "AI 润色失败");
+  }
+}
+
+async function copyQualityReportDoc() {
+  const text = ($("#qualityReportEditor")?.value ?? state.qualityMarkdown ?? "").trim();
+  if (!text) {
+    showToast("报告内容为空");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("报告已复制到剪贴板");
+  } catch {
+    showToast("复制失败，请手动选择文本");
+  }
+}
+
+function downloadQualityReportDoc() {
+  const text = ($("#qualityReportEditor")?.value ?? state.qualityMarkdown ?? "").trim();
+  if (!text) {
+    showToast("报告内容为空");
+    return;
+  }
+  const safeId = String(state.qualityMaskId || state.qualityCaseId || "report").replace(/[^\w.-]+/g, "_");
+  const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `quality_report_${safeId}.md`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+  showToast("已下载 Markdown 报告");
 }
 
 function selectedModel() {
@@ -4853,6 +4954,11 @@ function renderQuality() {
   const geometric = report?.geometric;
   const overlap = report?.overlap;
   const errorSlices = report?.error_slices || [];
+  const polishStatus = state.qualityPolishStatus;
+  const diceHint =
+    overlap && Number(overlap.dice) >= 0.999
+      ? `<p class="panel-lead" style="color:var(--warn,#f0c674);margin-top:8px">Dice=1.0000 表示两份 Mask 体素几乎完全相同。演示数据里 <code>*_fusion</code> 常与 AI/精标是同一份拷贝，请换真实人工 GT 再评价。</p>`
+      : "";
   const caseOptions = state.cases.map((caseItem) => `
     <option value="${escapeHtml(caseItem.case_id)}" ${caseId === caseItem.case_id ? "selected" : ""}>
       ${escapeHtml(caseItem.case_id)} · ${escapeHtml(statusText[caseItem.status] || caseItem.status)}
@@ -4876,12 +4982,14 @@ function renderQuality() {
   return `
     <section class="panel">
       <h2>质量报告</h2>
-      <p class="panel-lead">无 GT 时展示体积/连通域；有 GT 时请求 <code>/api/mask/{id}/metrics?ref=...</code> 返回 Dice / IoU / HD95 与错误切片。</p>
+      <p class="panel-lead">先拉取指标或直接<strong>生成质量报告</strong>（Markdown）。可选 AI 润色需配置 <code>REPORT_POLISH_API_KEY</code>。</p>
+      ${diceHint}
       <div class="toolbar-row" style="margin-top:12px">
         <div class="field"><label>病例</label><select id="qualityCaseSelect">${caseOptions || "<option value=''>暂无病例</option>"}</select></div>
         <div class="field"><label>评价 Mask</label><select id="qualityMaskSelect">${maskOptions}</select></div>
         <div class="field"><label>参考 GT</label><select id="qualityRefSelect">${refOptions}</select></div>
-        <button class="primary-button" data-load-quality ${masks.length ? "" : "disabled"}>拉取指标</button>
+        <button class="ghost-button" data-load-quality ${masks.length ? "" : "disabled"}>拉取指标</button>
+        <button class="primary-button" data-generate-quality-report ${masks.length ? "" : "disabled"}>生成质量报告</button>
       </div>
     </section>
 
@@ -4903,7 +5011,7 @@ function renderQuality() {
             <div class="meta-line"><span>最大连通域占比</span><strong>${formatPercent(geometric.largest_component_ratio)}</strong></div>
             <div class="meta-line"><span>切片范围</span><strong>${formatSliceRange(geometric.slice_range)}</strong></div>
           </div>
-        ` : `<div class="placeholder compact">选择 Mask 后点击「拉取指标」。</div>`}
+        ` : `<div class="placeholder compact">选择 Mask 后点击「拉取指标」或「生成质量报告」。</div>`}
       </section>
       <section class="panel">
         <h2>重叠指标（有 GT）</h2>
@@ -4917,6 +5025,33 @@ function renderQuality() {
         ` : `<div class="placeholder compact">未选择参考 GT 时仅显示几何质量。</div>`}
       </section>
     </div>
+
+    <section class="panel" style="margin-top:18px">
+      <div class="toolbar-row" style="justify-content:space-between;align-items:flex-end">
+        <div>
+          <h2 style="margin:0">${escapeHtml(state.qualityReportTitle || "报告正文（Markdown）")}</h2>
+          <p class="panel-lead" style="margin-top:6px">
+            ${polishStatus?.configured
+              ? `AI 润色已配置 · 模型 ${escapeHtml(polishStatus.model || "-")}`
+              : escapeHtml(polishStatus?.message || "未配置 AI 润色时仍可生成本地报告")}
+          </p>
+        </div>
+        <div class="toolbar-row" style="margin:0">
+          <div class="field" style="min-width:120px">
+            <label>润色风格</label>
+            <select id="qualityPolishTone">
+              <option value="clinical" ${state.qualityPolishTone === "clinical" ? "selected" : ""}>临床专业</option>
+              <option value="concise" ${state.qualityPolishTone === "concise" ? "selected" : ""}>简洁</option>
+              <option value="detailed" ${state.qualityPolishTone === "detailed" ? "selected" : ""}>详细解读</option>
+            </select>
+          </div>
+          <button class="ghost-button" data-copy-quality-report ${state.qualityMarkdown ? "" : "disabled"}>复制</button>
+          <button class="ghost-button" data-download-quality-report ${state.qualityMarkdown ? "" : "disabled"}>下载 .md</button>
+          <button class="primary-button" data-polish-quality-report ${state.qualityMarkdown ? "" : "disabled"}>AI 润色</button>
+        </div>
+      </div>
+      <textarea id="qualityReportEditor" class="quality-report-editor" rows="16" spellcheck="false" placeholder="点击「生成质量报告」后将在此显示 Markdown；也可手工编辑后再润色。">${escapeHtml(state.qualityMarkdown || "")}</textarea>
+    </section>
 
     <section class="panel" style="margin-top:18px">
       <h2>错误切片列表（可选）</h2>
@@ -4944,6 +5079,9 @@ async function hydrateQuality() {
   if (state._hydratingQuality) return;
   state._hydratingQuality = true;
   try {
+    if (!state.qualityPolishStatus) {
+      await refreshQualityPolishStatus();
+    }
     const caseId = state.qualityCaseId || activeCase()?.case_id || state.cases[0]?.case_id || "";
     if (!caseId) return;
     const needsCaseSwitch = state.qualityCaseId !== caseId || !state.qualityMasks.length;
@@ -4956,6 +5094,8 @@ async function hydrateQuality() {
         state.qualityMaskId = state.qualityMasks[0]?.mask_id || "";
       }
       state.qualityReport = null;
+      state.qualityMarkdown = "";
+      state.qualityReportTitle = "";
       render();
       return;
     }
@@ -5579,6 +5719,8 @@ function render() {
     qualityMaskSelect.addEventListener("change", () => {
       state.qualityMaskId = qualityMaskSelect.value;
       state.qualityReport = null;
+      state.qualityMarkdown = "";
+      state.qualityReportTitle = "";
     });
   }
   const qualityRefSelect = $("#qualityRefSelect");
@@ -5586,11 +5728,41 @@ function render() {
     qualityRefSelect.addEventListener("change", () => {
       state.qualityRefMaskId = qualityRefSelect.value;
       state.qualityReport = null;
+      state.qualityMarkdown = "";
+      state.qualityReportTitle = "";
     });
   }
   const loadQualityButton = $("[data-load-quality]");
   if (loadQualityButton) {
     loadQualityButton.addEventListener("click", loadQualityReport);
+  }
+  const generateQualityButton = $("[data-generate-quality-report]");
+  if (generateQualityButton) {
+    generateQualityButton.addEventListener("click", generateQualityReportDoc);
+  }
+  const polishQualityButton = $("[data-polish-quality-report]");
+  if (polishQualityButton) {
+    polishQualityButton.addEventListener("click", polishQualityReportDoc);
+  }
+  const copyQualityButton = $("[data-copy-quality-report]");
+  if (copyQualityButton) {
+    copyQualityButton.addEventListener("click", copyQualityReportDoc);
+  }
+  const downloadQualityButton = $("[data-download-quality-report]");
+  if (downloadQualityButton) {
+    downloadQualityButton.addEventListener("click", downloadQualityReportDoc);
+  }
+  const qualityPolishTone = $("#qualityPolishTone");
+  if (qualityPolishTone) {
+    qualityPolishTone.addEventListener("change", () => {
+      state.qualityPolishTone = qualityPolishTone.value || "clinical";
+    });
+  }
+  const qualityReportEditor = $("#qualityReportEditor");
+  if (qualityReportEditor) {
+    qualityReportEditor.addEventListener("input", () => {
+      state.qualityMarkdown = qualityReportEditor.value;
+    });
   }
   const finalMaskButton = $("[data-final-mask]");
   if (finalMaskButton) {

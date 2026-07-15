@@ -678,6 +678,20 @@ h3 { font-size: 15px; }
 .field { display: grid; gap: 6px; min-width: 160px; }
 .field label { color: var(--muted); font-size: 12px; }
 .field input, .field select { min-height: 38px; color: var(--text); background: rgba(5, 14, 26, 0.72); border: 1px solid var(--line); border-radius: 8px; padding: 0 11px; }
+.quality-report-editor {
+  width: 100%;
+  margin-top: 14px;
+  min-height: 320px;
+  resize: vertical;
+  color: var(--text);
+  background: rgba(5, 14, 26, 0.72);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+}
 .file-input {
   min-width: 260px;
   height: 38px;
