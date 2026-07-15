@@ -1,0 +1,10 @@
+{
+  "dataset_id": "Dataset0003",
+  "version": "v1_manual",
+  "label_set": "dense",
+  "train": [
+    "Case0002"
+  ],
+  "val": [],
+  "test": []
+}

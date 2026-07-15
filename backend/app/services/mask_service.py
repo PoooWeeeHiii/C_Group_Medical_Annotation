@@ -977,6 +977,56 @@ def get_mask_surface_mesh(
     per_label: bool = True,
     max_labels: int = 24,
 ) -> dict[str, Any]:
+    from backend.app.services.mesh_cache import cached_mesh
+
+    params = {
+        "min_component_voxels": int(min_component_voxels),
+        "max_components": int(max_components),
+        "max_triangles": int(max_triangles),
+        "target_reduction": float(target_reduction),
+        "smooth_iterations": int(smooth_iterations),
+        "remove_thin": bool(remove_thin),
+        "constrain_to_body": bool(constrain_to_body),
+        "constrain_to_source_roi": bool(constrain_to_source_roi),
+        "source_roi_margin_mm": float(source_roi_margin_mm),
+        "per_label": bool(per_label),
+        "max_labels": int(max_labels),
+        "v": 1,
+    }
+
+    def _build() -> dict[str, Any]:
+        return _compute_mask_surface_mesh(
+            mask_id=mask_id,
+            min_component_voxels=min_component_voxels,
+            max_components=max_components,
+            max_triangles=max_triangles,
+            target_reduction=target_reduction,
+            smooth_iterations=smooth_iterations,
+            remove_thin=remove_thin,
+            constrain_to_body=constrain_to_body,
+            constrain_to_source_roi=constrain_to_source_roi,
+            source_roi_margin_mm=source_roi_margin_mm,
+            per_label=per_label,
+            max_labels=max_labels,
+        )
+
+    return cached_mesh("mask", mask_id, params, _build)
+
+
+def _compute_mask_surface_mesh(
+    mask_id: str,
+    min_component_voxels: int = 64,
+    max_components: int = 8,
+    max_triangles: int = 90000,
+    target_reduction: float = 0.55,
+    smooth_iterations: int = 8,
+    remove_thin: bool = True,
+    constrain_to_body: bool = True,
+    constrain_to_source_roi: bool = True,
+    source_roi_margin_mm: float = 45.0,
+    per_label: bool = True,
+    max_labels: int = 24,
+) -> dict[str, Any]:
     record, image, labels = _read_nifti_mask_label_array(mask_id)
     spacing = tuple(float(value) for value in image.GetSpacing()[:3])
     origin = tuple(float(value) for value in image.GetOrigin()[:3])

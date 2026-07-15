@@ -12,6 +12,9 @@ __pycache__/
 venv/
 env/
 
+# Local runtime (start_all.sh pid/logs)
+.run/
+
 # IDE and local settings
 .idea/
 .vscode/
@@ -19,6 +22,9 @@ env/
 
 # Frontend dependencies
 node_modules/
+.test_deps/
+tests/system/output/
+
 
 # Local secrets and environment files
 .env
@@ -42,12 +48,14 @@ dataset/images/**
 dataset/labels/**
 dataset/splits/**
 dataset/exports/**
+dataset/cache/**
 dataset/weak_supervise_runs/**
 !dataset/raw/.gitkeep
 !dataset/images/.gitkeep
 !dataset/labels/.gitkeep
 !dataset/splits/.gitkeep
 !dataset/exports/.gitkeep
+!dataset/cache/.gitkeep
 !dataset/splits/*.json
 
 # Model weights and training outputs
