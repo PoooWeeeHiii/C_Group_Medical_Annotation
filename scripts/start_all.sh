@@ -40,11 +40,13 @@ for arg in "$@"; do
   esac
 done
 
-# Prefer project venv python if present
+# Prefer project venv python if present; DeepEdit needs torch+monai.
 if [[ -x "$ROOT/.venv/bin/python" ]]; then
   PYTHON="$ROOT/.venv/bin/python"
 elif [[ -x "$ROOT/venv/bin/python" ]]; then
   PYTHON="$ROOT/venv/bin/python"
+elif [[ -x /opt/miniconda3/bin/python ]]; then
+  PYTHON=/opt/miniconda3/bin/python
 else
   PYTHON="${PYTHON:-python3}"
 fi

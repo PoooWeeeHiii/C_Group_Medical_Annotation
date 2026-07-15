@@ -157,6 +157,86 @@ def _dice_metric(logits: torch.Tensor, target: torch.Tensor) -> float:
     return float(sum(scores) / len(scores)) if scores else 0.0
 
 
+def infer_num_classes(
+    *,
+    export_dir: Path | None,
+    records: list[dict] | None,
+    requested: int,
+) -> int:
+    """Raise num_classes when labels contain ids ≥ requested (e.g. other=8 needs ≥9)."""
+    needed = max(2, int(requested))
+    max_label = 0
+
+    def _bump_from_array(array: np.ndarray) -> None:
+        nonlocal max_label
+        if array.size == 0:
+            return
+        positive = array[array > 0]
+        if positive.size:
+            max_label = max(max_label, int(positive.max()))
+
+    if export_dir and export_dir.is_dir():
+        dataset_json = export_dir / "dataset.json"
+        if dataset_json.exists():
+            try:
+                meta = json.loads(dataset_json.read_text(encoding="utf-8"))
+                labels = meta.get("labels") or meta.get("label_map") or {}
+                if isinstance(labels, dict):
+                    for key, value in labels.items():
+                        for candidate in (key, value):
+                            try:
+                                max_label = max(max_label, int(candidate))
+                            except (TypeError, ValueError):
+                                continue
+                counts = meta.get("class_voxel_counts") or {}
+                if isinstance(counts, dict):
+                    for key in counts:
+                        try:
+                            max_label = max(max_label, int(key))
+                        except (TypeError, ValueError):
+                            continue
+            except (OSError, json.JSONDecodeError):
+                pass
+        if sitk is not None and max_label < needed - 1:
+            label_dirs = [export_dir / "labelsTr", export_dir / "labelsTs"]
+            for label_dir in label_dirs:
+                if not label_dir.is_dir():
+                    continue
+                for path in sorted(label_dir.glob("*.nii.gz"))[:8]:
+                    try:
+                        array = sitk.GetArrayFromImage(sitk.ReadImage(str(path)))
+                        _bump_from_array(np.asarray(array))
+                    except Exception:  # noqa: BLE001 — best-effort scan
+                        continue
+
+    if records and sitk is not None and max_label < needed - 1:
+        for record in records[:12]:
+            mask_path = PROJECT_ROOT / str(record.get("mask_path") or "")
+            if not mask_path.exists():
+                continue
+            try:
+                array = sitk.GetArrayFromImage(sitk.ReadImage(str(mask_path)))
+                _bump_from_array(np.asarray(array))
+            except Exception:  # noqa: BLE001
+                continue
+
+    inferred = max(needed, max_label + 1 if max_label > 0 else needed)
+    if inferred > needed:
+        print(
+            json.dumps(
+                {
+                    "event": "num_classes_raised",
+                    "requested": needed,
+                    "inferred": inferred,
+                    "max_label_id": max_label,
+                    "reason": "label ids in export exceed requested num_classes-1",
+                }
+            ),
+            flush=True,
+        )
+    return inferred
+
+
 def train(
     *,
     dataset_id: str,
@@ -169,6 +249,8 @@ def train(
     export_dir: str | None,
     context_radius: int = 1,
     max_slices_per_volume: int = 64,
+    resume: bool = False,
+    resume_from: str | None = None,
 ) -> dict:
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -189,6 +271,12 @@ def train(
     manifest_path = PROJECT_ROOT / "dataset" / "splits" / f"{dataset_id}_manifest.json"
     if manifest_path.exists():
         records = json.loads(manifest_path.read_text(encoding="utf-8")).get("records") or []
+
+    num_classes = infer_num_classes(
+        export_dir=resolved_export,
+        records=records,
+        requested=num_classes,
+    )
 
     common = dict(
         export_dir=resolved_export,
@@ -221,6 +309,39 @@ def train(
     best_dice = -1.0
     ckpt_path = CHECKPOINT_DIR / f"{model_id}.pt"
     metrics_path = RUNS_DIR / f"{model_id}_metrics.json"
+    resumed = False
+    resume_path = None
+    if resume or resume_from:
+        candidate = Path(resume_from) if resume_from else ckpt_path
+        if not candidate.is_absolute():
+            candidate = PROJECT_ROOT / candidate
+        if candidate.exists():
+            resume_path = candidate
+            payload = torch.load(str(candidate), map_location=device)
+            state = payload.get("state_dict") if isinstance(payload, dict) else None
+            if state is None and isinstance(payload, dict):
+                state = payload
+            ckpt_classes = int(payload.get("num_classes") or 0) if isinstance(payload, dict) else 0
+            ckpt_in = int(payload.get("in_channels") or 0) if isinstance(payload, dict) else 0
+            if state and (ckpt_classes in {0, num_classes}) and (ckpt_in in {0, in_channels}):
+                model.load_state_dict(state, strict=False)
+                resumed = True
+                if isinstance(payload, dict) and payload.get("val_dice") is not None:
+                    best_dice = float(payload["val_dice"])
+            else:
+                print(
+                    json.dumps(
+                        {
+                            "event": "resume_skipped",
+                            "reason": "checkpoint shape mismatch",
+                            "ckpt_num_classes": ckpt_classes,
+                            "ckpt_in_channels": ckpt_in,
+                            "num_classes": num_classes,
+                            "in_channels": in_channels,
+                        }
+                    ),
+                    flush=True,
+                )
 
     print(
         json.dumps(
@@ -231,6 +352,9 @@ def train(
                 "train_slices": len(train_ds),
                 "val_slices": len(val_ds),
                 "image_size": image_size,
+                "num_classes": num_classes,
+                "resume": resumed,
+                "resume_from": str(resume_path.relative_to(PROJECT_ROOT)).replace("\\", "/") if resume_path else None,
                 "mode": "2.5D" if context_radius > 0 else "2D",
             }
         ),
@@ -307,6 +431,7 @@ def train(
         "train_slices": len(train_ds),
         "checkpoint": str(ckpt_path.relative_to(PROJECT_ROOT)).replace("\\", "/"),
         "history": history,
+        "resume": resumed,
         "note": "Prefer TotalSeg/nnUNet for production; this is a platform 2.5D demo model.",
     }
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
@@ -321,11 +446,26 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
-    parser.add_argument("--num-classes", type=int, default=6)
+    parser.add_argument(
+        "--num-classes",
+        type=int,
+        default=9,
+        help="Output classes (other=8 needs ≥9; auto-raised from export if higher ids found)",
+    )
     parser.add_argument("--image-size", type=int, default=320)
     parser.add_argument("--context-radius", type=int, default=1, help="2.5D neighbor radius (1 => 3 channels)")
     parser.add_argument("--max-slices-per-volume", type=int, default=64)
     parser.add_argument("--export-dir", default=None)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Incremental fine-tune from ai/checkpoints/<model_id>.pt when present",
+    )
+    parser.add_argument(
+        "--resume-from",
+        default=None,
+        help="Optional checkpoint path (overrides default model_id.pt)",
+    )
     args = parser.parse_args()
     train(
         dataset_id=args.dataset_id,
@@ -338,6 +478,8 @@ def main() -> None:
         export_dir=args.export_dir,
         context_radius=args.context_radius,
         max_slices_per_volume=args.max_slices_per_volume,
+        resume=bool(args.resume),
+        resume_from=args.resume_from,
     )
 
 

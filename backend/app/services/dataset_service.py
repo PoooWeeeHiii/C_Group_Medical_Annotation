@@ -407,17 +407,67 @@ def _materialize_nnunet(
     val_ids: list[str],
     test_ids: list[str],
     label_map: dict[str, int],
+    *,
+    append: bool = False,
 ) -> tuple[Path, Path, Path, DatasetExportReport]:
     export_root = EXPORTS_DATA_DIR / dataset_id
-    if export_root.exists():
-        shutil.rmtree(export_root)
-    for folder in ("imagesTr", "labelsTr", "imagesTs", "labelsTs"):
-        (export_root / folder).mkdir(parents=True, exist_ok=True)
+    existing_train: set[str] = set()
+    existing_val: set[str] = set()
+    existing_train_cases: set[str] = set()
+    existing_val_cases: set[str] = set()
+    existing_test_cases: set[str] = set()
+    existing_label_map: dict[str, int] = {}
+    prior_counts: dict[str, int] = {}
+
+    if append and export_root.exists():
+        splits_path = export_root / "splits_final.json"
+        if splits_path.exists():
+            try:
+                prior = json.loads(splits_path.read_text(encoding="utf-8"))
+                split0 = (prior[0] if isinstance(prior, list) and prior else prior) or {}
+                existing_train = {str(x) for x in (split0.get("train") or [])}
+                existing_val = {str(x) for x in (split0.get("val") or [])}
+                existing_train_cases = {str(x) for x in (split0.get("train_cases") or [])}
+                existing_val_cases = {str(x) for x in (split0.get("val_cases") or [])}
+                existing_test_cases = {str(x) for x in (split0.get("test_cases") or [])}
+            except (OSError, json.JSONDecodeError, TypeError):
+                pass
+        dataset_json_existing = export_root / "dataset.json"
+        if dataset_json_existing.exists():
+            try:
+                meta = json.loads(dataset_json_existing.read_text(encoding="utf-8"))
+                labels = meta.get("labels") or {}
+                if isinstance(labels, dict):
+                    for key, value in labels.items():
+                        if str(key) == "background":
+                            continue
+                        try:
+                            existing_label_map[str(key)] = int(value)
+                        except (TypeError, ValueError):
+                            continue
+                counts = meta.get("class_voxel_counts") or {}
+                if isinstance(counts, dict):
+                    for key, value in counts.items():
+                        try:
+                            prior_counts[str(key)] = int(value)
+                        except (TypeError, ValueError):
+                            continue
+            except (OSError, json.JSONDecodeError, TypeError):
+                pass
+        for folder in ("imagesTr", "labelsTr", "imagesTs", "labelsTs"):
+            (export_root / folder).mkdir(parents=True, exist_ok=True)
+        for path in (export_root / "imagesTr").glob("*_0000.nii.gz"):
+            existing_train.add(path.name.replace("_0000.nii.gz", ""))
+    else:
+        if export_root.exists():
+            shutil.rmtree(export_root)
+        for folder in ("imagesTr", "labelsTr", "imagesTs", "labelsTs"):
+            (export_root / folder).mkdir(parents=True, exist_ok=True)
 
     report = DatasetExportReport(export_dir=path_for_api(export_root, PROJECT_ROOT), multiclass=True)
-    label_to_id = {str(k): int(v) for k, v in label_map.items() if k != "background" and int(v) > 0}
+    merged_label_map = {**existing_label_map, **{str(k): int(v) for k, v in label_map.items()}}
+    label_to_id = {str(k): int(v) for k, v in merged_label_map.items() if k != "background" and int(v) > 0}
 
-    # Group records by case/image so multiple organ masks become one multiclass NIfTI.
     groups: dict[tuple[str, str, str, str], list[dict]] = {}
     for record in records:
         key = (
@@ -459,6 +509,16 @@ def _materialize_nnunet(
             report.materialized_files.append(path_for_api(image_out, PROJECT_ROOT))
             report.materialized_files.append(path_for_api(label_out, PROJECT_ROOT))
             report.success_count += 1
+            if is_test:
+                existing_test_cases.add(case_id)
+            elif split == "val":
+                existing_val.add(nnunet_id)
+                existing_val_cases.add(case_id)
+                existing_train.discard(nnunet_id)
+            else:
+                existing_train.add(nnunet_id)
+                existing_train_cases.add(case_id)
+                existing_val.discard(nnunet_id)
         except HTTPException:
             raise
         except Exception as exc:
@@ -472,31 +532,51 @@ def _materialize_nnunet(
             )
             report.skipped_count += 1
 
-    # dataset.json — nnU-Net v2 style
-    labels_payload = {"background": 0, **{name: idx for name, idx in label_to_id.items()}}
+    existing_train_cases.update(str(x) for x in train_ids)
+    existing_val_cases.update(str(x) for x in val_ids)
+    existing_test_cases.update(str(x) for x in test_ids)
+
+    labels_payload = {"background": 0, **{lab_name: idx for lab_name, idx in label_to_id.items()}}
     training_count = len(list((export_root / "imagesTr").glob("*_0000.nii.gz")))
+    merged_counts = dict(prior_counts)
+    for key, value in report.class_voxel_counts.items():
+        merged_counts[key] = int(merged_counts.get(key, 0)) + int(value)
+    report.class_voxel_counts = merged_counts
     dataset_json = {
         "name": name or dataset_id,
-        "description": f"Exported from label_platform version={version} (multiclass)",
+        "description": (
+            f"Exported from label_platform version={version} (multiclass"
+            + (", append" if append else "")
+            + ")"
+        ),
         "channel_names": {"0": "CT"},
         "labels": labels_payload,
         "numTraining": training_count,
         "file_ending": ".nii.gz",
         "overwrite_image_reader_writer": "SimpleITKIO",
         "multiclass": True,
+        "append": bool(append),
+        "class_voxel_counts": merged_counts,
     }
     dataset_json_path = export_root / "dataset.json"
     _write_json(dataset_json_path, dataset_json)
 
-    train_nnunet_ids = sorted({str(r["nnunet_id"]) for r in records if r["split"] == "train"})
-    val_nnunet_ids = sorted({str(r["nnunet_id"]) for r in records if r["split"] == "val"})
+    train_nnunet_ids = set(existing_train) | {str(r["nnunet_id"]) for r in records if r["split"] == "train"}
+    val_nnunet_ids = set(existing_val) | {str(r["nnunet_id"]) for r in records if r["split"] == "val"}
+    for rid in {str(r["nnunet_id"]) for r in records if r["split"] == "train"}:
+        val_nnunet_ids.discard(rid)
+        train_nnunet_ids.add(rid)
+    for rid in {str(r["nnunet_id"]) for r in records if r["split"] == "val"}:
+        train_nnunet_ids.discard(rid)
+        val_nnunet_ids.add(rid)
+
     splits_final = [
         {
-            "train": train_nnunet_ids,
-            "val": val_nnunet_ids,
-            "train_cases": train_ids,
-            "val_cases": val_ids,
-            "test_cases": test_ids,
+            "train": sorted(train_nnunet_ids),
+            "val": sorted(val_nnunet_ids),
+            "train_cases": sorted(existing_train_cases),
+            "val_cases": sorted(existing_val_cases),
+            "test_cases": sorted(existing_test_cases),
         }
     ]
     splits_final_path = export_root / "splits_final.json"
@@ -504,6 +584,7 @@ def _materialize_nnunet(
 
     report.export_dir = path_for_api(export_root, PROJECT_ROOT)
     return export_root, dataset_json_path, splits_final_path, report
+
 
 
 def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
@@ -527,6 +608,7 @@ def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
     _validate_disjoint_splits(request.train, request.val, request.test)
 
     dataset_id = request.dataset_id or next_sqlite_entity_id("Dataset", "datasets", "dataset_id")
+    append = bool(request.append) and bool(request.dataset_id)
 
     cases = _case_lookup()
     images = _images_by_case()
@@ -571,7 +653,46 @@ def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
         "train": request.train,
         "val": request.val,
         "test": request.test,
+        "append": append,
     }
+
+    # Incremental: merge previous manifest records (same nnunet_id overwritten by new).
+    prior_records: list[dict] = []
+    manifest_path = SPLITS_DATA_DIR / f"{dataset_id}_manifest.json"
+    if append and manifest_path.exists():
+        try:
+            prior = json.loads(manifest_path.read_text(encoding="utf-8"))
+            prior_records = list(prior.get("records") or [])
+            prior_map = prior.get("label_map") or {}
+            if isinstance(prior_map, dict):
+                label_map_payload = {**prior_map, **label_map_payload}
+            split_path_existing = SPLITS_DATA_DIR / f"{dataset_id}_split.json"
+            if split_path_existing.exists():
+                prior_split = json.loads(split_path_existing.read_text(encoding="utf-8"))
+                for key in ("train", "val", "test"):
+                    merged = list(dict.fromkeys([*(prior_split.get(key) or []), *(getattr(request, key) or [])]))
+                    split_payload[key] = merged
+        except (OSError, json.JSONDecodeError, TypeError):
+            prior_records = []
+
+    by_nnunet: dict[str, dict] = {}
+    for record in prior_records:
+        by_nnunet[str(record.get("nnunet_id") or "")] = record
+    for record in records:
+        by_nnunet[str(record.get("nnunet_id") or "")] = record
+    merged_records = [record for key, record in by_nnunet.items() if key]
+
+    train_ids_all = list(split_payload.get("train") or request.train)
+    val_ids_all = list(split_payload.get("val") or request.val)
+    test_ids_all = list(split_payload.get("test") or request.test)
+    if append:
+        train_ids_all = list(dict.fromkeys([*train_ids_all, *request.train]))
+        val_ids_all = list(dict.fromkeys([*val_ids_all, *request.val]))
+        test_ids_all = list(dict.fromkeys([*test_ids_all, *request.test]))
+        split_payload["train"] = train_ids_all
+        split_payload["val"] = val_ids_all
+        split_payload["test"] = test_ids_all
+
     manifest_payload = {
         "dataset_id": dataset_id,
         "name": request.name,
@@ -579,23 +700,26 @@ def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
         "label_set": label_set,
         "format": request.format,
         "materialize": request.materialize,
+        "append": append,
         "create_time": _now_iso(),
         "counts": {
-            "train": len(train_records),
-            "val": len(val_records),
-            "test": len(test_records),
-            "total": len(records),
+            "train": len([r for r in merged_records if r.get("split") == "train"]) if append else len(train_records),
+            "val": len([r for r in merged_records if r.get("split") == "val"]) if append else len(val_records),
+            "test": len([r for r in merged_records if r.get("split") == "test"]) if append else len(test_records),
+            "total": len(merged_records) if append else len(records),
+            "batch_train": len(train_records),
+            "batch_total": len(records),
         },
         "label_map": label_map_payload,
-        "records": records,
+        "records": merged_records if append else records,
         "missing_masks": [item.model_dump() for item in missing],
         "notes": {
             "weak": "weak label_set typically uses v3_preview (pseudo) propagated from sparse v1_manual coarse/scribble",
             "dense": "dense label_set typically uses final / v3_fusion refined annotations",
-        }.get(label_set),
+            "append": "append=true merges cases into the same dataset_id for incremental class training",
+        }.get(label_set if not append else "append"),
     }
 
-    manifest_path = SPLITS_DATA_DIR / f"{dataset_id}_manifest.json"
     split_path = SPLITS_DATA_DIR / f"{dataset_id}_split.json"
     label_map_path = SPLITS_DATA_DIR / f"{dataset_id}_label_map.json"
     _write_json(manifest_path, manifest_payload)
@@ -606,6 +730,7 @@ def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
     dataset_json_path = None
     splits_final_path = None
     report = DatasetExportReport(missing_masks=missing)
+    total_train_cases = len(train_ids_all)
 
     if request.materialize:
         if request.format not in {"nnunet", "nnUNet", "NNUNET"}:
@@ -619,6 +744,7 @@ def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
             val_ids=request.val,
             test_ids=request.test,
             label_map=label_map_payload,
+            append=append,
         )
         # Preserve previously collected missing items that blocked materialization of some cases.
         if missing:
@@ -630,6 +756,12 @@ def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
         export_dir = path_for_api(export_root, PROJECT_ROOT)
         dataset_json_path = path_for_api(dataset_json_file, PROJECT_ROOT)
         splits_final_path = path_for_api(splits_final_file, PROJECT_ROOT)
+        try:
+            splits_data = json.loads(splits_final_file.read_text(encoding="utf-8"))
+            split0 = splits_data[0] if isinstance(splits_data, list) and splits_data else {}
+            total_train_cases = len(split0.get("train_cases") or train_ids_all)
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
         manifest_payload["export_dir"] = export_dir
         manifest_payload["dataset_json"] = dataset_json_path
         manifest_payload["splits_final"] = splits_final_path
@@ -641,17 +773,18 @@ def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
         "name": request.name,
         "version": version,
         "format": request.format,
-        "train": request.train,
-        "val": request.val,
-        "test": request.test,
+        "train": train_ids_all,
+        "val": val_ids_all,
+        "test": test_ids_all,
         "manifest_path": path_for_api(manifest_path, PROJECT_ROOT),
         "split_path": path_for_api(split_path, PROJECT_ROOT),
         "label_map_path": path_for_api(label_map_path, PROJECT_ROOT),
         "export_dir": export_dir,
-        "train_count": len(train_records),
-        "val_count": len(val_records),
-        "test_count": len(test_records),
+        "train_count": len(train_ids_all),
+        "val_count": len(val_ids_all),
+        "test_count": len(test_ids_all),
         "create_time": manifest_payload["create_time"],
+        "append": append,
     }
     upsert_record("datasets", dataset_record)
 
@@ -659,12 +792,16 @@ def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
     if request.materialize:
         message = (
             f"materialized nnU-Net dataset at {export_dir} "
-            f"(ok={report.success_count}, skipped={report.skipped_count})"
+            f"(ok={report.success_count}, skipped={report.skipped_count}"
+            + (f", append → {total_train_cases} train cases" if append else "")
+            + ")"
         )
     if label_set == "weak":
         message = f"[weak/{version}] {message}"
     else:
         message = f"[dense/{version}] {message}"
+    if append:
+        message = f"[append/{dataset_id}] {message}"
 
     return DatasetExportResponse(
         success=True,
@@ -683,4 +820,6 @@ def export_dataset(request: DatasetExportRequest) -> DatasetExportResponse:
         dataset_json_path=dataset_json_path,
         splits_final_path=splits_final_path,
         report=report if request.materialize or missing else None,
+        append=append,
+        total_train_cases=total_train_cases,
     )

@@ -36,6 +36,7 @@ from backend.app.services.mask_service import (
     get_mask_volume_data,
     label_propagate,
     list_masks_for_image,
+    probe_deepedit_service_health,
     promote_mask,
     rollback_mask,
     save_mask,
@@ -109,6 +110,12 @@ def read_labeling_assist(
 @router.post("/deepedit/refine", response_model=DeepEditRefineResponse)
 def refine_image_mask_deepedit(request: DeepEditRefineRequest) -> DeepEditRefineResponse:
     return deepedit_refine(request)
+
+
+@router.get("/deepedit/health")
+def deepedit_service_health() -> dict:
+    """Proxy DeepEdit :8010 /health so the browser stays same-origin with :8000."""
+    return probe_deepedit_service_health()
 
 
 @router.post("/mask/{mask_id}/promote", response_model=SaveMaskResponse)

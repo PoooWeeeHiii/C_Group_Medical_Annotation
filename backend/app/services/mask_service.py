@@ -66,6 +66,44 @@ def _normalize_label(label: str) -> str:
     return value or "label"
 
 
+def _catalog_label_name(label_id: int | None, fallback: str = "label") -> str:
+    """Resolve platform catalog English name for a label_id (e.g. 4 → tumor)."""
+    if label_id is None or int(label_id) <= 0:
+        return _normalize_label(fallback) if fallback else "label"
+    try:
+        from backend.app.services.label_service import get_label
+
+        item = get_label(int(label_id))
+        if item and item.get("name"):
+            return _normalize_label(str(item["name"]))
+    except Exception:  # noqa: BLE001 — catalog lookup is best-effort
+        pass
+    return _normalize_label(fallback) if fallback else f"label_{int(label_id)}"
+
+
+def _remap_binary_nifti_to_label_id(mask_path: str, label_id: int | None) -> None:
+    """DeepEdit returns FG=1; rewrite voxels to catalog label_id so 3D won't treat it as liver."""
+    if label_id is None or int(label_id) <= 0 or int(label_id) == 1:
+        return
+    try:
+        import SimpleITK as sitk
+    except ModuleNotFoundError:
+        return
+    target = PROJECT_ROOT / mask_path
+    if not target.exists():
+        return
+    image = sitk.ReadImage(str(target))
+    array = sitk.GetArrayFromImage(image)
+    unique = {int(v) for v in np.unique(array)}
+    # Only remultiply classic binary / soft masks (0/1 or 0/255).
+    positive = unique - {0}
+    if positive and positive.issubset({1, 255}):
+        remapped = (array > 0).astype(np.uint8) * np.uint8(int(label_id))
+        out = sitk.GetImageFromArray(remapped)
+        out.CopyInformation(image)
+        sitk.WriteImage(out, str(target))
+
+
 def _normalize_axis(axis: str | None) -> str:
     value = (axis or "axial").strip().lower()
     if value not in VALID_SLICE_AXES:
@@ -348,6 +386,7 @@ def _append_3d_mask_record(
     annotation_id: str | None = None,
     label_type: str = "pseudo",
     label_id: int | None = None,
+    label_aliases: dict[str, str] | None = None,
 ) -> tuple[MaskRecord, str]:
     depth, height, width = mask_stack.shape[:3]
     mask_id = next_sqlite_entity_id("Mask", "masks", "mask_id")
@@ -378,6 +417,7 @@ def _append_3d_mask_record(
         "encoding": encoding,
         "create_time": _now_iso(),
         "source_mask_ids": source_mask_ids,
+        "label_aliases": label_aliases or None,
         "shape": [depth, height, width],
         "spacing": [float(value) for value in volume.spacing],
         "origin": [float(value) for value in volume.origin],
@@ -446,11 +486,21 @@ def get_mask_volume_data(mask_id: str, max_dim: int = 176) -> dict[str, Any]:
     raw = np.clip(np.asarray(array), 0, 255).astype(np.uint8, copy=False)
     unique_labels = sorted({int(v) for v in np.unique(raw) if int(v) > 0})
     label_name = str(record.get("label") or "").strip().lower()
-    is_named_multi = label_name in {"全部标注", "all_labels", "multiclass", "all", "alllabels"}
+    is_named_multi = label_name in {
+        "全部标注",
+        "我的标注",
+        "all_labels",
+        "multiclass",
+        "all",
+        "alllabels",
+        "manual_all",
+    }
     # Single-organ AI masks store voxels as label_id (e.g. lung=3), not 0/1.
     # That must NOT be treated as multiclass — otherwise 3D forces WebGL volume
     # and skips VTK mesh highlight.
     multiclass = is_named_multi or (len(unique_labels) > 1 and set(unique_labels) != {255})
+    raw_class_ids = sorted({int(v) for v in unique_labels if int(v) != 255})
+    record_label_id = int(record["label_id"]) if record.get("label_id") is not None else 0
     if multiclass:
         downsampled, strides = _downsample_mask_volume(raw, max_dim=max_dim, preserve_labels=True)
         texture_values = downsampled.astype(np.uint8, copy=False)
@@ -461,7 +511,33 @@ def get_mask_volume_data(mask_id: str, max_dim: int = 176) -> dict[str, Any]:
         downsampled, strides = _downsample_mask_volume(binary, max_dim=max_dim, preserve_labels=False)
         texture_values = (downsampled > 0).astype(np.uint8) * np.uint8(255)
         full_voxel_count = int(np.count_nonzero(binary))
-        unique_labels = [1] if full_voxel_count else []
+        # Keep the real class id (e.g. other=8) so surgery pick/names are not forced to「肝」#1.
+        # DeepEdit / some models write classic binary FG=1; that is NOT liver when label_id says otherwise.
+        if len(raw_class_ids) == 1:
+            only = int(raw_class_ids[0])
+            if only in {1, 255} and record_label_id > 1:
+                single_id = record_label_id
+            else:
+                single_id = only
+        elif record_label_id > 0:
+            single_id = record_label_id
+        else:
+            single_id = 1
+        unique_labels = [single_id] if full_voxel_count else []
+    resolved_label_id = record.get("label_id")
+    if resolved_label_id is None and len(unique_labels) == 1:
+        resolved_label_id = unique_labels[0]
+    elif (
+        resolved_label_id is not None
+        and int(resolved_label_id) > 1
+        and len(unique_labels) == 1
+        and int(unique_labels[0]) in {1, 255}
+    ):
+        # Prefer DB label_id over binary voxel value for display / surgery chips.
+        unique_labels = [int(resolved_label_id)]
+    aliases = record.get("label_aliases")
+    if not isinstance(aliases, dict):
+        aliases = {}
     depth, height, width = downsampled.shape[:3]
     spacing = tuple(float(value) for value in image.GetSpacing()[:3])
     stride_z, stride_y, stride_x = strides
@@ -472,7 +548,8 @@ def get_mask_volume_data(mask_id: str, max_dim: int = 176) -> dict[str, Any]:
         "image_id": record.get("image_id"),
         "version": record.get("version"),
         "label": record.get("label"),
-        "label_id": record.get("label_id"),
+        "label_id": resolved_label_id,
+        "label_aliases": aliases,
         "multiclass": bool(multiclass),
         "unique_labels": unique_labels,
         "dimensions": [width, height, depth],
@@ -540,7 +617,15 @@ def _mask_label_meta_map() -> dict[int, dict[str, str]]:
 
 def _is_multiclass_mask_record(record: dict[str, Any], unique_labels: list[int]) -> bool:
     label_name = str(record.get("label") or "").strip().lower()
-    is_named_multi = label_name in {"全部标注", "all_labels", "multiclass", "all", "alllabels"}
+    is_named_multi = label_name in {
+        "全部标注",
+        "我的标注",
+        "all_labels",
+        "multiclass",
+        "all",
+        "alllabels",
+        "manual_all",
+    }
     return bool(is_named_multi or (len(unique_labels) > 1 and set(unique_labels) != {255}))
 
 
@@ -1294,7 +1379,8 @@ def get_mask_slice_data(mask_id: str, slice_index: int, axis: str = "axial") -> 
     if not 0 <= slice_index < max_slices:
         raise HTTPException(status_code=400, detail=f"slice_index is outside mask volume: {slice_index}")
 
-    slice_mask = (_mask_slice_by_axis(array, axis, slice_index) > 0).astype(np.uint8)
+    slice_mask = _mask_slice_by_axis(array, axis, slice_index).astype(np.uint8, copy=False)
+    # Keep class ids for 2D overlay coloring (do not collapse everything to 0/1).
     return {
         "success": True,
         "mask_id": mask_id,
@@ -1302,6 +1388,7 @@ def get_mask_slice_data(mask_id: str, slice_index: int, axis: str = "axial") -> 
         "image_id": record.get("image_id"),
         "version": record.get("version"),
         "label": record.get("label"),
+        "label_id": record.get("label_id"),
         "axis": axis,
         "slice_index": slice_index,
         "width": expected_width,
@@ -1726,8 +1813,9 @@ def export_mask_nifti(request: ExportMaskNiftiRequest) -> ExportMaskNiftiRespons
             detail=f"Unsupported mask version: {version}. Use one of {sorted(VALID_MASK_VERSIONS)}",
         )
     label = _normalize_label(request.label)
-    match_any = bool(request.match_any_label or label in {"*", "all", "全部标注"})
-    output_label = str(request.output_label or "").strip() or ("全部标注" if match_any else label)
+    match_any = bool(request.match_any_label or label in {"*", "all", "全部标注", "我的标注"})
+    # Prefer「我的标注」so surgery can tell manual stacks from AI「全部标注」.
+    output_label = str(request.output_label or "").strip() or ("我的标注" if match_any else label)
     depth, height, width = volume.array.shape[:3]
     mask_stack = np.zeros((depth, height, width), dtype=np.uint8)
 
@@ -1743,6 +1831,18 @@ def export_mask_nifti(request: ExportMaskNiftiRequest) -> ExportMaskNiftiRespons
     if not json_records:
         raise HTTPException(status_code=404, detail="No saved JSON slice masks found for this image/version/label")
 
+    # Preserve user-facing names (esp. custom「其他」) from 2D slice records.
+    label_aliases: dict[str, str] = {}
+    for rec in json_records:
+        lid = rec.get("label_id")
+        lname = str(rec.get("label") or "").strip()
+        if lid is None or int(lid) <= 0 or not lname:
+            continue
+        key = str(int(lid))
+        generic = lname.lower() in {"其他", "other", "label", "全部标注", "我的标注"}
+        if key not in label_aliases or not generic:
+            label_aliases[key] = lname
+
     sparse_slices_by_axis, source_mask_ids = _load_sparse_axis_masks(json_records, depth, height, width)
     if not any(sparse_slices_by_axis.values()):
         raise HTTPException(status_code=404, detail="No readable JSON slice masks found")
@@ -1752,6 +1852,9 @@ def export_mask_nifti(request: ExportMaskNiftiRequest) -> ExportMaskNiftiRespons
 
     if not np.any(mask_stack):
         raise HTTPException(status_code=422, detail="Stacked 2D annotations produced an empty 3D mask")
+
+    unique_in_stack = sorted({int(v) for v in np.unique(mask_stack) if int(v) > 0})
+    single_label_id = int(unique_in_stack[0]) if len(unique_in_stack) == 1 else None
 
     mask, mask_path = _append_3d_mask_record(
         masks=masks,
@@ -1764,6 +1867,8 @@ def export_mask_nifti(request: ExportMaskNiftiRequest) -> ExportMaskNiftiRespons
         mask_stack=mask_stack,
         volume=volume,
         label_type="dense",
+        label_id=single_label_id,
+        label_aliases=label_aliases or None,
     )
     return ExportMaskNiftiResponse(
         success=True,
@@ -2344,7 +2449,24 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
         raise HTTPException(status_code=404, detail="No saved sparse JSON masks found for label propagation")
 
     sparse_slices_by_axis, source_mask_ids = _load_sparse_axis_masks(json_records, depth, height, width)
-    if label_id is not None and label_id > 0:
+    # Keep original class ids so we can restore them after binary propagation.
+    original_axial_labels = {
+        int(slice_index): np.asarray(slice_mask, dtype=np.uint8).copy()
+        for slice_index, slice_mask in (sparse_slices_by_axis.get("axial") or {}).items()
+    }
+    seed_label_ids = sorted(
+        {
+            int(value)
+            for axis_slices in sparse_slices_by_axis.values()
+            for slice_mask in axis_slices.values()
+            for value in np.unique(slice_mask)
+            if int(value) > 0
+        }
+    )
+    # Only filter to one class when caller asks for a single label AND did not set match_any_label.
+    # Few-shot /「智能传播」uses match_any_label=true so all saved annotations are kept.
+    filter_to_label = bool(label_id is not None and label_id > 0 and not request.match_any_label)
+    if filter_to_label:
         for axis_name, axis_slices in sparse_slices_by_axis.items():
             for slice_index, axis_mask in list(axis_slices.items()):
                 filtered = (axis_mask == label_id).astype(np.uint8)
@@ -2352,6 +2474,12 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
                     axis_slices[slice_index] = filtered
                 else:
                     del axis_slices[slice_index]
+        seed_label_ids = [int(label_id)]
+        original_axial_labels = {
+            z: ((mask == label_id).astype(np.uint8) * np.uint8(label_id))
+            for z, mask in original_axial_labels.items()
+            if np.any(mask == label_id)
+        }
     if not any(sparse_slices_by_axis.values()):
         raise HTTPException(status_code=404, detail="No readable sparse masks found for label propagation")
 
@@ -2406,8 +2534,29 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
         for slice_index, slice_mask in negative_slices.items():
             axis_result[slice_index][slice_mask > 0] = 0
         propagated = np.maximum(propagated, _axis_result_to_volume(axis_result, axis))
-    if label_id is not None and label_id > 0:
-        propagated = (propagated > 0).astype(np.uint8) * np.uint8(label_id)
+
+    # Remap binary propagation (0/1) back to catalog label ids for overlay / 3D highlight.
+    fill_label_id = int(label_id) if (label_id is not None and label_id > 0) else (seed_label_ids[0] if seed_label_ids else 1)
+    if len(seed_label_ids) > 1 and not filter_to_label:
+        # Prefer the class with the most seed voxels when multiple classes were annotated.
+        counts = {lid: 0 for lid in seed_label_ids}
+        for slice_mask in original_axial_labels.values():
+            for lid in seed_label_ids:
+                counts[lid] += int(np.count_nonzero(slice_mask == lid))
+        fill_label_id = max(counts, key=lambda lid: (counts[lid], -lid))
+    propagated = (propagated > 0).astype(np.uint8) * np.uint8(fill_label_id)
+    # Hard-restore user-confirmed axial slices with their original class ids.
+    for slice_index, slice_mask in original_axial_labels.items():
+        if 0 <= int(slice_index) < depth and np.any(slice_mask):
+            propagated[int(slice_index)] = slice_mask.astype(np.uint8, copy=False)
+
+    if request.match_any_label or (not filter_to_label and len(seed_label_ids) > 1):
+        output_label = "我的标注"
+    else:
+        # Name file/record from actual voxel class, not stale request.label (often default liver).
+        output_label = _catalog_label_name(fill_label_id, fallback=label)
+    output_label_id = fill_label_id if len(seed_label_ids) <= 1 or filter_to_label else None
+
     if request.method == "random_walker":
         encoding = "label_propagation_random_walker_graph"
     elif request.image_guidance or request.method == "image_guided_distance":
@@ -2419,13 +2568,13 @@ def label_propagate(request: LabelPropagationRequest) -> LabelPropagationRespons
         request_case_id=request.case_id,
         image_id=request.image_id,
         version=output_version,
-        label=label,
+        label=output_label,
         encoding=encoding,
         source_mask_ids=source_mask_ids,
         mask_stack=propagated,
         volume=volume,
         label_type=output_label_type,
-        label_id=label_id,
+        label_id=output_label_id,
     )
     return LabelPropagationResponse(
         success=True,
@@ -2512,6 +2661,42 @@ def _call_deepedit_service(request: DeepEditRefineRequest, current_mask: dict | 
         raise
 
 
+def probe_deepedit_service_health() -> dict[str, Any]:
+    """Server-side health probe for the standalone DeepEdit service (:8010)."""
+    if not DEEPEDIT_SERVICE_URL:
+        return {
+            "success": False,
+            "configured": False,
+            "model_loaded": False,
+            "message": "DEEPEDIT_SERVICE_URL is not set",
+            "service_url": None,
+        }
+    health_url = DEEPEDIT_SERVICE_URL.rstrip("/") + "/health"
+    try:
+        http_request = urllib.request.Request(health_url, method="GET")
+        with urllib.request.urlopen(http_request, timeout=min(8.0, DEEPEDIT_SERVICE_TIMEOUT_SECONDS)) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("health response must be a JSON object")
+        loaded = bool(data.get("model_loaded") or data.get("success"))
+        return {
+            "success": loaded,
+            "configured": True,
+            "model_loaded": loaded,
+            "message": data.get("model_error") or data.get("message") or ("ok" if loaded else "model not loaded"),
+            "service_url": DEEPEDIT_SERVICE_URL,
+            "remote": data,
+        }
+    except Exception as exc:  # noqa: BLE001 — surface any connect/parse failure to UI
+        return {
+            "success": False,
+            "configured": True,
+            "model_loaded": False,
+            "message": f"DeepEdit health unreachable: {exc}",
+            "service_url": DEEPEDIT_SERVICE_URL,
+        }
+
+
 def _remote_refinement_response(
     request: DeepEditRefineRequest,
     remote_result: dict[str, Any],
@@ -2532,7 +2717,9 @@ def _remote_refinement_response(
                 status_code=400,
                 detail=f"Image {request.image_id} does not belong to case {request.case_id}",
             )
-        label = _normalize_label(request.label)
+        # Prefer catalog name from label_id so custom「其他」/tumor are not saved as liver by mistake.
+        refine_label_id = int(request.label_id) if request.label_id is not None else None
+        label = _catalog_label_name(refine_label_id, fallback=_normalize_label(request.label))
         mask_id = next_sqlite_entity_id("Mask", "masks", "mask_id")
         mask_path = _mask_path(
             case_id=request.case_id,
@@ -2548,6 +2735,7 @@ def _remote_refinement_response(
             target.write_bytes(base64.b64decode(str(remote_result["mask_base64"])))
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=502, detail="DeepEdit service returned invalid mask_base64") from exc
+        _remap_binary_nifti_to_label_id(mask_path, refine_label_id)
 
         shape = remote_result.get("shape")
         if not isinstance(shape, list) or len(shape) != 3:
@@ -2561,6 +2749,7 @@ def _remote_refinement_response(
             "path": mask_path,
             "version": request.output_version,
             "label": label,
+            "label_id": refine_label_id,
             "mask_format": "nii.gz",
             "slice_index": None,
             "width": int(shape[2]),

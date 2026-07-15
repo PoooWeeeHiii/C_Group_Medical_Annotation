@@ -25,18 +25,34 @@
 
 ## P5–P6 训练与推理
 
-1. 导出 Dataset（勾选 materialize，尽量多 case）
-2. 打开「AI训练中心」，填 Dataset ID，开始训练（默认 **20 epoch / 320² / 2.5D radius=1**）
+**推荐流程（肿瘤 / 其他 → Dataset → 训练）：**
+
+1. 标注时选「肿瘤」或「其他」（可起自定义名，体素仍是 8）
+2. 保存 → 一键传播 / 精修 → 尽量确认到 `final`（精标），至少保留 `v3_preview`（弱标）
+3. Dataset 导出：精标选 `final`、弱标选 `v3_preview`，勾选 **materialize**
+4. 智能训练中心：填导出的 Dataset ID，开始训练（含「其他」时 **Classes ≥ 9**）
+
+**一键执行（标注台）：** 右侧「推荐流程」卡片点 **「按推荐流程执行」**，自动：保存 → 传播 `v3_preview` →（有审核权时可选 promote `final`）→ **append** 进同类 Dataset（`Dataset_tumor` / `Dataset_other`）→ 跳转智能训练中心并预填 Dataset/Model ID（**不自动开训**；默认勾选 resume 增量续训）。
+
+操作对应：
+
+1. 导出 Dataset（勾选 materialize；同类增量固定 ID 并勾选 append）
+2. 打开「智能训练中心」，填 Dataset ID / Model ID，勾选 resume，开始训练（默认 **20 epoch / 320² / 2.5D radius=1**，Classes 默认 9）
 3. 任务完成后自动 `register_model(backend=platform_unet)`
 4. 在「标注工作台」选用该模型预测（推理含 3D 填洞 + 最大连通域后处理）
 
 CLI：
 
 ```bash
-python ai/train.py --dataset-id Dataset0001 --model-id ModelUNet0001 --epochs 20 --image-size 320 --context-radius 1
+# 推荐：探测 torch Python；默认 resume 增量；num_classes=9（更高 id 会自动抬升）
+bash scripts/start_platform_train.sh Dataset_tumor
+RESUME=1 bash scripts/start_platform_train.sh Dataset_other 10 ModelUNet_other
+
+# 或直接：
+python ai/train.py --dataset-id Dataset_tumor --model-id ModelUNet_tumor --epochs 20 --resume --num-classes 9
 ```
 
-说明：平台模型是 **2.5D 切片 U-Net**（邻层上下文），正式高精度请继续用 TotalSeg / nnUNet。旧版纯 2D checkpoint 仍可推理；新训模型需重新训练才能获得 2.5D 收益。
+说明：平台模型是 **2.5D 切片 U-Net**（邻层上下文），正式高精度请继续用 TotalSeg / nnUNet。同类新病例 append 进同一 Dataset 后，用 `--resume` 从已有 checkpoint 增量续训。
 
 ## 验收建议
 

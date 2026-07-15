@@ -7,11 +7,14 @@ class TrainStartRequest(BaseModel):
     epochs: int = Field(default=20, ge=1, le=500)
     batch_size: int = Field(default=4, ge=1, le=64)
     lr: float = Field(default=1e-4, gt=0)
-    num_classes: int = Field(default=6, ge=2, le=64)
+    num_classes: int = Field(default=9, ge=2, le=64, description="Include other=8 → need ≥9")
     image_size: int = Field(default=320, ge=64, le=512)
     context_radius: int = Field(default=1, ge=0, le=3, description="2.5D neighbor radius; 1 => 3 input channels")
     max_slices_per_volume: int = Field(default=64, ge=8, le=256)
     export_dir: str | None = None
+    # 同类增量续训：从已有 checkpoint 加载权重继续训
+    resume: bool = False
+    resume_from: str | None = None
 
 
 class TrainJobRecord(BaseModel):

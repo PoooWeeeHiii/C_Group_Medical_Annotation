@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>医学影像标注平台</title>
-    <link rel="stylesheet" href="/frontend/styles.css?v=surgery-compact-20260715" />
+    <link rel="stylesheet" href="/frontend/styles.css?v=incremental-train-20260715" />
   </head>
   <body>
     <div class="app-shell">
@@ -33,7 +33,7 @@
           <button class="nav-item active" data-view="dashboard"><span>⌁</span>数据总览</button>
           <button class="nav-item" data-view="cases"><span>▤</span>病例中心</button>
           <button class="nav-item" data-view="annotation"><span>◱</span>标注工作台</button>
-          <button class="nav-item" data-view="train"><span>↗</span>AI训练中心</button>
+          <button class="nav-item" data-view="train"><span>↗</span>智能训练中心</button>
           <button class="nav-item" data-view="versions"><span>◎</span>版本审核</button>
           <button class="nav-item" data-view="quality"><span>◇</span>质量报告</button>
           <button class="nav-item" data-view="export"><span>⇩</span>Dataset导出</button>
@@ -49,7 +49,7 @@
       <main class="workspace">
         <header class="topbar">
           <div>
-            <div class="eyebrow">医学 AI 工作站</div>
+            <div class="eyebrow">医学智能工作站</div>
             <h1 id="pageTitle">数据总览</h1>
           </div>
           <div class="topbar-actions">
@@ -89,10 +89,10 @@
           </div>
           <p class="login-kicker">Northeastern University · Medical AI</p>
           <h1>医学影像标注平台</h1>
-          <p class="login-hero-copy">人机协同闭环：导入 · 标注 · AI 预测 · 审核 · 训练 · 导出。请选择身份接入系统。</p>
+          <p class="login-hero-copy">人机协同闭环：导入 · 标注 · 智能预测 · 审核 · 训练 · 导出。请选择身份接入系统。</p>
           <ul class="login-feature-list">
             <li><span>01</span>多平面标注与 3D 体视</li>
-            <li><span>02</span>多器官 AI 推理与修正</li>
+            <li><span>02</span>多器官智能推理与修正</li>
             <li><span>03</span>版本审核与 Dataset 导出</li>
           </ul>
           <div class="login-hero-foot">自强不息 · 知行合一</div>
@@ -107,7 +107,7 @@
             <button type="button" class="role-card active" data-role-preset="annotator" aria-pressed="true">
               <strong>标注员</strong>
               <span>Annotator</span>
-              <small>2D/3D 标注 · AI 预测 · 提交审核</small>
+              <small>2D/3D 标注 · 智能预测 · 提交审核</small>
             </button>
             <button type="button" class="role-card" data-role-preset="reviewer" aria-pressed="false">
               <strong>审核员</strong>
@@ -135,6 +135,6 @@
 
     <div id="toast" class="toast" role="status"></div>
 
-    <script src="/frontend/app.js?v=surgery-confirm-roi-20260713"></script>
+    <script src="/frontend/app.js?v=incremental-train-20260715"></script>
   </body>
 </html>

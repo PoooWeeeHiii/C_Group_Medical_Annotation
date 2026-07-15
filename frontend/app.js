@@ -22,9 +22,11 @@ const state = {
   volumeMeta: {},
   volumeErrors: {},
   datasetExportResult: null,
+  pendingTrainDefaults: null,
   exportAssignments: {},
   exportMaterialize: true,
   exportStrict: true,
+  exportAppend: true,
   activeCaseId: null,
   activeImageId: null,
   activeSlice: 0,
@@ -34,6 +36,8 @@ const state = {
   annotationTool: "brush",
   annotationLabel: "liver",
   annotationLabelId: 1,
+  /** Custom name when label category is「其他」(label_id=8) */
+  customOtherLabelName: localStorage.getItem("label_custom_other_name") || "",
   eraseCurrentClassOnly: true,
   brushRadius: Number(localStorage.getItem("label_brush_radius")) || 4,
   eraseRadius: Number(localStorage.getItem("label_erase_radius")) || 10,
@@ -103,7 +107,7 @@ const titles = {
   dashboard: "数据总览",
   cases: "病例中心",
   annotation: "标注工作台",
-  train: "AI训练中心",
+  train: "智能训练中心",
   versions: "版本审核",
   quality: "质量报告",
   export: "Dataset导出",
@@ -114,7 +118,7 @@ const roleText = {
   annotator: "标注员",
   reviewer: "审核员",
   admin: "管理员",
-  ai_service: "AI服务",
+  ai_service: "智能服务",
 };
 
 const LOGIN_ROLE_PRESETS = {
@@ -185,17 +189,44 @@ function labelColor(labelId) {
 }
 
 function labelDisplayText(labelId) {
-  const item = labelById(labelId);
+  const id = Number(labelId);
+  const item = labelById(id);
   if (!item) return `${labelId}`;
+  if (id === 8 && state.customOtherLabelName.trim()) {
+    return state.customOtherLabelName.trim();
+  }
   return item.display_name || item.name;
+}
+
+function sanitizeCustomLabelName(raw) {
+  const text = String(raw || "").trim().slice(0, 40);
+  if (!text) return "other";
+  return text.replace(/[\\/:*?"<>|\s]+/g, "_");
+}
+
+function applyCustomOtherLabelName(raw) {
+  const text = String(raw || "").trim().slice(0, 40);
+  state.customOtherLabelName = text;
+  if (text) {
+    localStorage.setItem("label_custom_other_name", text);
+  } else {
+    localStorage.removeItem("label_custom_other_name");
+  }
+  if (Number(state.annotationLabelId) === 8) {
+    state.annotationLabel = sanitizeCustomLabelName(text);
+  }
 }
 
 function setActiveAnnotationLabel(labelId) {
   const id = Number(labelId) || 1;
   const item = labelById(id);
   state.annotationLabelId = id;
-  state.annotationLabel = item?.name || `label_${id}`;
-  const presetKey = LABEL_TO_MAGIC_PRESET[state.annotationLabel];
+  if (id === 8) {
+    state.annotationLabel = sanitizeCustomLabelName(state.customOtherLabelName);
+  } else {
+    state.annotationLabel = item?.name || `label_${id}`;
+  }
+  const presetKey = LABEL_TO_MAGIC_PRESET[item?.name || state.annotationLabel];
   const preset = presetKey ? magicWandPresets[presetKey] : null;
   if (preset) {
     state.magicWandPreset = presetKey;
@@ -1215,13 +1246,15 @@ async function deleteMaskRecord(maskId) {
 
 async function create3DMaskPreview(item, image) {
   try {
+    // Few-shot / 智能传播：吃掉该图所有已保存 v1_manual 切片，不要按当前选中 label_id 过滤，
+    // 否则换类别后再点传播会把刚画的高亮全滤掉。
     const data = await apiPost("/api/label_propagate", {
       case_id: item.case_id,
       image_id: image.image_id,
       source_version: "v1_manual",
       output_version: "v3_preview",
-      label: state.annotationLabel,
-      label_id: state.annotationLabelId,
+      label: "*",
+      match_any_label: true,
       label_type: "pseudo",
       method: "image_guided_distance",
       fill_holes: true,
@@ -1310,11 +1343,17 @@ async function runFewShotPropagate(event) {
     await refreshCases();
     await refreshLabelingAssist({ silent: true });
     state.active3DMaskId = data.mask_id;
-    state.volumeViewMode = "3d";
+    // 留在 2D，立刻把传播结果叠到画布，便于看到自己标注层的高亮
+    state.volumeViewMode = "2d";
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
     allowCanvasMaskRestore(image.image_id);
-    showToast(`少量标注传播完成：${data.mask_id}（基于已保存 ${labeledCount} 层轴位标注）`);
+    const annotated = Array.isArray(data.annotated_slices) ? data.annotated_slices : localLabeledAxialSlices(image);
+    if (annotated.length) {
+      state.activeAxis = "axial";
+      setCurrentSliceIndex(Number(annotated[0]) || 0, "axial");
+    }
+    showToast(`少量标注传播完成：${data.mask_id}（已叠到 2D；可切 3D 查看体高亮）`);
     render();
   } catch (error) {
     showToast(error.message || "一键传播失败");
@@ -1346,41 +1385,46 @@ function jumpToRecommendedSlice(sliceIndex) {
   showToast(`已跳转到推荐层 ${Number(sliceIndex) + 1}`);
 }
 
-async function promotePreviewMask(targetVersion, event) {
-  const button = event.currentTarget;
+async function promoteMaskToVersion(targetVersion, { switchTo3d = true } = {}) {
   const item = activeCase();
   const image = activeImage();
   if (!item || !image) {
-    showToast("请先选择病例和图像");
-    return;
+    throw new Error("请先选择病例和图像");
   }
+  const masks = await loadImageMasks(image.image_id, { force: true });
+  const source = latestMaskByVersion(masks, "v3_preview") ||
+    (targetVersion === "final" ? latestMaskByVersion(masks, "v3_fusion") : null);
+  if (!source) {
+    throw new Error(targetVersion === "final" ? "请先生成 v3_preview 或 v3_fusion 3D Mask" : "请先生成 v3_preview 预览结果");
+  }
+  const data = await apiPost(`/api/mask/${source.mask_id}/promote`, {
+    target_version: targetVersion,
+  });
+  await apiPost("/api/version", {
+    case_id: item.case_id,
+    version: targetVersion,
+    annotation: data.mask_id,
+    model: `promoted_from:${source.mask_id}`,
+    dataset: null,
+  });
+  await loadImageMasks(image.image_id, { force: true });
+  await loadCaseVersions(item.case_id, { force: true });
+  await refreshCases();
+  state.active3DMaskId = data.mask_id;
+  if (switchTo3d) {
+    state.volumeViewMode = "3d";
+    state.volumeLoadingKey = null;
+  }
+  return data;
+}
 
+async function promotePreviewMask(targetVersion, event) {
+  const button = event.currentTarget;
   button.disabled = true;
   const previousText = button.textContent;
   button.textContent = "确认中...";
   try {
-    const masks = await loadImageMasks(image.image_id, { force: true });
-    const source = latestMaskByVersion(masks, "v3_preview") ||
-      (targetVersion === "final" ? latestMaskByVersion(masks, "v3_fusion") : null);
-    if (!source) {
-      throw new Error(targetVersion === "final" ? "请先生成 v3_preview 或 v3_fusion 3D Mask" : "请先生成 v3_preview 预览结果");
-    }
-    const data = await apiPost(`/api/mask/${source.mask_id}/promote`, {
-      target_version: targetVersion,
-    });
-    await apiPost("/api/version", {
-      case_id: item.case_id,
-      version: targetVersion,
-      annotation: data.mask_id,
-      model: `promoted_from:${source.mask_id}`,
-      dataset: null,
-    });
-    await loadImageMasks(image.image_id, { force: true });
-    await loadCaseVersions(item.case_id, { force: true });
-    await refreshCases();
-    state.active3DMaskId = data.mask_id;
-    state.volumeViewMode = "3d";
-    state.volumeLoadingKey = null;
+    const data = await promoteMaskToVersion(targetVersion, { switchTo3d: true });
     showToast(`已确认 ${targetVersion}：${data.mask_id}`);
     render();
   } catch (error) {
@@ -1438,7 +1482,7 @@ async function runAIPredict(event) {
     render();
     return data;
   } catch (error) {
-    showToast(error.message || "AI 预测失败");
+    showToast(error.message || "智能预测失败");
   } finally {
     button.disabled = false;
     button.textContent = previousText;
@@ -1495,8 +1539,8 @@ async function executeAiPredictRequest(request, { silentToasts = false } = {}) {
     const hasAll = Array.isArray(data.organ_labels) && data.organ_labels.includes("全部标注");
     showToast(
       hasAll
-        ? `AI 预测完成 [${statusText}]：已生成「全部标注」· ${data.organ_count || 1} 个器官`
-        : `AI 预测完成 [${statusText}]：${request.targetLabel} · ${data.mask_id}`,
+        ? `智能预测完成 [${statusText}]：已生成「全部标注」· ${data.organ_count || 1} 个器官`
+        : `智能预测完成 [${statusText}]：${request.targetLabel} · ${data.mask_id}`,
     );
     if (data.fallback_reason) showToast(`注意：${data.fallback_reason}`);
     if (Array.isArray(data.organ_labels) && data.organ_labels.length > 1) {
@@ -1550,33 +1594,42 @@ async function ensureTotalSegReadyForGesture() {
         `TotalSegmentator 未安装到 TOTALSEG_PYTHON 环境。请在该 Python 中执行：pip install TotalSegmentator。详情：${detail}`,
       );
     }
-    throw new Error(`AI 环境未就绪：${detail}`);
+    throw new Error(`智能环境未就绪：${detail}`);
   }
 }
 
 async function findGesturePrepMasks(imageId) {
   const masks = await loadImageMasks(imageId, { force: true });
   const byNewest = (a, b) => String(b.create_time || "").localeCompare(String(a.create_time || ""));
+  const isNifti = (m) => m.mask_format === "nii.gz" || String(m.path || "").endsWith(".nii.gz");
   const organsMask = [...masks]
-    .filter((m) => String(m.label || "") === "全部标注" && m.version === "v2_ai")
+    .filter((m) => String(m.label || "") === "全部标注" && m.version === "v2_ai" && isNifti(m))
     .sort(byNewest)[0] || null;
   // Prefer latest multiclass v2_ai if 「全部标注」name drifted
   const fallbackMulti = !organsMask
     ? [...masks]
-      .filter((m) => m.version === "v2_ai" && (m.mask_format === "nii.gz" || String(m.path || "").endsWith(".nii.gz")))
+      .filter((m) => m.version === "v2_ai" && isNifti(m))
       .sort(byNewest)
       .find((m) => /全部|all|multi|organ/i.test(String(m.label || "")) || Number(m.label_count || 0) > 1)
     : null;
   const tumorMask = [...masks]
     .filter((m) => {
       const label = String(m.label || "").toLowerCase();
-      return m.version === "v2_ai" && (label === "tumor" || label.includes("肿瘤") || label.includes("tumor"));
+      return m.version === "v2_ai" && isNifti(m) && (label === "tumor" || label.includes("肿瘤") || label.includes("tumor"));
+    })
+    .sort(byNewest)[0] || null;
+  const manualMask = [...masks]
+    .filter((m) => {
+      if (m.version !== "v1_manual" || !isNifti(m)) return false;
+      const label = String(m.label || "");
+      return label === "我的标注" || label === "全部标注" || /我的|手动|manual/i.test(label);
     })
     .sort(byNewest)[0] || null;
   return {
     masks,
     organsMask: organsMask || fallbackMulti || null,
     tumorMask,
+    manualMask,
   };
 }
 
@@ -1601,14 +1654,18 @@ async function runGestureHeroFlow(event) {
   try {
     await ensureGestureVolumeReady(image);
 
-    state.gestureHeroBusyLabel = "检查已有 AI Mask…";
+    state.gestureHeroBusyLabel = "检查已有智能 Mask…";
     button.textContent = state.gestureHeroBusyLabel;
-    let { organsMask, tumorMask } = await findGesturePrepMasks(image.image_id);
+    let { organsMask, tumorMask, manualMask } = await findGesturePrepMasks(image.image_id);
 
     if (!forceRerun && organsMask) {
       organsOk = true;
       state.active3DMaskId = organsMask.mask_id;
       showToast(`复用已有全器官 Mask（${organsMask.mask_id}），跳过 TotalSeg`);
+    } else if (!forceRerun && manualMask) {
+      organsOk = true;
+      state.active3DMaskId = manualMask.mask_id;
+      showToast(`复用「我的标注」Mask（${manualMask.mask_id}）；手术里可再切换智能全器官`);
     }
     if (!forceRerun && tumorMask) {
       tumorOk = true;
@@ -1661,7 +1718,7 @@ async function runGestureHeroFlow(event) {
     }
 
     if (!organsOk) {
-      throw new Error("全器官 Mask 不可用，无法进入手势/模拟手术准备。");
+      throw new Error("全器官 / 我的标注 Mask 均不可用。请先跑智能预测，或把 2D 标注堆叠为「我的标注」3D Mask。");
     }
 
     // Refresh selection after optional predicts
@@ -1730,7 +1787,7 @@ async function loadV2AiTo2D(event) {
     const masks = await loadImageMasks(image.image_id, { force: true });
     const aiMask = latestMaskByVersion(masks, "v2_ai");
     if (!aiMask) {
-      throw new Error("当前图像尚无 v2_ai Mask，请先运行 AI 预测");
+      throw new Error("当前图像尚无 v2_ai Mask，请先运行智能预测");
     }
     state.active3DMaskId = aiMask.mask_id;
     state.volumeViewMode = "2d";
@@ -1911,6 +1968,84 @@ function confirmedSliceIndices(image) {
   return [...values].sort((a, b) => a - b);
 }
 
+function deepEditOrganLabel(labelId = state.annotationLabelId) {
+  const item = labelById(labelId);
+  const catalogName = String(item?.name || "").trim().toLowerCase();
+  // Shared binary DeepEdit weights; map platform catalog → training organ keys.
+  const map = {
+    heart: "heart",
+    liver: "liver",
+    spleen: "spleen",
+    lung: "left_lung",
+    kidney: "left_kidney",
+    bone: "bone",
+    tumor: "tumor",
+    other: sanitizeCustomLabelName(state.customOtherLabelName) || "other",
+    background: "background",
+  };
+  if (catalogName && map[catalogName]) return map[catalogName];
+  const raw = String(
+    Number(labelId) === Number(state.annotationLabelId) ? state.annotationLabel : (item?.name || "")
+  ).trim();
+  if (!raw) return "label";
+  // Prefer English-ish tokens already used by Person B training set.
+  if (/^(heart|liver|spleen|left_lung|right_lung|left_kidney|right_kidney)$/i.test(raw)) {
+    return raw.toLowerCase();
+  }
+  return sanitizeCustomLabelName(raw) || catalogName || "label";
+}
+
+/**
+ * DeepEdit / 图割写回类别：优先用当前标注下拉；若仍是默认「肝」但正在精修的 3D mask
+ * 是别的单类（如 tumor），则跟着 mask 走，避免结果文件名/label_id 被写成 liver。
+ */
+function labelIdFromMaskRecord(mask) {
+  const id = Number(mask?.label_id) || 0;
+  if (id > 0) return id;
+  const name = String(mask?.label || "").trim().toLowerCase();
+  if (!name || ["我的标注", "全部标注", "label", "*", "all", "multiclass"].includes(name)) return 0;
+  const hit = effectiveLabelCatalog({ includeBackground: false, enabledOnly: false })
+    .find((item) => {
+      const n = String(item.name || "").toLowerCase();
+      const d = String(item.display_name || "").toLowerCase();
+      return n === name || d === name;
+    });
+  return hit ? Number(hit.label_id) : 0;
+}
+
+function resolveRefineTargetLabel(current3DMask) {
+  const uiId = Number(state.annotationLabelId) || 1;
+  const maskId = labelIdFromMaskRecord(current3DMask);
+  let labelId = uiId;
+  // Default picker is liver(#1); refining a tumor/other 3D mask must not rename output to liver.
+  if (maskId > 1 && uiId === 1 && maskId !== 1) {
+    labelId = maskId;
+  }
+  const item = labelById(labelId);
+  const label = labelId === 8
+    ? sanitizeCustomLabelName(state.customOtherLabelName)
+    : (item?.name || String(current3DMask?.label || "label"));
+  return {
+    labelId,
+    label,
+    organLabel: deepEditOrganLabel(labelId),
+  };
+}
+
+async function probeDeepEditHealth() {
+  try {
+    // Same-origin proxy via main backend (:8000) — browser cannot CORS-fetch :8010 reliably.
+    const data = await apiGet("/api/deepedit/health");
+    return {
+      ok: Boolean(data.model_loaded || data.success),
+      detail: data.message || data.model_error || data.service_url || "",
+      data,
+    };
+  } catch (error) {
+    return { ok: false, detail: error.message || "DeepEdit 服务未启动" };
+  }
+}
+
 async function runSmart3DRefine(event) {
   const button = event.currentTarget;
   const item = activeCase();
@@ -1922,8 +2057,15 @@ async function runSmart3DRefine(event) {
 
   button.disabled = true;
   const previousText = button.textContent;
-  button.textContent = "保存并生成...";
+  button.textContent = "检查 DeepEdit…";
   try {
+    const health = await probeDeepEditHealth();
+    if (!health.ok) {
+      throw new Error(
+        `DeepEdit 服务未就绪（:8010）：${health.detail || "请先 bash scripts/start_deepedit.sh"}。图割可用「按灰度边界修正」。`,
+      );
+    }
+    button.textContent = "保存并生成...";
     await saveCurrentSliceIfAnnotated(item, image);
     button.textContent = "智能修正中...";
     const currentMasks = await loadImageMasks(image.image_id, { force: true });
@@ -1932,6 +2074,11 @@ async function runSmart3DRefine(event) {
       latestMaskByVersion(currentMasks, "v3_preview");
     const prompts = deepEditPromptPayload(image);
     const scribbles = deepEditScribblePayload(image);
+    if (!prompts.positive.length && !prompts.negative.length && !scribbles.length) {
+      throw new Error("请先画正向标注或智能橡皮擦负点，再点「智能精修」");
+    }
+    const target = resolveRefineTargetLabel(current3DMask);
+    const organLabel = target.organLabel;
     const data = await apiPost("/api/deepedit/refine", {
       case_id: item.case_id,
       image_id: image.image_id,
@@ -1939,7 +2086,8 @@ async function runSmart3DRefine(event) {
       current_mask_version: current3DMask?.version || "v3_fusion",
       current_mask_id: current3DMask?.mask_id || null,
       output_version: "v3_preview",
-      label: state.annotationLabel,
+      label: organLabel,
+      label_id: target.labelId,
       model_id: "DeepEdit",
       require_neural: true,
       random_walker_beta: state.refineParams.randomWalkerBeta,
@@ -1955,6 +2103,9 @@ async function runSmart3DRefine(event) {
         prompt_mode: "brush_positive_smart_eraser_negative",
         positive_count: prompts.positive.length,
         negative_count: prompts.negative.length,
+        organ_label: organLabel,
+        platform_label_id: target.labelId,
+        platform_label: target.label,
       },
       confirmed_slices: confirmedSliceIndices(image),
     });
@@ -1973,7 +2124,7 @@ async function runSmart3DRefine(event) {
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
     allowCanvasMaskRestore(image.image_id);
-    showToast(`DeepEdit 神经网络修正完成：${data.mask_id} · ${data.model_status || data.refinement_mode}`);
+    showToast(`DeepEdit 神经网络修正完成：${data.mask_id} · ${target.label}#${target.labelId} · ${data.model_status || data.refinement_mode}`);
     render();
   } catch (error) {
     showToast(error.message || "DeepEdit 修正失败（需启动 DeepEdit 服务；图割请用「图割修正」）");
@@ -1998,12 +2149,16 @@ async function runGraphCutRefine(event) {
   try {
     await saveCurrentSliceIfAnnotated(item, image);
     const prompts = deepEditPromptPayload(image);
+    const catalogItem = labelById(state.annotationLabelId);
+    const labelName = Number(state.annotationLabelId) === 8
+      ? sanitizeCustomLabelName(state.customOtherLabelName)
+      : (catalogItem?.name || state.annotationLabel);
     const data = await apiPost("/api/label_propagate", {
       case_id: item.case_id,
       image_id: image.image_id,
       source_version: "v1_manual",
       output_version: "v3_preview",
-      label: state.annotationLabel,
+      label: labelName,
       label_id: state.annotationLabelId,
       label_type: "pseudo",
       method: "random_walker",
@@ -2034,7 +2189,7 @@ async function runGraphCutRefine(event) {
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
     allowCanvasMaskRestore(image.image_id);
-    showToast(`图割修正完成（Random Walker · ${state.annotationLabel}#${state.annotationLabelId}）：${data.mask_id}`);
+    showToast(`图割修正完成（Random Walker · ${labelDisplayText(state.annotationLabelId)}#${state.annotationLabelId}）：${data.mask_id}`);
     render();
   } catch (error) {
     showToast(error.message || "图割修正失败");
@@ -2081,7 +2236,7 @@ async function renderAnnotationMaskIn3D(event) {
       version: "v1_manual",
       label: "*",
       match_any_label: true,
-      output_label: "全部标注",
+      output_label: "我的标注",
     });
     if (!data?.mask_id) throw new Error("3D Mask 未生成");
     state.active3DMaskId = data.mask_id;
@@ -2091,7 +2246,7 @@ async function renderAnnotationMaskIn3D(event) {
     state.volumeLoadingKey = null;
     state.propagatedSliceLoads = {};
     allowCanvasMaskRestore(image.image_id);
-    showToast(`已把你的 2D 标注堆成 3D 高亮：${data.mask_id}（可在下拉框选择）`);
+    showToast(`已把你的 2D 标注堆成 3D 高亮：${data.mask_id}（可在模拟手术「标注来源」中选择）`);
     render();
   } catch (error) {
     showToast(error.message || "当前标注高亮失败");
@@ -2161,6 +2316,7 @@ async function exportDataset(event) {
   const datasetId = $("#exportDatasetId")?.value.trim() || undefined;
   const materialize = $("#exportMaterialize")?.checked ?? state.exportMaterialize;
   const strict = $("#exportStrict")?.checked ?? state.exportStrict;
+  const append = $("#exportAppend")?.checked ?? state.exportAppend;
   const name = $("#exportDatasetName")?.value.trim() || `medical_seg_${labelSet}_${version}`;
 
   const train = [];
@@ -2195,11 +2351,13 @@ async function exportDataset(event) {
       format,
       materialize: Boolean(materialize),
       strict: Boolean(strict),
+      append: Boolean(append && datasetId),
     }, { timeoutMs: 10 * 60 * 1000 });
     state.datasetExportResult = data;
     state.exportLabelSet = labelSet;
     state.exportMaterialize = Boolean(materialize);
     state.exportStrict = Boolean(strict);
+    state.exportAppend = Boolean(append);
     showToast(data.message || `Dataset 导出成功：${data.dataset_id}`);
     render();
   } catch (error) {
@@ -2253,10 +2411,51 @@ function metricCard(label, value, note) {
   `;
 }
 
+function pendingTodoCases() {
+  const priority = { unannotated: 0, pending: 1, annotated: 2 };
+  return [...state.cases]
+    .filter((item) => {
+      const status = String(item.status || "unannotated");
+      return status === "unannotated" || status === "pending";
+    })
+    .sort((a, b) => {
+      const pa = priority[a.status] ?? 9;
+      const pb = priority[b.status] ?? 9;
+      if (pa !== pb) return pa - pb;
+      return String(a.case_id).localeCompare(String(b.case_id));
+    });
+}
+
+function renderPendingCaseList() {
+  const todos = pendingTodoCases();
+  if (!todos.length) {
+    return `<div class="placeholder compact">暂无待办病例。未标注与待审核的病例会显示在这里。</div>`;
+  }
+  return `
+    <div class="todo-case-list">
+      ${todos.map((item) => {
+        const status = item.status || "unannotated";
+        const action = status === "pending" ? "去审核" : "进入标注";
+        return `
+          <div class="todo-case-row">
+            <div class="todo-case-main">
+              <strong>${escapeHtml(item.case_id)}</strong>
+              <span class="todo-case-meta">${escapeHtml(item.patient_id || "-")} · ${escapeHtml(item.modality || "CT")} · ${Number(item.image_count) || 0} 图</span>
+            </div>
+            <span class="status-badge">${escapeHtml(statusText[status] || status)}</span>
+            <button type="button" class="ghost-button" data-open-case="${escapeHtml(item.case_id)}" data-open-view="${status === "pending" ? "versions" : "annotation"}">${action}</button>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
 function renderDashboard() {
   const total = state.cases.length;
   const annotated = state.cases.filter((item) => item.status !== "unannotated").length;
   const pending = Math.max(total - annotated, 0);
+  const todoCount = pendingTodoCases().length;
   const progress = total ? Math.round((annotated / total) * 100) : 0;
   const metrics = state.trainJob?.metrics || state.trainJobs?.[0]?.metrics;
   const bestDice = metrics?.best_val_dice != null ? Number(metrics.best_val_dice).toFixed(3) : "暂无";
@@ -2266,7 +2465,7 @@ function renderDashboard() {
         const dice = Math.max(0, Math.min(1, Number(row.val_dice) || 0));
         return `<div class="bar" style="height:${Math.round(dice * 100)}%" title="epoch ${row.epoch}: dice ${dice.toFixed(3)}"></div>`;
       }).join("")
-    : `<div class="placeholder compact">尚无真实训练指标。请在「AI训练中心」启动训练。</div>`;
+    : `<div class="placeholder compact">尚无真实训练指标。请在「智能训练中心」启动训练。</div>`;
   return `
     <div class="dashboard-hero">
       <section class="hero-panel">
@@ -2296,7 +2495,7 @@ function renderDashboard() {
           </div>
         </div>
         <p class="hero-copy">
-          CT 导入、病例管理、人工标注、AI 推理、版本审核、质量评价和 Dataset 导出统一在一个闭环系统中完成。
+          CT 导入、病例管理、人工标注、智能推理、版本审核、质量评价和 Dataset 导出统一在一个闭环系统中完成。
           支持金标准上传、多标签编辑、多类导出与平台 U-Net 训练注册。
         </p>
         <div class="pipeline">
@@ -2312,23 +2511,21 @@ function renderDashboard() {
     </div>
     <div class="grid cols-4">
       ${metricCard("病例总数", total, "来自后端 /api/cases")}
-      ${metricCard("已标注", annotated, "人工 + AI + 修正")}
+      ${metricCard("已标注", annotated, "人工 + 智能 + 修正")}
       ${metricCard("待处理", pending, "仍为 unannotated")}
       ${metricCard("最佳 Dice", bestDice, metrics ? `模型 ${escapeHtml(metrics.model_id || "")}` : "来自最近一次真实训练")}
     </div>
     <div class="grid cols-2" style="margin-top:18px">
       <section class="panel">
-        <h2>AI训练 Val Dice</h2>
+        <h2>智能训练 Val Dice</h2>
         <div class="line-chart">${bars}</div>
       </section>
       <section class="panel">
-        <h2>最近任务</h2>
-        <div class="log-box">上传 CT (+金标准) -> Case / Image / Mask
-人工多标签标注 -> 保存 Mask
-AI 预测 -> v2_ai（真实后端或失败提示）
-DeepEdit / 图割 -> v3_preview
-导出多类 Dataset -> 训练中心 U-Net
-注册模型 -> 标注台选用预测</div>
+        <div class="panel-heading-row">
+          <h2>待办病例</h2>
+          <span class="panel-heading-meta">${todoCount} 项</span>
+        </div>
+        ${renderPendingCaseList()}
       </section>
     </div>
   `;
@@ -2452,6 +2649,7 @@ function labelListOptions() {
 
 function renderLabelPicker() {
   const color = labelColor(state.annotationLabelId);
+  const isOther = Number(state.annotationLabelId) === 8;
   return `
     <div class="label-picker">
       <label class="label-select-field">
@@ -2463,6 +2661,18 @@ function renderLabelPicker() {
           </select>
         </div>
       </label>
+      ${isOther ? `
+        <label class="label-select-field custom-other-label-field">
+          <span>自定义标签名</span>
+          <input
+            id="customOtherLabelInput"
+            type="text"
+            maxlength="40"
+            placeholder="例如：膈肌、淋巴结…"
+            value="${escapeHtml(state.customOtherLabelName)}"
+          />
+        </label>
+      ` : ""}
       <div class="brush-size-controls">
         <div class="brush-size-row">
           <label for="brushRadius">画笔粗细</label>
@@ -2475,7 +2685,9 @@ function renderLabelPicker() {
           <strong id="eraseRadiusValue">${state.eraseRadius}px</strong>
         </div>
       </div>
-      <p class="label-picker-hint">画笔/智能选择等会按当前类别写入，颜色与色块一致。</p>
+      <p class="label-picker-hint">${isOther
+        ? "已选「其他」：可起自定义名，体素 ID 仍是 8（训练 Classes 需 ≥ 9）。"
+        : "画笔/智能选择等会按当前类别写入，颜色与色块一致。肿瘤=4，其他=8。"}</p>
       <label class="erase-mode-row">
         <input type="checkbox" id="eraseCurrentClassOnly" ${state.eraseCurrentClassOnly ? "checked" : ""} />
         橡皮擦仅清除当前类别
@@ -2696,12 +2908,12 @@ function renderAiPredictControl() {
   return `
     <div class="ai-predict-row">
       <label class="ai-predict-field" for="aiPredictTarget">
-        <span>AI预测目标</span>
+        <span>智能预测目标</span>
         <select id="aiPredictTarget" title="选择要预测的器官">
           ${options}
         </select>
       </label>
-      <button type="button" class="tool-button ai-predict-button" data-ai-predict>开始AI预测</button>
+      <button type="button" class="tool-button ai-predict-button" data-ai-predict>开始智能预测</button>
     </div>
   `;
 }
@@ -2719,7 +2931,7 @@ function renderGestureControl() {
       <button type="button" class="tool-button ai-predict-button gesture-hero-button" data-gesture-hero ${busy ? "disabled" : ""}>
         ${escapeHtml(label)}
       </button>
-      <small class="panel-lead">与 AI 预测同级入口：先自动 TotalSeg 全器官 + 疑似肿瘤，再开摄像头；随后可进入模拟手术。</small>
+      <small class="panel-lead">与智能预测同级入口：先自动 TotalSeg 全器官 + 疑似肿瘤，再开摄像头；随后可进入模拟手术。</small>
     </div>
   `;
 }
@@ -2871,6 +3083,140 @@ function annotationToolLabel(tool = state.annotationTool) {
   return annotationTools.find(([key]) => key === tool)?.[1] || tool;
 }
 
+/** 标注 → 导出 → 训练闭环推荐流程（标注台 / Dataset / 训练中心共用） */
+function renderRecommendedTrainPipeline(context = "annotate") {
+  const steps = [
+    { n: "1", t: "选类标注", d: "选「肿瘤」或「其他」（可自定义名，体素仍是 8）" },
+    { n: "2", t: "保存并传播", d: "保存 → 一键传播 / 精修 → 尽量确认到 final（精标），至少保留 v3_preview（弱标）" },
+    { n: "3", t: "导出 Dataset", d: "同类并入 Dataset_tumor / Dataset_other（append），勾选 materialize" },
+    { n: "4", t: "智能训练", d: "填 Dataset ID，开始训练（resume 同类模型；含其他时 Classes ≥ 9）" },
+  ];
+  const jump = context === "annotate"
+    ? `<div class="pipeline-jumps">
+        <button type="button" class="primary-button" data-run-recommended-pipeline ${canAnnotate() ? "" : "disabled"}>按推荐流程执行</button>
+        <button type="button" class="ghost-button" data-view-jump="export">去 Dataset 导出</button>
+        <button type="button" class="ghost-button" data-view-jump="train">去智能训练中心</button>
+      </div>`
+    : context === "export"
+      ? `<div class="pipeline-jumps"><button type="button" class="ghost-button" data-view-jump="train">下一步：智能训练中心</button></div>`
+      : `<div class="pipeline-jumps"><button type="button" class="ghost-button" data-view-jump="export">返回 Dataset 导出</button></div>`;
+  return `
+    <div class="pipeline-guide" data-pipeline-context="${escapeHtml(context)}">
+      <div class="param-header"><span>推荐流程</span><strong>标注 → 导出 → 训练</strong></div>
+      <ol class="pipeline-steps">
+        ${steps.map((s) => `<li><strong>${s.n}. ${escapeHtml(s.t)}</strong><span>${escapeHtml(s.d)}</span></li>`).join("")}
+      </ol>
+      ${jump}
+    </div>
+  `;
+}
+
+/**
+ * 一键：保存 → 传播 v3_preview →（可选）promote final → materialize 导出 → 跳转训练中心。
+ * 不自动开训。
+ */
+async function runRecommendedTrainPipeline(event) {
+  const button = event.currentTarget;
+  const item = activeCase();
+  const image = activeImage();
+  if (!item || !image) {
+    showToast("请先选择病例和图像");
+    return;
+  }
+  const labelId = Number(state.annotationLabelId) || 0;
+  if (labelId !== 4 && labelId !== 8) {
+    showToast("请先在标注类别中选择「肿瘤」(4) 或「其他」(8)，再执行推荐流程");
+    return;
+  }
+
+  button.disabled = true;
+  const previousText = button.textContent;
+  try {
+    button.textContent = "保存中…";
+    try {
+      await saveAllAnnotatedMasks(item, image);
+    } catch (error) {
+      console.warn("推荐流程：本地保存跳过", error);
+    }
+
+    button.textContent = "检查层数…";
+    const assist = await refreshLabelingAssist({ silent: true });
+    const serverCount = Number(assist?.workload?.labeled_count);
+    const localCount = localLabeledAxialSlices(image).length;
+    const labeledCount = Number.isFinite(serverCount) ? serverCount : localCount;
+    if (labeledCount < state.fewShotMinSlices) {
+      throw new Error(
+        `请至少标注 ${state.fewShotMinSlices} 层轴位并保存（当前服务器 ${labeledCount} 层，本地 ${localCount} 层）`,
+      );
+    }
+
+    button.textContent = "传播中…";
+    const preview = await create3DMaskPreview(item, image);
+    if (!preview?.mask_id) throw new Error("一键传播失败，未生成 v3_preview");
+    state.active3DMaskId = preview.mask_id;
+    await loadImageMasks(image.image_id, { force: true });
+    await loadCaseVersions(item.case_id, { force: true });
+
+    let useDense = false;
+    if (canConfirmFinal()) {
+      useDense = window.confirm(
+        "推荐流程：确定 = 精标（promote → final）；取消 = 弱标（保留 v3_preview）",
+      );
+    } else {
+      showToast("当前账号无审核权，将导出弱标 v3_preview");
+    }
+
+    if (useDense) {
+      button.textContent = "确认 final…";
+      await promoteMaskToVersion("final", { switchTo3d: false });
+    }
+
+    const labelSet = useDense ? "dense" : "weak";
+    const version = useDense ? "final" : "v3_preview";
+    const classKey = labelId === 4 ? "tumor" : "other";
+    const datasetId = `Dataset_${classKey}`;
+    const modelId = `ModelUNet_${classKey}`;
+    button.textContent = "导出中…";
+    const exportData = await apiPost("/api/export", {
+      dataset_id: datasetId,
+      name: `medical_seg_${classKey}_${labelSet}`,
+      version,
+      label_set: labelSet,
+      train: [item.case_id],
+      val: [],
+      test: [],
+      format: "nnunet",
+      materialize: true,
+      strict: false,
+      append: true,
+    }, { timeoutMs: 10 * 60 * 1000 });
+
+    state.datasetExportResult = exportData;
+    state.exportLabelSet = labelSet;
+    state.exportMaterialize = true;
+    state.exportAssignments = {
+      ...(state.exportAssignments || {}),
+      [item.case_id]: "train",
+    };
+    state.pendingTrainDefaults = {
+      dataset_id: exportData.dataset_id || datasetId,
+      model_id: modelId,
+      resume: true,
+      num_classes: 9,
+    };
+
+    const totalCases = exportData.total_train_cases || exportData.train_count || 1;
+    showToast(
+      `推荐流程完成：${classKey} → ${exportData.dataset_id || datasetId}（累计约 ${totalCases} 例，append）；请点「开始训练」做增量续训`,
+    );
+    setView("train");
+  } catch (error) {
+    showToast(error.message || "推荐流程执行失败");
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
 function renderMagicWandControls() {
   const options = Object.entries(magicWandPresets)
     .map(([key, preset]) => `<option value="${key}" ${state.magicWandPreset === key ? "selected" : ""}>${preset.label}（${preset.range}）</option>`)
@@ -2901,7 +3247,7 @@ function renderSmartRefineHint() {
         <strong class="prompt-positive" id="promptPositiveCount">正点 ${counts.positive}</strong>
         <strong class="prompt-negative" id="promptNegativeCount">负点 ${counts.negative}</strong>
       </div>
-      <small>画笔/多边形/矩形 = 正向标注；智能橡皮擦记为负点。「AI 智能精修」需启动 DeepEdit 服务；未启动时请用「按灰度边界修正」。</small>
+      <small>画笔/多边形/矩形 = 正向；智能橡皮擦 = 负点。先启动 DeepEdit（:8010，已放正式权重）再点「智能精修」；未启动请用「按灰度边界修正」。</small>
     </div>
   `;
 }
@@ -3108,10 +3454,9 @@ function render3DViewer(item, image, volume, masks = []) {
         <select id="active3DMaskSelect" ${niftiMasks.length ? "" : "disabled"}>${maskOptions}</select>
         <code>${active3DMask
           ? active3DMask.path
-          : "手动画的是 2D JSON，不能直接出现在此列表。请点右侧按钮：把已保存的 2D 标注堆成 3D 后再选。"}</code>
+          : "暂无 3D Mask。请先在 2D 保存标注，或用智能预测 / 一键传播生成 nii.gz 后再选择。"}</code>
         ${renderMaskQualitySummary(active3DMask)}
       </div>
-      <button class="primary-button" data-render-annotation-3d ${canRender ? "" : "disabled"}>用我的2D标注生成3D高亮</button>
     </div>
   `;
   return `
@@ -3125,8 +3470,6 @@ function render3DViewer(item, image, volume, masks = []) {
       ${mprGrid}
       ${mipGrid}
       ${maskOverlayPanel}
-      <div class="image-source-line">三维体数据标注 = 体渲染可视化 + 3D mask 生成/编辑闭环（2D 修正为主），不是必须 3D 画笔。</div>
-      <div class="image-source-line">3D来源：${canRender ? `/api/image/${image.image_id}/surface-mesh?protocol=body|lung|soft|bone${active3DMask ? ` + /api/mask/${active3DMask.mask_id}/surface-mesh` : ""}；选中 Mask 高亮叠加` : "等待加载"}</div>
     </section>
   `;
 }
@@ -3168,7 +3511,7 @@ function renderAnnotation() {
             ? `<div class="reject-note-box"><span>体数据过薄</span><strong>当前仅 ${escapeHtml(String(volume.slice_count))} 层，无法可靠做 TotalSeg / MPR / 模拟手术。请切换到 Case0002–0004（约 134 层）。</strong></div>`
             : ""}
         </div>
-        <h3 style="margin-top:24px">AI 模型</h3>
+        <h3 style="margin-top:24px">智能模型</h3>
         <div class="case-meta">
           <div class="meta-line"><span>当前模型</span><strong>${model ? escapeHtml(model.display_name || model.model_id) : "未加载"}</strong></div>
           <div class="meta-line"><span>model_id</span><strong>${model ? escapeHtml(model.model_id) : "-"}</strong></div>
@@ -3184,19 +3527,20 @@ function renderAnnotation() {
         ${renderAnnotationModeControls()}
         ${renderLabelPicker()}
         <div class="tool-grid">${renderToolButtons()}</div>
-        <div class="annotation-state-line"><span>当前工具：<strong id="annotationToolLabel">${annotationToolLabel()}</strong></span><span>当前 label：<strong>${escapeHtml(state.annotationLabel)} #${state.annotationLabelId}</strong></span><span>智能阈值：<strong>HU ± ${state.magicWandThreshold}</strong></span><span>当前切片：<strong id="annotationMaskStats">0 像素</strong></span></div>
+        <div class="annotation-state-line"><span>当前工具：<strong id="annotationToolLabel">${annotationToolLabel()}</strong></span><span>当前 label：<strong>${escapeHtml(labelDisplayText(state.annotationLabelId))} (${escapeHtml(state.annotationLabel)} #${state.annotationLabelId})</strong></span><span>智能阈值：<strong>HU ± ${state.magicWandThreshold}</strong></span><span>当前切片：<strong id="annotationMaskStats">0 像素</strong></span></div>
+        ${renderRecommendedTrainPipeline("annotate")}
         ${renderMagicWandControls()}
         ${renderFewShotWizard(image, volume)}
         ${renderSmartRefineHint()}
         ${renderRefineParamControls()}
         <div class="grid action-stack" style="margin-top:18px">
           <button class="primary-button tip-button" data-save-mask data-tip="把当前切片上的手动画笔/多边形等标注保存为人工版本（v1_manual）。" ${image && canAnnotate() ? "" : "disabled"}>保存当前标注</button>
-          <button class="ghost-button tip-button" data-load-v2-ai data-tip="把 AI 自动分割结果（v2_ai）放到 2D 画布上，方便继续手工修改。" ${image && aiMask ? "" : "disabled"}>载入 AI 结果到画布</button>
-          <button class="ghost-button tip-button" data-smart-3d-refine data-tip="用 DeepEdit 神经网络，根据你的正点/负点智能修正三维分割。需本机 DeepEdit 服务（:8010）；未启动请改用下方「按灰度边界修正」。" ${image && canAnnotate() ? "" : "disabled"}>AI 智能精修</button>
-          <button class="ghost-button tip-button" data-graph-cut-refine data-tip="不依赖外部 AI 服务：按 CT 灰度边界，结合正点/负点做图割式修正，结果写入精修预览（v3_preview）。" ${image && canAnnotate() ? "" : "disabled"}>按灰度边界修正</button>
+          <button class="ghost-button tip-button" data-load-v2-ai data-tip="把智能自动分割结果（v2_ai）放到 2D 画布上，方便继续手工修改。" ${image && aiMask ? "" : "disabled"}>载入智能结果到画布</button>
+          <button class="ghost-button tip-button" data-smart-3d-refine data-tip="用 DeepEdit 神经网络，根据你的正点/负点智能修正三维分割。需本机 DeepEdit 服务（:8010）；未启动请改用下方「按灰度边界修正」。" ${image && canAnnotate() ? "" : "disabled"}>智能精修</button>
+          <button class="ghost-button tip-button" data-graph-cut-refine data-tip="不依赖外部智能服务：按 CT 灰度边界，结合正点/负点做图割式修正，结果写入精修预览（v3_preview）。" ${image && canAnnotate() ? "" : "disabled"}>按灰度边界修正</button>
           <button class="ghost-button tip-button" data-confirm-fusion data-tip="把精修预览（v3_preview）确认为「人机确认版」（v3_fusion），表示这版可以留作后续训练/审核参考。" ${previewMask && canAnnotate() ? "" : "disabled"}>确认精修结果</button>
           <button class="ghost-button tip-button" data-final-mask data-tip="把已确认的精修结果提升为最终定稿（final）。定稿后一般用于导出与金标准。" ${(previewMask || fusionMask) && canConfirmFinal() ? "" : "disabled"}>标记为最终版</button>
-          <button class="ghost-button tip-button" data-compare-masks data-tip="自动比较：AI 初标（优先 v2_ai）与人工确认版（优先 final，否则 v3_fusion / v3_preview）的重合度，给出 Dice / IoU。" ${image ? "" : "disabled"}>对比 AI 与人工重合度</button>
+          <button class="ghost-button tip-button" data-compare-masks data-tip="自动比较：智能初标（优先 v2_ai）与人工确认版（优先 final，否则 v3_fusion / v3_preview）的重合度，给出 Dice / IoU。" ${image ? "" : "disabled"}>对比智能与人工重合度</button>
           <button class="ghost-button tip-button" data-export-mask-nifti data-tip="把三维分割 Mask 导出为 NIfTI 等文件，便于下载或外部软件查看。" ${image && canAnnotate() ? "" : "disabled"}>导出分割文件</button>
           <button class="ghost-button tip-button" data-start-3d-render data-tip="导出或打开当前病例的三维图像/渲染视图，用于整体查看解剖结构。" ${image ? "" : "disabled"}>导出三维图像</button>
           <p class="panel-lead" style="margin:8px 0 0">送审 / 通过 / 驳回请到「版本审核」页操作。</p>
@@ -3499,7 +3843,7 @@ async function clearAllManualAnnotations() {
   }
   const ok = window.confirm(
     "确认清空当前图像全部切片的标注？\n"
-    + "将清除所有切片画布内容，并停止自动叠加已保存/AI 结果到 2D 画布。\n"
+    + "将清除所有切片画布内容，并停止自动叠加已保存/智能结果到 2D 画布。\n"
     + (savedJsonMasks.length ? `同时删除服务器上 ${savedJsonMasks.length} 条已保存的 v1_manual 切片 Mask。\n` : "")
     + "此操作后无法通过「←」撤销恢复。",
   );
@@ -3824,6 +4168,32 @@ function encodeMaskRle(data) {
   return runs;
 }
 
+/** Majority foreground label_id inside a slice buffer (ignores 0). */
+function majorityLabelIdFromMaskData(data, fallbackId = state.annotationLabelId) {
+  const counts = new Map();
+  for (let i = 0; i < (data?.length || 0); i += 1) {
+    const value = Number(data[i]) || 0;
+    if (value <= 0) continue;
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  if (!counts.size) return Number(fallbackId) || 1;
+  let bestId = Number(fallbackId) || 1;
+  let bestCount = -1;
+  for (const [id, count] of counts.entries()) {
+    if (count > bestCount || (count === bestCount && id < bestId)) {
+      bestId = id;
+      bestCount = count;
+    }
+  }
+  return bestId;
+}
+
+function labelNameForSave(labelId) {
+  const id = Number(labelId) || 1;
+  if (id === 8) return sanitizeCustomLabelName(state.customOtherLabelName);
+  return labelById(id)?.name || state.annotationLabel || `label_${id}`;
+}
+
 function decodeMaskRle(runs, width, height) {
   const data = new Uint8Array(width * height);
   let offset = 0;
@@ -3874,12 +4244,13 @@ function currentSliceMaskPayload(item, image) {
   if (!hasMaskPixels && !points.length) {
     throw new Error("当前切片没有标注内容，请先画 Mask 或添加点标注");
   }
+  const saveLabelId = majorityLabelIdFromMaskData(data, state.annotationLabelId);
   return {
     case_id: item.case_id,
     image_id: image.image_id,
     version: "v1_manual",
-    label: state.annotationLabel,
-    label_id: state.annotationLabelId,
+    label: labelNameForSave(saveLabelId),
+    label_id: saveLabelId,
     label_type: currentLabelType(),
     mask_format: "json",
     axis: activeAxis(),
@@ -3897,12 +4268,13 @@ function buildSliceMaskPayload(item, image, axis, sliceIndex, mask, points = [])
   const hasMaskPixels = data.some((value) => value > 0);
   if (!hasMaskPixels && !points.length) return null;
   if (!mask?.width || !mask?.height) return null;
+  const saveLabelId = majorityLabelIdFromMaskData(data, state.annotationLabelId);
   return {
     case_id: item.case_id,
     image_id: image.image_id,
     version: "v1_manual",
-    label: state.annotationLabel,
-    label_id: state.annotationLabelId,
+    label: labelNameForSave(saveLabelId),
+    label_id: saveLabelId,
     label_type: currentLabelType(),
     mask_format: "json",
     axis,
@@ -4011,11 +4383,28 @@ async function restorePropagatedSliceMask(imageId) {
     if (data.width !== canvas.width || data.height !== canvas.height) {
       throw new Error(`叠加结果尺寸不匹配：${data.width}×${data.height} / ${canvas.width}×${canvas.height}`);
     }
+    let overlayData = decodeMaskRle(data.mask, data.width, data.height);
+    // Legacy binary slices (0/1): remap 1 → mask.label_id so color matches the annotated class.
+    const remapId = Number(data.label_id || overlayMask.label_id || state.annotationLabelId || 0);
+    if (remapId > 1) {
+      const unique = new Set();
+      for (let i = 0; i < overlayData.length; i += 1) {
+        if (overlayData[i]) unique.add(overlayData[i]);
+        if (unique.size > 2) break;
+      }
+      if (unique.size === 1 && unique.has(1)) {
+        const remapped = new Uint8Array(overlayData.length);
+        for (let i = 0; i < overlayData.length; i += 1) {
+          remapped[i] = overlayData[i] ? remapId : 0;
+        }
+        overlayData = remapped;
+      }
+    }
     if (!state.sliceMasks[imageId]) state.sliceMasks[imageId] = {};
     state.sliceMasks[imageId][sliceKey] = {
       width: data.width,
       height: data.height,
-      data: decodeMaskRle(data.mask, data.width, data.height),
+      data: overlayData,
       source: overlayMask.version === "v2_ai" ? "ai_predict" : "label_propagation",
       maskId: overlayMask.mask_id,
     };
@@ -4812,7 +5201,10 @@ async function hydrateVersions() {
 
 function renderTrain() {
   const job = state.trainJob;
-  const exportId = state.datasetExportResult?.dataset_id || "";
+  const defaults = state.pendingTrainDefaults || {};
+  const exportId = defaults.dataset_id || state.datasetExportResult?.dataset_id || "";
+  const modelDefault = defaults.model_id || job?.model_id || "";
+  const resumeDefault = defaults.resume !== false;
   const history = Array.isArray(job?.metrics?.history) ? job.metrics.history : [];
   const chart = history.length
     ? history.map((row) => {
@@ -4820,22 +5212,26 @@ function renderTrain() {
         return `<div class="bar" style="height:${Math.round(dice * 100)}%" title="E${row.epoch}"></div>`;
       }).join("")
     : `<div class="placeholder compact">训练开始后显示 Val Dice</div>`;
-  const logs = (job?.logs || []).slice(-40).join("\n") || "等待开始训练…\n先在 Dataset 导出页 materialize，再填写 dataset_id。";
+  const logs = (job?.logs || []).slice(-40).join("\n") || "等待开始训练…\n同类病例会 append 进 Dataset_tumor / Dataset_other；勾选 resume 从已有权重增量续训。";
   const status = job?.status || "idle";
   return `
     <div class="grid cols-2">
       <section class="panel">
         <h2>训练配置</h2>
-        <p class="panel-lead">基于导出的 nnUNet 目录训练平台 <strong>2.5D U-Net</strong>（邻层上下文 + 按类采样 + 推理 3D 后处理）。正式高精度分割请优先用 TotalSeg / nnUNet。</p>
+        ${renderRecommendedTrainPipeline("train")}
+        <p class="panel-lead">基于导出的 nnUNet 目录训练平台 <strong>2.5D U-Net</strong>。同类标注并入固定 Dataset（如 <code>Dataset_tumor</code>），勾选 <strong>resume</strong> 从 <code>ModelUNet_tumor</code> 等 checkpoint 增量续训。含「其他」(id=8) 时 Classes ≥ <strong>9</strong>。</p>
         <div class="toolbar-row inference-toolbar" style="margin-top:14px; flex-wrap:wrap; gap:10px">
-          <div class="field"><label>Dataset ID</label><input id="trainDatasetId" value="${escapeHtml(exportId)}" placeholder="Dataset0001" /></div>
-          <div class="field"><label>Model ID</label><input id="trainModelId" value="${escapeHtml(job?.model_id || "")}" placeholder="自动生成" /></div>
+          <div class="field"><label>Dataset ID</label><input id="trainDatasetId" value="${escapeHtml(exportId)}" placeholder="Dataset_tumor" /></div>
+          <div class="field"><label>Model ID</label><input id="trainModelId" value="${escapeHtml(modelDefault)}" placeholder="ModelUNet_tumor" /></div>
           <div class="field"><label>Epochs</label><input id="trainEpochs" type="number" min="1" max="200" value="20" /></div>
           <div class="field"><label>Batch</label><input id="trainBatch" type="number" min="1" max="32" value="4" /></div>
           <div class="field"><label>LR</label><input id="trainLr" type="number" step="0.0001" value="0.0001" /></div>
-          <div class="field"><label>Classes</label><input id="trainClasses" type="number" min="2" max="32" value="6" /></div>
+          <div class="field"><label>Classes</label><input id="trainClasses" type="number" min="2" max="32" value="${Number(defaults.num_classes) || 9}" title="含其他(id=8)时至少 9" /></div>
           <div class="field"><label>Image size</label><input id="trainImageSize" type="number" min="64" max="512" value="320" /></div>
           <div class="field"><label>2.5D radius</label><input id="trainContextRadius" type="number" min="0" max="3" value="1" title="1=三通道(z-1,z,z+1)" /></div>
+        </div>
+        <div class="toolbar-row" style="margin-top:12px">
+          <label class="checkbox-row"><input id="trainResume" type="checkbox" ${resumeDefault ? "checked" : ""} /> resume 增量续训（加载同类已有 checkpoint）</label>
         </div>
         <div class="toolbar-row" style="margin-top:18px">
           <button class="primary-button" data-start-train ${status === "running" || status === "queued" ? "disabled" : ""}>开始训练</button>
@@ -4876,12 +5272,15 @@ async function startPlatformTrain(event) {
       epochs: Number($("#trainEpochs")?.value || 20),
       batch_size: Number($("#trainBatch")?.value || 4),
       lr: Number($("#trainLr")?.value || 0.0001),
-      num_classes: Number($("#trainClasses")?.value || 6),
+      num_classes: Number($("#trainClasses")?.value || 9),
       image_size: Number($("#trainImageSize")?.value || 320),
       context_radius: Number($("#trainContextRadius")?.value || 1),
+      resume: Boolean($("#trainResume")?.checked),
     }, { timeoutMs: 60 * 1000 });
     state.trainJob = data.job;
-    showToast(`训练任务已启动：${data.job.job_id}`);
+    showToast(
+      `训练任务已启动：${data.job.job_id}${($("#trainResume")?.checked) ? "（resume 增量）" : ""}`,
+    );
     startTrainPolling(data.job.job_id);
     render();
   } catch (error) {
@@ -4971,7 +5370,7 @@ function renderVersions() {
                   <td class="review-actions">
                     <button class="ghost-button tip-button" data-tip="在下方版本管理中选中该病例并查看各版本记录。" data-focus-case="${escapeHtml(entry.case_id)}">查看版本</button>
                     <button class="primary-button tip-button" data-tip="病例须为待审状态。通过后自动把最新精修结果定为 final。" data-queue-approve="${escapeHtml(entry.case_id)}" ${entry.promotable_mask_id ? "" : "disabled"}>通过并定稿</button>
-                    <button class="danger-button tip-button" data-tip="退回给标注员继续修改；已有 AI/精修版本会保留，不会删除。" data-queue-reject="${escapeHtml(entry.case_id)}">驳回修改</button>
+                    <button class="danger-button tip-button" data-tip="退回给标注员继续修改；已有智能/精修版本会保留，不会删除。" data-queue-reject="${escapeHtml(entry.case_id)}">驳回修改</button>
                   </td>
                 </tr>
               `).join("") : `<tr><td colspan="5">当前没有待审病例</td></tr>`}
@@ -5231,9 +5630,10 @@ function renderExport() {
   return `
     <section class="panel">
       <h2>训练数据集导出</h2>
-      <p class="panel-lead">勾选 materialize 后会写入 <code>dataset/exports/DatasetXXXX/{imagesTr,labelsTr,dataset.json,splits_final.json}</code>。可分别导出<strong>弱标签</strong>（v3_preview 伪标）与<strong>精标</strong>（final）两套 split。</p>
+      ${renderRecommendedTrainPipeline("export")}
+      <p class="panel-lead">勾选 materialize 后写入 <code>dataset/exports/&lt;DatasetID&gt;/</code>。同类增量请固定 Dataset ID（如 <code>Dataset_tumor</code>）并勾选 <strong>append</strong>，新病例会合并进同一训练集。</p>
       <div class="toolbar-row" style="margin-top:12px">
-        <div class="field"><label>Dataset ID</label><input id="exportDatasetId" placeholder="自动生成 Dataset0001" /></div>
+        <div class="field"><label>Dataset ID</label><input id="exportDatasetId" placeholder="Dataset_tumor / Dataset_other" /></div>
         <div class="field"><label>名称</label><input id="exportDatasetName" placeholder="medical_segmentation_dataset" /></div>
         <div class="field"><label>标签集</label>
           <select id="exportLabelSet">
@@ -5253,6 +5653,7 @@ function renderExport() {
       </div>
       <div class="toolbar-row" style="margin-top:10px">
         <label class="checkbox-row"><input id="exportMaterialize" type="checkbox" ${state.exportMaterialize ? "checked" : ""} /> materialize 真导出（拷贝/转换 NIfTI）</label>
+        <label class="checkbox-row"><input id="exportAppend" type="checkbox" ${state.exportAppend ? "checked" : ""} /> append 合并进已有 Dataset（同类增量）</label>
         <label class="checkbox-row"><input id="exportStrict" type="checkbox" ${state.exportStrict ? "checked" : ""} /> 严格校验（缺 mask 则失败）</label>
         <button class="ghost-button" data-export-assign-all-train>全部设为 train</button>
         <button class="ghost-button" data-export-clear-splits>清空划分</button>
@@ -5609,6 +6010,13 @@ function render() {
       render();
     });
   });
+  document.querySelectorAll("[data-view-jump]").forEach((button) => {
+    button.addEventListener("click", () => setView(button.dataset.viewJump));
+  });
+  const runPipelineButton = $("[data-run-recommended-pipeline]");
+  if (runPipelineButton) {
+    runPipelineButton.addEventListener("click", runRecommendedTrainPipeline);
+  }
   const loadMipButton = $("[data-load-mip]");
   if (loadMipButton) {
     loadMipButton.addEventListener("click", () => {
@@ -5714,6 +6122,22 @@ function render() {
     annotationLabelSelect.addEventListener("change", () => {
       setActiveAnnotationLabel(annotationLabelSelect.value);
       render();
+    });
+  }
+  const customOtherLabelInput = $("#customOtherLabelInput");
+  if (customOtherLabelInput) {
+    customOtherLabelInput.addEventListener("input", () => {
+      applyCustomOtherLabelName(customOtherLabelInput.value);
+      const chips = document.querySelectorAll(".annotation-state-line span strong");
+      if (chips[1]) {
+        chips[1].textContent = `${labelDisplayText(state.annotationLabelId)} (${state.annotationLabel} #${state.annotationLabelId})`;
+      }
+    });
+    customOtherLabelInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        customOtherLabelInput.blur();
+      }
     });
   }
   syncBrushSizeControlsFromState();
@@ -5955,6 +6379,12 @@ function render() {
       state.exportMaterialize = materializeBox.checked;
     });
   }
+  const appendBox = $("#exportAppend");
+  if (appendBox) {
+    appendBox.addEventListener("change", () => {
+      state.exportAppend = appendBox.checked;
+    });
+  }
   const strictBox = $("#exportStrict");
   if (strictBox) {
     strictBox.addEventListener("change", () => {
@@ -5980,7 +6410,8 @@ function render() {
       state.undoStack = [];
       state.redoStack = [];
       resetViewerZoom({ render: false });
-      setView("annotation");
+      const targetView = button.dataset.openView || "annotation";
+      setView(targetView);
     });
   });
   const viewerZoomSlider = $("#viewerZoomSlider");
@@ -6064,7 +6495,7 @@ async function startVolumeViewer(image) {
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/volume_viewer.js?v=surgery-compact-20260715`);
+    const module = await import(`/frontend/volume_viewer.js?v=surgery-organ-pick-20260715`);
     if (maskId) {
       loadMaskQuality(maskId)
         .then(() => updateMaskQualitySummary(maskId))
@@ -6072,6 +6503,10 @@ async function startVolumeViewer(image) {
           console.warn(`3D Mask 质量摘要加载失败：${maskId}`, error);
           updateMaskQualitySummary(maskId);
         });
+    }
+    const labelNameOverrides = {};
+    if (state.customOtherLabelName.trim()) {
+      labelNameOverrides[8] = state.customOtherLabelName.trim();
     }
     await module.renderVolume3D({
       container,
@@ -6087,26 +6522,54 @@ async function startVolumeViewer(image) {
           item.color,
         ]),
       ),
+      labelNameOverrides,
     });
     container.dataset.ready = "true";
-    container.addEventListener("gesture-organ-select", (event) => {
-      const name = event.detail?.name || `label_${event.detail?.labelId}`;
-      showToast(`手势选中器官：${name}`);
-    });
-    container.addEventListener("gesture-surgery-ready", (event) => {
-      state.gestureSurgeryActive = Boolean(event.detail?.surgery);
-      state.gestureHeroActive = Boolean(container.__volumeViewerApi?.isGestureRunning?.());
-      // Soft refresh label on hero button without full page rebuild if possible.
-      const hero = document.querySelector("[data-gesture-hero]");
-      if (hero && !state.gestureHeroBusy) {
-        hero.textContent = state.gestureSurgeryActive
-          ? "模拟手术中"
-          : state.gestureHeroActive
-            ? "手势控制中 · 再次点击可聚焦"
-            : "开始手势控制";
-      }
-    });
-    container.addEventListener("surgery-result-save", async (event) => {
+    if (!container.__surgeryEventsBound) {
+      container.__surgeryEventsBound = true;
+      container.addEventListener("gesture-organ-select", (event) => {
+        const name = event.detail?.name || `label_${event.detail?.labelId}`;
+        showToast(`手势选中器官：${name}`);
+      });
+      container.addEventListener("surgery-mask-source-change", async (event) => {
+        const nextMaskId = String(event.detail?.maskId || "").trim();
+        if (!nextMaskId) return;
+        const resumeSurgery = Boolean(event.detail?.resumeSurgery);
+        const resumeGesture = Boolean(event.detail?.resumeGesture) || resumeSurgery;
+        state.active3DMaskId = nextMaskId;
+        state.volumeLoadingKey = null;
+        state.gestureSurgeryActive = false;
+        showToast(`正在切换到 Mask：${nextMaskId}`);
+        render();
+        try {
+          const api = await waitForVolumeViewer(60000);
+          if (!api) throw new Error("3D 视图未就绪");
+          api.setOrgansReady?.(true);
+          if (resumeGesture) {
+            const started = await api.startGestureAfterPrep?.();
+            if (started && resumeSurgery) {
+              api.enterSurgeryMode?.();
+            }
+          }
+          showToast(resumeSurgery ? "已切换标注来源，可继续选器官" : "已切换标注来源");
+        } catch (error) {
+          showToast(`切换标注来源失败：${error.message || error}`);
+        }
+      });
+      container.addEventListener("gesture-surgery-ready", (event) => {
+        state.gestureSurgeryActive = Boolean(event.detail?.surgery);
+        state.gestureHeroActive = Boolean(container.__volumeViewerApi?.isGestureRunning?.());
+        // Soft refresh label on hero button without full page rebuild if possible.
+        const hero = document.querySelector("[data-gesture-hero]");
+        if (hero && !state.gestureHeroBusy) {
+          hero.textContent = state.gestureSurgeryActive
+            ? "模拟手术中"
+            : state.gestureHeroActive
+              ? "手势控制中 · 再次点击可聚焦"
+              : "开始手势控制";
+        }
+      });
+      container.addEventListener("surgery-result-save", async (event) => {
       const snap = event.detail || {};
       const item = activeCase();
       const image = activeImage();
@@ -6171,24 +6634,25 @@ async function startVolumeViewer(image) {
       } catch (error) {
         showToast(error.message || "保存手术 ROI 失败");
       }
-    });
-    container.addEventListener("surgery-robot-path-export", async (event) => {
-      const snap = event.detail || {};
-      const resultId = snap.result_id || null;
-      try {
-        if (resultId) {
-          const plan = await apiGet(`/api/surgery_results/${encodeURIComponent(resultId)}/robot_path`);
-          downloadJsonFile(`${resultId}_robot_path.json`, plan);
-          showToast(`已导出机器臂路径：${resultId}`);
-          return;
+      });
+      container.addEventListener("surgery-robot-path-export", async (event) => {
+        const snap = event.detail || {};
+        const resultId = snap.result_id || null;
+        try {
+          if (resultId) {
+            const plan = await apiGet(`/api/surgery_results/${encodeURIComponent(resultId)}/robot_path`);
+            downloadJsonFile(`${resultId}_robot_path.json`, plan);
+            showToast(`已导出机器臂路径：${resultId}`);
+            return;
+          }
+          // No saved result yet — save first to generate plan, then download from response.
+          showToast("尚未保存，将先保存再导出路径…");
+          container.dispatchEvent(new CustomEvent("surgery-result-save", { detail: snap }));
+        } catch (error) {
+          showToast(error.message || "导出机器臂路径失败");
         }
-        // No saved result yet — save first to generate plan, then download from response.
-        showToast("尚未保存，将先保存再导出路径…");
-        container.dispatchEvent(new CustomEvent("surgery-result-save", { detail: snap }));
-      } catch (error) {
-        showToast(error.message || "导出机器臂路径失败");
-      }
-    });
+      });
+    }
     // If hero flow already marked organs ready before viewer remount, re-apply.
     if (state.gestureHeroActive || state.gestureHeroBusy) {
       container.__volumeViewerApi?.setOrgansReady?.(true);

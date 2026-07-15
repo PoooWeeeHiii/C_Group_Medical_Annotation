@@ -181,16 +181,27 @@ function sampleMaskLabelId(maskData, maskValues, uvx, uvy, uvz) {
   return maskValues[z * width * height + y * width + x] || 0;
 }
 
+/** Map raw texture voxel → catalog label id (binary single-class textures are often 255). */
+function resolvePickLabelId(maskData, raw) {
+  if (!raw) return 0;
+  const multi =
+    Boolean(maskData?.multiclass) &&
+    Array.isArray(maskData?.unique_labels) &&
+    maskData.unique_labels.length > 1;
+  if (multi) return raw | 0;
+  const single =
+    Number(maskData?.label_id) ||
+    Number(maskData?.unique_labels?.[0]) ||
+    1;
+  return single > 0 ? single : 1;
+}
+
 function computeLabelFocus(maskData, maskValues, labelId) {
   if (!maskData || !maskValues || !labelId || !Array.isArray(maskData.dimensions)) {
     return null;
   }
   const [width, height, depth] = maskData.dimensions.map((value) => Number(value) || 0);
   if (!width || !height || !depth) return null;
-  const multi =
-    Boolean(maskData.multiclass) &&
-    Array.isArray(maskData.unique_labels) &&
-    maskData.unique_labels.length > 1;
   const voxelCount = width * height * depth;
   let stride = 1;
   if (voxelCount > 160 * 160 * 160) stride = 2;
@@ -214,7 +225,7 @@ function computeLabelFocus(maskData, maskValues, labelId) {
       for (let x = 0; x < width; x += stride) {
         const raw = maskValues[yBase + x] | 0;
         if (!raw) continue;
-        const id = multi ? raw : 1;
+        const id = resolvePickLabelId(maskData, raw);
         if (id !== labelId) continue;
         const nx = (x + 0.5) / width;
         const ny = (y + 0.5) / height;
@@ -342,11 +353,7 @@ function pickMaskLabelAtCursor(maskData, maskValues, viewerState, canvas, nx, ny
     const p = [origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t];
     const raw = sampleMaskLabelId(maskData, maskValues, p[0], p[1], p[2]);
     if (!raw) continue;
-    const multi =
-      Boolean(maskData.multiclass) &&
-      Array.isArray(maskData.unique_labels) &&
-      maskData.unique_labels.length > 1;
-    const labelId = multi ? raw : 1;
+    const labelId = resolvePickLabelId(maskData, raw);
     if (labelId > 0) {
       best = labelId;
       // Prefer first hit from camera (near surface).
@@ -600,6 +607,7 @@ export async function renderVolume3D({
   isotropic = true,
   highlightMask = false,
   labelColors = null,
+  labelNameOverrides = null,
 }) {
   if (!container || !imageId) return;
   clearContainer(container);
@@ -669,6 +677,7 @@ export async function renderVolume3D({
     maskOrganMeshes,
     highlightMask,
     labelColors,
+    labelNameOverrides,
   });
 }
 
@@ -727,6 +736,7 @@ function renderWithWebGL({
   maskOrganMeshes = [],
   highlightMask = false,
   labelColors = null,
+  labelNameOverrides = null,
 }) {
   clearContainer(container);
 
@@ -2014,7 +2024,7 @@ function renderWithWebGL({
           </div>
           <div class="gesture-surgery-entry" data-surgery-entry>
             <button type="button" class="primary-button surgery-enter-button" data-surgery-enter>进入模拟手术</button>
-            <small data-surgery-entry-hint>需已加载全器官分割；将高亮疑似肿瘤并启用双手刀/视图。</small>
+            <small data-surgery-entry-hint>可选智能全器官、疑似肿瘤或「我的标注」；进入后点芯片选器官。</small>
           </div>
           <div class="gesture-surgery-panel hidden" data-surgery-panel>
             <div class="surgery-status" data-surgery-status>模拟手术待命</div>
@@ -2024,6 +2034,11 @@ function renderWithWebGL({
               <span data-step-chip="cut">3 切割</span>
             </div>
             <small class="surgery-step-tip" data-surgery-step-tip>选器官 → 确认 ROI → 盒内切割</small>
+            <label class="surgery-row">
+              <span>标注来源</span>
+              <select data-surgery-mask-source title="智能全器官 / 疑似肿瘤 / 我的标注"></select>
+            </label>
+            <div class="surgery-organ-picks" data-surgery-organ-picks title="点击即可选中，无需手势瞄准"></div>
             <div class="surgery-controls-grid">
               <label class="surgery-row surgery-row--check">
                 <span>肿瘤高亮</span>
@@ -2052,7 +2067,7 @@ function renderWithWebGL({
             <details class="gesture-help surgery-help">
               <summary>流程说明</summary>
               <div class="gesture-hint">
-                <div><b>1</b> 指向器官 → 捏选中</div>
+                <div><b>1</b> 点下方器官芯片，或指向后捏选中</div>
                 <div><b>2</b> 调边距 →「确定 ROI」</div>
                 <div><b>3</b> 立掌切割 · 捏合收刀留痕</div>
                 <div><b>保存</b> 生成 LPS/RAS 机器臂路径草案</div>
@@ -2097,8 +2112,40 @@ function renderWithWebGL({
   const labelMetaMapPromise = loadLabelMetaMap();
   let labelNameMap = {};
   let labelMetaMap = {};
+
+  function mergeLabelNameOverrides(baseMap) {
+    const merged = { ...(baseMap || {}) };
+    const aliases = maskData?.label_aliases;
+    if (aliases && typeof aliases === "object") {
+      for (const [key, value] of Object.entries(aliases)) {
+        const id = Number(key);
+        const name = String(value || "").trim();
+        if (id > 0 && name) merged[id] = name;
+      }
+    }
+    if (labelNameOverrides && typeof labelNameOverrides === "object") {
+      for (const [key, value] of Object.entries(labelNameOverrides)) {
+        const id = Number(key);
+        const name = String(value || "").trim();
+        if (id > 0 && name) merged[id] = name;
+      }
+    }
+    // Single-class user mask: prefer the mask's own label string over catalog「其他」.
+    const labels = Array.isArray(maskData?.unique_labels) ? maskData.unique_labels : [];
+    const multi = Boolean(maskData?.multiclass) && labels.length > 1;
+    if (!multi) {
+      const lid = Number(maskData?.label_id) || Number(labels[0]) || 0;
+      const lbl = String(maskData?.label || "").trim();
+      if (lid > 0 && lbl && !/^(全部标注|我的标注|all|multiclass|manual_all)$/i.test(lbl)) {
+        merged[lid] = lbl;
+      }
+    }
+    return merged;
+  }
+
   labelNameMapPromise.then((map) => {
-    labelNameMap = map;
+    labelNameMap = mergeLabelNameOverrides(map);
+    refreshOrganPickChips();
   });
   labelMetaMapPromise.then((map) => {
     labelMetaMap = map;
@@ -2602,7 +2649,7 @@ function renderWithWebGL({
     const tip = gesturePanel.querySelector("[data-surgery-step-tip]");
     if (tip) {
       if (surgeryStep === "select") {
-        tip.textContent = "第1步：指向目标器官并捏一下选中。选中后才会出现长方体 ROI。";
+        tip.textContent = "第1步：点击下方器官芯片，或指向目标后捏一下。选中后才会出现长方体 ROI。";
       } else if (surgeryStep === "roi") {
         tip.textContent = "第2步：拖动「ROI 边距」调整长方体大小，确认无误后点击下方按钮。确认前不能切割。";
       } else {
@@ -2660,7 +2707,133 @@ function renderWithWebGL({
 
   function inferOrgansReadyFromMask() {
     const labels = Array.isArray(maskData?.unique_labels) ? maskData.unique_labels : [];
-    return Boolean(maskData?.multiclass && labels.length > 1);
+    if (Boolean(maskData?.multiclass && labels.length > 1)) return true;
+    // Allow surgery on single-class / user-stacked annotation masks too.
+    return Boolean(maskData && labels.length >= 1 && Number(maskData.mask_voxel_count || 0) > 0);
+  }
+
+  function listPickableLabelIds() {
+    const labels = Array.isArray(maskData?.unique_labels)
+      ? maskData.unique_labels.map((v) => Number(v)).filter((id) => id > 0)
+      : [];
+    if (labels.length) return [...new Set(labels)].sort((a, b) => a - b);
+    const single = Number(maskData?.label_id) || 0;
+    return single > 0 ? [single] : [];
+  }
+
+  function refreshOrganPickChips() {
+    const host = gesturePanel.querySelector("[data-surgery-organ-picks]");
+    if (!host) return;
+    const ids = listPickableLabelIds();
+    if (!ids.length) {
+      host.innerHTML = `<span class="surgery-organ-empty">当前 Mask 无可选标签</span>`;
+      return;
+    }
+    const selectedId = Number(viewerState.selectedLabelId || 0);
+    host.innerHTML = ids.map((id) => {
+      const active = id === selectedId ? "is-active" : "";
+      return `<button type="button" class="surgery-organ-chip ${active}" data-pick-organ="${id}">${labelTitle(id)}</button>`;
+    }).join("");
+  }
+
+  function selectOrganForSurgery(id, { fromGesture = false } = {}) {
+    const labelId = Number(id) || 0;
+    if (labelId <= 0) return false;
+    viewerState.selectedLabelId = labelId;
+    const focused = focusOnSelectedLabel(labelId, { isolate: true });
+    if (surgeryMode) {
+      if (volumeSnapshot) volumeValues.set(volumeSnapshot);
+      if (maskValues && maskSnapshot) maskValues.set(maskSnapshot);
+      flushTextures(true);
+      cutPlanes = [];
+      pendingCutPlane = null;
+      carvedVoxels = 0;
+      undoStack = [];
+      roiConfirmed = false;
+      surgeryStep = "roi";
+      syncSurgeryStepUi("roi");
+      drawRoiOverlay();
+      updateSurgeryHud();
+      gestureStatus(`第2步：已为「${labelTitle(labelId)}」生成长方体，请调边距后点击「确定长方体 ROI 大小」`);
+    } else {
+      const statusEl = gesturePanel.querySelector("[data-gesture-status]");
+      if (statusEl) {
+        statusEl.textContent = focused
+          ? `已选中特写：${labelTitle(labelId)}`
+          : `已选中器官：${labelTitle(labelId)}`;
+      }
+    }
+    refreshOrganPickChips();
+    updateOrganHud();
+    draw();
+    container.dispatchEvent(
+      new CustomEvent("gesture-organ-select", {
+        detail: {
+          labelId,
+          name: labelTitle(labelId),
+          focused,
+          surgeryStep,
+          fromGesture: Boolean(fromGesture),
+        },
+      }),
+    );
+    return true;
+  }
+
+  function classifySurgeryMaskSource(mask) {
+    const label = String(mask?.label || "");
+    const version = String(mask?.version || "");
+    const isNifti = mask?.mask_format === "nii.gz" || String(mask?.path || "").endsWith(".nii.gz");
+    if (!isNifti) return null;
+    if (version === "v2_ai" && (label === "全部标注" || /全部|all|multi|organ/i.test(label))) {
+      return { key: "ai_organs", rank: 1, title: `智能全器官 · ${mask.mask_id}` };
+    }
+    if (version === "v2_ai" && (label === "tumor" || /肿瘤|tumor/i.test(label))) {
+      return { key: "ai_tumor", rank: 2, title: `疑似肿瘤 · ${mask.mask_id}` };
+    }
+    if (version === "v1_manual" && (label === "我的标注" || label === "全部标注" || /我的|手动|manual/i.test(label))) {
+      return { key: "mine", rank: 3, title: `我的标注 · ${mask.mask_id}` };
+    }
+    if (version === "v1_manual") {
+      return { key: "mine_other", rank: 4, title: `我的标注(${label || "未命名"}) · ${mask.mask_id}` };
+    }
+    return { key: "other", rank: 9, title: `${version} · ${label || "Mask"} · ${mask.mask_id}` };
+  }
+
+  async function refreshSurgeryMaskSourceOptions() {
+    const select = gesturePanel.querySelector("[data-surgery-mask-source]");
+    if (!select) return;
+    const imageId = maskData?.image_id || volumeData?.image_id || container.dataset.imageId || "";
+    if (!imageId) {
+      select.innerHTML = `<option value="">无图像</option>`;
+      return;
+    }
+    try {
+      const response = await fetch(apiUrl(`/api/image/${imageId}/masks`));
+      if (!response.ok) throw new Error(await response.text());
+      const data = await response.json();
+      const items = Array.isArray(data.items) ? data.items : Array.isArray(data) ? data : [];
+      const options = items
+        .map((mask) => {
+          const meta = classifySurgeryMaskSource(mask);
+          if (!meta) return null;
+          return { mask, ...meta };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.rank - b.rank || String(b.mask.create_time || "").localeCompare(String(a.mask.create_time || "")));
+      const currentId = String(maskData?.mask_id || container.dataset.maskId || "");
+      if (!options.length) {
+        select.innerHTML = `<option value="">暂无可用 3D Mask</option>`;
+        return;
+      }
+      select.innerHTML = options.map((opt) => {
+        const selected = String(opt.mask.mask_id) === currentId ? "selected" : "";
+        return `<option value="${opt.mask.mask_id}" ${selected}>${opt.title}</option>`;
+      }).join("");
+    } catch (error) {
+      select.innerHTML = `<option value="">加载 Mask 列表失败</option>`;
+      console.warn("surgery mask source list failed", error);
+    }
   }
 
   function setSurgeryUiVisible(runningGesture) {
@@ -2734,7 +2907,7 @@ function renderWithWebGL({
       organsReady = true;
     }
     if (!organsReady) {
-      gestureStatus("请先完成全器官预测后再进入模拟手术（点右侧「开始手势控制」）");
+      gestureStatus("请先加载含标注的 3D Mask（智能全器官或「我的标注」堆叠）后再进入模拟手术");
       return false;
     }
     surgeryMode = true;
@@ -2760,11 +2933,13 @@ function renderWithWebGL({
     gestureController.setSurgeryPhase?.(surgeryStep);
     highlightTumor(gesturePanel.querySelector("[data-surgery-tumor-hl]")?.checked !== false);
     setSurgeryUiVisible(true);
+    refreshOrganPickChips();
+    refreshSurgeryMaskSourceOptions();
     updateSurgeryHud();
     drawRoiOverlay();
     gestureStatus(
       surgeryStep === "select"
-        ? "第1步：指向器官并捏一下选中"
+        ? "第1步：点击器官芯片或指向后捏一下选中"
         : "第2步：调整 ROI 边距后，点击「确定长方体 ROI 大小」",
     );
     container.dispatchEvent(new CustomEvent("gesture-surgery-ready", { detail: { surgery: true } }));
@@ -3012,6 +3187,27 @@ function renderWithWebGL({
   gesturePanel.querySelector("[data-surgery-tumor-hl]")?.addEventListener("change", (event) => {
     highlightTumor(Boolean(event.currentTarget.checked));
   });
+  gesturePanel.querySelector("[data-surgery-organ-picks]")?.addEventListener("click", (event) => {
+    const button = event.target?.closest?.("[data-pick-organ]");
+    if (!button) return;
+    const id = Number(button.getAttribute("data-pick-organ") || 0);
+    if (id > 0) selectOrganForSurgery(id, { fromGesture: false });
+  });
+  gesturePanel.querySelector("[data-surgery-mask-source]")?.addEventListener("change", (event) => {
+    const nextId = String(event.target?.value || "").trim();
+    const currentId = String(maskData?.mask_id || container.dataset.maskId || "");
+    if (!nextId || nextId === currentId) return;
+    gestureStatus("正在切换标注来源…");
+    container.dispatchEvent(
+      new CustomEvent("surgery-mask-source-change", {
+        detail: {
+          maskId: nextId,
+          resumeSurgery: Boolean(surgeryMode),
+          resumeGesture: Boolean(gestureController?.isRunning?.()),
+        },
+      }),
+    );
+  });
   gesturePanel.querySelector("[data-roi-margin]")?.addEventListener("input", (event) => {
     roiMarginPct = Number(event.currentTarget.value) || 0;
     // Changing size after lock returns to step 2 for re-confirm.
@@ -3201,38 +3397,10 @@ function renderWithWebGL({
             if (frame.selectPulse) {
               const id = hoverId || lastHoverId || viewerState.hoveredLabelId || 0;
               if (id > 0) {
-                viewerState.selectedLabelId = id;
-                const focused = focusOnSelectedLabel(id, { isolate: true });
-                if (surgeryMode) {
-                  // Switching target organ restarts from cuboid sizing.
-                  if (volumeSnapshot) volumeValues.set(volumeSnapshot);
-                  if (maskValues && maskSnapshot) maskValues.set(maskSnapshot);
-                  flushTextures(true);
-                  cutPlanes = [];
-                  pendingCutPlane = null;
-                  carvedVoxels = 0;
-                  undoStack = [];
-                  roiConfirmed = false;
-                  surgeryStep = "roi";
-                  syncSurgeryStepUi("roi");
-                  drawRoiOverlay();
-                  updateSurgeryHud();
-                  gestureStatus(`第2步：已为「${labelTitle(id)}」生成长方体，请调边距后点击「确定长方体 ROI 大小」`);
-                }
-                if (statusEl && !surgeryMode) {
-                  statusEl.textContent = focused
-                    ? `已选中特写：${labelTitle(id)}`
-                    : `已选中器官：${labelTitle(id)}`;
-                }
-                if (!surgeryMode) updateSurgeryHud();
-                container.dispatchEvent(
-                  new CustomEvent("gesture-organ-select", {
-                    detail: { labelId: id, name: labelTitle(id), focused, surgeryStep },
-                  }),
-                );
+                selectOrganForSurgery(id, { fromGesture: true });
               } else if (statusEl) {
                 statusEl.textContent = surgeryMode
-                  ? "第1步：请先用食指指向器官再短捏选中"
+                  ? "第1步：请点击器官芯片，或用食指指向后再短捏"
                   : "捏一下选中：请先用食指指向器官再短捏";
               }
             }
@@ -3302,7 +3470,7 @@ function renderWithWebGL({
     const box = getRoiBox();
     const labelId = box?.labelId || viewerState.selectedLabelId || viewerState.isolatedLabelId || 0;
     const meta = labelMetaMap[labelId] || {};
-    const displayName = meta.display_name || labelNameMap[labelId] || labelTitle(labelId);
+    const displayName = labelTitle(labelId) || meta.display_name || labelNameMap[labelId] || `类别 #${labelId}`;
     const organName = meta.name || `label_${labelId}`;
     const organColor = meta.color
       || (Array.isArray(viewerState.labelPalette?.[labelId])
@@ -3395,6 +3563,9 @@ function renderWithWebGL({
     enterSurgeryMode,
     exitSurgeryMode,
     setOrgansReady,
+    selectOrganForSurgery,
+    refreshOrganPickChips,
+    refreshSurgeryMaskSourceOptions,
     getSurgerySnapshot,
     requestSaveSurgeryResult,
     requestExportRobotPath,
@@ -3403,6 +3574,9 @@ function renderWithWebGL({
     isSurgeryMode: () => surgeryMode,
   };
   container.__volumeViewerApi = viewerApi;
+
+  refreshOrganPickChips();
+  refreshSurgeryMaskSourceOptions();
 
   activeViewers.set(container, {
     ...viewerApi,

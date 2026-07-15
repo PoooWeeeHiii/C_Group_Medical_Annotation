@@ -1,6 +1,44 @@
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _coerce_json_list(value: Any) -> list[Any] | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            import json
+
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return [text]
+        return parsed if isinstance(parsed, list) else [parsed]
+    return None
+
+
+def _coerce_json_dict(value: Any) -> dict[str, Any] | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            import json
+
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 class MaskRecord(BaseModel):
@@ -20,6 +58,25 @@ class MaskRecord(BaseModel):
     height: int | None = None
     encoding: str | None = None
     create_time: str | None = None
+    # label_id(str) -> display name from source 2D slices (e.g. custom「其他」)
+    label_aliases: dict[str, str] | None = None
+    source_mask_ids: list[str] | None = None
+
+    @field_validator("source_mask_ids", mode="before")
+    @classmethod
+    def _parse_source_mask_ids(cls, value: Any) -> list[str] | None:
+        parsed = _coerce_json_list(value)
+        if parsed is None:
+            return None
+        return [str(item) for item in parsed]
+
+    @field_validator("label_aliases", mode="before")
+    @classmethod
+    def _parse_label_aliases(cls, value: Any) -> dict[str, str] | None:
+        parsed = _coerce_json_dict(value)
+        if parsed is None:
+            return None
+        return {str(key): str(val) for key, val in parsed.items()}
 
 
 class SaveMaskRequest(BaseModel):
@@ -239,6 +296,7 @@ class DeepEditRefineRequest(BaseModel):
     current_mask_id: str | None = None
     output_version: str = "v3_preview"
     label: str = "label"
+    label_id: int | None = None
     model_id: str | None = "DeepEdit"
     random_walker_beta: float = 90.0
     random_walker_roi_margin: int = 24

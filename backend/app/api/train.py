@@ -48,6 +48,8 @@ def start_training(request: TrainStartRequest) -> TrainStartResponse:
         context_radius=request.context_radius,
         max_slices_per_volume=request.max_slices_per_volume,
         export_dir=request.export_dir,
+        resume=request.resume,
+        resume_from=request.resume_from,
     )
     return TrainStartResponse(job=_to_record(job))
 

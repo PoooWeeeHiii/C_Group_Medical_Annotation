@@ -6,8 +6,9 @@
 
 ```text
 models/deepedit/
-  deepedit_unet.pth      ← 本包权重
+  deepedit_unet.pth      ← 本包权重（已训练，val Dice≈0.53）
   config.json            ← 本包配置
+  deepedit_unet.train_meta.json
 ```
 
 大文件不要提交 Git，用网盘 / U 盘 / 内网传即可。
@@ -27,18 +28,29 @@ models/deepedit/
 ```env
 DEEPEDIT_SERVICE_URL=http://127.0.0.1:8010
 DEEPEDIT_SERVICE_TIMEOUT_SECONDS=120
+DEEPEDIT_CONFIG_PATH=models/deepedit/config.json
+DEEPEDIT_MODEL_PATH=models/deepedit/deepedit_unet.pth
+DEEPEDIT_MODEL_FORMAT=monai_unet_checkpoint
+DEEPEDIT_DEVICE=auto
 ```
 
-## 服务启动（Person B / 联调机）
+## 服务启动
+
+```bash
+# macOS / Linux（仓库根目录）
+bash scripts/start_deepedit.sh
+# 或一键：bash scripts/start_all.sh
+
+curl -s http://127.0.0.1:8010/health
+# 期望：model_loaded: true
+```
+
+Windows：
 
 ```powershell
-# 在仓库根目录
 powershell -ExecutionPolicy Bypass -File scripts\start_deepedit.ps1
-
 curl http://127.0.0.1:8010/health
 ```
-
-期望：`model_loaded: true`。
 
 ## 训练指标（本包权重）
 
@@ -48,11 +60,11 @@ curl http://127.0.0.1:8010/health
 
 ## 联调检查清单
 
-1. [ ] `models/deepedit/deepedit_unet.pth` + `config.json` 已就位
-2. [ ] DeepEdit 服务已启动，`GET /health` 成功
+1. [x] `models/deepedit/deepedit_unet.pth` + `config.json` 已就位
+2. [ ] DeepEdit 服务已启动，`GET /health` 成功且 `model_loaded=true`
 3. [ ] 后端 `DEEPEDIT_SERVICE_URL` 与端口一致（**8010**）
-4. [ ] 前端 DeepEdit：欠分割加点 / 过分割加负点能出 `v3_*` mask
+4. [ ] 前端：欠分割加点 / 过分割加负点 → 点「智能精修」→ 写出 `v3_preview`
 
 ## 联系
 
-权重由 **Person B（Feature B / DeepEdit）** 提供。接口契约已在 `feature-a` 的 `ai/deepedit_service.py`。
+权重由 **Person B（Feature B / DeepEdit）** 提供。接口契约：`ai/deepedit_service.py`。

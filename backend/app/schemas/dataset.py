@@ -15,6 +15,8 @@ class DatasetExportRequest(BaseModel):
     format: str = "nnunet"
     materialize: bool = False
     strict: bool = True
+    # 同类增量：保留已有 export，按 nnunet_id 合并/覆盖病例，不整库清空
+    append: bool = False
 
 
 class SpacingCheckItem(BaseModel):
@@ -64,3 +66,5 @@ class DatasetExportResponse(BaseModel):
     dataset_json_path: str | None = None
     splits_final_path: str | None = None
     report: DatasetExportReport | None = None
+    append: bool = False
+    total_train_cases: int | None = None

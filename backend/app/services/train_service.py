@@ -128,11 +128,13 @@ def start_train_job(
     epochs: int = 20,
     batch_size: int = 4,
     lr: float = 1e-4,
-    num_classes: int = 6,
+    num_classes: int = 9,
     image_size: int = 320,
     context_radius: int = 1,
     max_slices_per_volume: int = 64,
     export_dir: str | None = None,
+    resume: bool = False,
+    resume_from: str | None = None,
 ) -> dict[str, Any]:
     dataset_id = (dataset_id or "").strip()
     if not dataset_id:
@@ -165,6 +167,10 @@ def start_train_job(
     ]
     if export_dir:
         command.extend(["--export-dir", export_dir])
+    if resume:
+        command.append("--resume")
+    if resume_from:
+        command.extend(["--resume-from", str(resume_from)])
 
     job = {
         "job_id": job_id,
@@ -179,6 +185,8 @@ def start_train_job(
         "context_radius": context_radius,
         "max_slices_per_volume": max_slices_per_volume,
         "export_dir": export_dir,
+        "resume": bool(resume),
+        "resume_from": resume_from,
         "command": command,
         "logs": [],
         "created_at": time.time(),
