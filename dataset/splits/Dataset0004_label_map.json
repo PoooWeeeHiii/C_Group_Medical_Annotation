@@ -1,0 +1,23 @@
+{
+  "background": 0,
+  "label": 1,
+  "liver": 1,
+  "kidney": 2,
+  "lung": 3,
+  "tumor": 4,
+  "spleen": 5,
+  "pancreas": 6,
+  "stomach": 7,
+  "gallbladder": 8,
+  "heart": 6,
+  "心": 6,
+  "肝": 1,
+  "脾": 5,
+  "肺": 3,
+  "肾": 2,
+  "bone": 7,
+  "骨": 7,
+  "肿瘤": 4,
+  "other": 8,
+  "其他": 8
+}

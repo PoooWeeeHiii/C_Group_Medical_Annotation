@@ -1542,6 +1542,32 @@ async function ensureTotalSegReadyForGesture() {
   }
 }
 
+async function findGesturePrepMasks(imageId) {
+  const masks = await loadImageMasks(imageId, { force: true });
+  const byNewest = (a, b) => String(b.create_time || "").localeCompare(String(a.create_time || ""));
+  const organsMask = [...masks]
+    .filter((m) => String(m.label || "") === "全部标注" && m.version === "v2_ai")
+    .sort(byNewest)[0] || null;
+  // Prefer latest multiclass v2_ai if 「全部标注」name drifted
+  const fallbackMulti = !organsMask
+    ? [...masks]
+      .filter((m) => m.version === "v2_ai" && (m.mask_format === "nii.gz" || String(m.path || "").endsWith(".nii.gz")))
+      .sort(byNewest)
+      .find((m) => /全部|all|multi|organ/i.test(String(m.label || "")) || Number(m.label_count || 0) > 1)
+    : null;
+  const tumorMask = [...masks]
+    .filter((m) => {
+      const label = String(m.label || "").toLowerCase();
+      return m.version === "v2_ai" && (label === "tumor" || label.includes("肿瘤") || label.includes("tumor"));
+    })
+    .sort(byNewest)[0] || null;
+  return {
+    masks,
+    organsMask: organsMask || fallbackMulti || null,
+    tumorMask,
+  };
+}
+
 async function runGestureHeroFlow(event) {
   const button = event.currentTarget;
   const item = activeCase();
@@ -1552,6 +1578,7 @@ async function runGestureHeroFlow(event) {
   }
   if (state.gestureHeroBusy) return;
 
+  const forceRerun = Boolean(event?.altKey || event?.metaKey || state.forceGestureRepredict);
   state.gestureHeroBusy = true;
   state.gestureHeroBusyLabel = "环境检查中…";
   button.disabled = true;
@@ -1561,49 +1588,91 @@ async function runGestureHeroFlow(event) {
   let tumorOk = false;
   try {
     await ensureGestureVolumeReady(image);
-    await ensureTotalSegReadyForGesture();
-    await loadModels();
 
-    state.gestureHeroBusyLabel = "全器官预测中…";
+    state.gestureHeroBusyLabel = "检查已有 AI Mask…";
     button.textContent = state.gestureHeroBusyLabel;
-    showToast("手势准备：先跑 TotalSeg 全器官（可能数分钟）…");
+    let { organsMask, tumorMask } = await findGesturePrepMasks(image.image_id);
+
+    if (!forceRerun && organsMask) {
+      organsOk = true;
+      state.active3DMaskId = organsMask.mask_id;
+      showToast(`复用已有全器官 Mask（${organsMask.mask_id}），跳过 TotalSeg`);
+    }
+    if (!forceRerun && tumorMask) {
+      tumorOk = true;
+    }
+
+    const needOrgansPredict = !organsOk;
+    // Tumor is optional for surgery; skip when organs already cached unless forced re-run.
+    const needTumorPredict = forceRerun ? !tumorOk : (!tumorOk && needOrgansPredict);
+
+    if (needOrgansPredict || needTumorPredict) {
+      await ensureTotalSegReadyForGesture();
+      await loadModels();
+    }
 
     const prevTarget = state.aiPredictTarget;
     try {
-      state.aiPredictTarget = "all";
-      const allReq = resolveAiPredictRequest();
-      if (!allReq.model) throw new Error("未找到 TotalSeg / 多器官模型");
-      await executeAiPredictRequest(allReq, { silentToasts: true });
-      organsOk = true;
-      showToast("全器官预测完成，继续疑似肿瘤…");
-    } catch (error) {
-      throw new Error(`全器官预测失败：${error.message || error}。模拟手术需要全器官 Mask，已中止（不会空开摄像头）。`);
-    }
-
-    state.gestureHeroBusyLabel = "疑似肿瘤预测中…";
-    button.textContent = state.gestureHeroBusyLabel;
-    try {
-      state.aiPredictTarget = "tumor";
-      const tumorReq = resolveAiPredictRequest();
-      if (tumorReq.model) {
-        await executeAiPredictRequest(tumorReq, { silentToasts: true });
-        tumorOk = true;
-        showToast("疑似肿瘤已生成（非诊断结果）");
+      if (needOrgansPredict) {
+        state.gestureHeroBusyLabel = "全器官预测中…";
+        button.textContent = state.gestureHeroBusyLabel;
+        showToast("未找到可复用的全器官 Mask，开始 TotalSeg（可能数分钟）…");
+        state.aiPredictTarget = "all";
+        const allReq = resolveAiPredictRequest();
+        if (!allReq.model) throw new Error("未找到 TotalSeg / 多器官模型");
+        await executeAiPredictRequest(allReq, { silentToasts: true });
+        organsOk = true;
+        showToast("全器官预测完成");
+        ({ organsMask, tumorMask } = await findGesturePrepMasks(image.image_id));
+        if (organsMask) state.active3DMaskId = organsMask.mask_id;
       }
-    } catch (error) {
-      showToast(`疑似肿瘤预测失败：${error.message || error}（可仅用器官做模拟手术）`);
+
+      if (needTumorPredict) {
+        state.gestureHeroBusyLabel = "疑似肿瘤预测中…";
+        button.textContent = state.gestureHeroBusyLabel;
+        try {
+          state.aiPredictTarget = "tumor";
+          const tumorReq = resolveAiPredictRequest();
+          if (tumorReq.model) {
+            await executeAiPredictRequest(tumorReq, { silentToasts: true });
+            tumorOk = true;
+            showToast("疑似肿瘤已生成（非诊断结果）");
+          }
+        } catch (error) {
+          showToast(`疑似肿瘤预测失败：${error.message || error}（可仅用器官做模拟手术）`);
+        }
+      } else if (tumorOk) {
+        showToast("复用已有疑似肿瘤 Mask，跳过肿瘤预测");
+      }
     } finally {
       state.aiPredictTarget = prevTarget || "all";
     }
 
-    // Prefer multiclass「全部标注」mask for 3D.
-    const masks = await loadImageMasks(image.image_id, { force: true });
-    const multi = masks.find((m) => String(m.label || "") === "全部标注" && m.version === "v2_ai")
-      || latestMaskByVersion(masks, "v2_ai");
-    if (multi) state.active3DMaskId = multi.mask_id;
+    if (!organsOk) {
+      throw new Error("全器官 Mask 不可用，无法进入手势/模拟手术准备。");
+    }
+
+    // Refresh selection after optional predicts
+    if (!state.active3DMaskId) {
+      const refreshed = await findGesturePrepMasks(image.image_id);
+      if (refreshed.organsMask) state.active3DMaskId = refreshed.organsMask.mask_id;
+    }
+
+    const container = $("#volumeContainer");
+    const alreadyReady = container?.dataset?.ready === "true" && container.__volumeViewerApi;
+    const sameImage = String(container?.dataset?.imageId || "") === String(image.image_id);
+    const sameMask = String(container?.dataset?.maskId || "") === String(state.active3DMaskId || "");
+    const needRemount = !(alreadyReady && sameImage && sameMask && state.volumeViewMode === "3d");
+
     state.volumeViewMode = "3d";
-    state.volumeLoadingKey = null;
-    render();
+    if (needRemount) {
+      state.gestureHeroBusyLabel = "加载 3D 网格…";
+      button.textContent = state.gestureHeroBusyLabel;
+      state.volumeLoadingKey = null;
+      render();
+    } else {
+      showToast("3D 已就绪，跳过重复渲染");
+    }
 
     state.gestureHeroBusyLabel = "启动摄像头…";
     button.textContent = state.gestureHeroBusyLabel;

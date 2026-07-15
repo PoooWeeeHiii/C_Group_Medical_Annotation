@@ -809,6 +809,45 @@ def get_image_surface_mesh(
     target_reduction: float = 0.50,
     smooth_iterations: int = 6,
 ) -> dict[str, Any]:
+    from backend.app.services.mesh_cache import cached_mesh
+
+    protocol_norm = (protocol or "bone").strip().lower()
+    params = {
+        "protocol": protocol_norm,
+        "max_dim": int(max_dim),
+        "min_component_voxels": int(min_component_voxels),
+        "max_components": int(max_components),
+        "max_triangles": int(max_triangles),
+        "target_reduction": float(target_reduction),
+        "smooth_iterations": int(smooth_iterations),
+        "v": 1,
+    }
+
+    def _build() -> dict[str, Any]:
+        return _compute_image_surface_mesh(
+            image_id=image_id,
+            protocol=protocol_norm,
+            max_dim=max_dim,
+            min_component_voxels=min_component_voxels,
+            max_components=max_components,
+            max_triangles=max_triangles,
+            target_reduction=target_reduction,
+            smooth_iterations=smooth_iterations,
+        )
+
+    return cached_mesh("image", image_id, params, _build)
+
+
+def _compute_image_surface_mesh(
+    image_id: str,
+    protocol: str = "bone",
+    max_dim: int = 176,
+    min_component_voxels: int = 512,
+    max_components: int = 3,
+    max_triangles: int = 120000,
+    target_reduction: float = 0.50,
+    smooth_iterations: int = 6,
+) -> dict[str, Any]:
     image, volume = load_volume(image_id)
     downsampled, strides = _downsample_volume(volume.array, max_dim=max_dim)
     protocol = (protocol or "bone").strip().lower()
