@@ -61,11 +61,15 @@ models/**
 !models/deepedit/config.json
 !models/deepedit/deepedit_unet.train_meta.json
 !models/deepedit/README.md
+!models/nnunet/
+!models/nnunet/**/*
+!models/nnunet/README.md
 *.pt
 *.pth
 *.ckpt
 *.onnx
 *.h5
+!models/nnunet/**/*.pth
 !ai/checkpoints/ModelUNet_PersonB_Demo.pt
 !deliverables/deepedit_for_person_a/deepedit_unet.pth
 checkpoints/

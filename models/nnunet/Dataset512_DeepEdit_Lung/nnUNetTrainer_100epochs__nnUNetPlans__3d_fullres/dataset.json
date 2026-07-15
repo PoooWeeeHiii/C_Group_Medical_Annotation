@@ -1,0 +1,17 @@
+{
+    "name": "Dataset512_DeepEdit_Lung",
+    "description": "Plan A short 3d_fullres from DeepEdit pseudo-labels (lung)",
+    "reference": "Person B DeepEdit dataset / TotalSeg pseudo",
+    "licence": "internal-course",
+    "release": "0.1",
+    "channel_names": {
+        "0": "CT"
+    },
+    "labels": {
+        "background": 0,
+        "lung": 1
+    },
+    "numTraining": 12,
+    "file_ending": ".nii.gz",
+    "overwrite_image_reader_writer": "NibabelIOWithReorient"
+}
