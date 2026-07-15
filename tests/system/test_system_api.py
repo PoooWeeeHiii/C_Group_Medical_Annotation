@@ -283,14 +283,21 @@ def test_ST_SURG_01_save_roi_with_organ(
         },
         "roi_margin_pct": 18,
         "knife_radius": 2,
-        "cuboid_min": [10.0, 20.0, 30.0],
-        "cuboid_max": [40.0, 50.0, 60.0],
+        "cuboid_min": [0.2, 0.25, 0.3],
+        "cuboid_max": [0.55, 0.6, 0.65],
         "cut_planes": [
             {
-                "origin": [25.0, 35.0, 45.0],
+                "origin": [0.4, 0.4, 0.45],
                 "normal": [0.0, 0.0, 1.0],
                 "keepSign": 1,
-                "polygon": [[20, 30, 45], [30, 30, 45], [30, 40, 45], [20, 40, 45]],
+                "polygon": [
+                    [0.25, 0.3, 0.45],
+                    [0.5, 0.3, 0.45],
+                    [0.5, 0.55, 0.45],
+                    [0.25, 0.55, 0.45],
+                ],
+                "started_at": "2026-07-15T03:00:00Z",
+                "ended_at": "2026-07-15T03:00:02Z",
             }
         ],
         "carved_voxels": 12,
@@ -310,11 +317,21 @@ def test_ST_SURG_01_save_roi_with_organ(
     assert item.get("organ_name") in {"spleen", "label_1"} or item.get("organ_name")
     assert item.get("organ_display_name")
     assert item.get("organ_color")
+    plan = body.get("robot_plan") or item.get("robot_plan") or {}
+    assert plan.get("unit") == "mm"
+    assert plan.get("coordinate_frames", {}).get("primary") == "patient_lps"
+    assert plan.get("coordinate_frames", {}).get("lps_to_ras")
+    assert isinstance(plan.get("tool_paths"), list)
+    assert len(plan["tool_paths"]) >= 1
+    wp0 = plan["tool_paths"][0]
+    assert wp0.get("entry") and wp0.get("exit") and wp0.get("waypoints")
+    assert "position_lps_mm" in (wp0["entry"] or {})
+    assert "position_ras_mm" in (wp0["entry"] or {})
     # Persist for follow-up queries via return value through attribute.
     test_ST_SURG_01_save_roi_with_organ.result_id = body["result_id"]  # type: ignore[attr-defined]
     test_ST_SURG_01_save_roi_with_organ.case_id = sample_case_id  # type: ignore[attr-defined]
     test_ST_SURG_01_save_roi_with_organ.image_id = sample_image_id  # type: ignore[attr-defined]
-
+    test_ST_SURG_01_save_roi_with_organ.robot_plan = plan  # type: ignore[attr-defined]
 
 def test_ST_SURG_02_list_by_case(client: httpx.Client, sample_case_id: str):
     # Ensure at least one save happened; if previous test failed, try soft dependency.
@@ -376,6 +393,49 @@ def test_ST_SURG_05_reject_non_positive_label(
     }
     r = client.post("/api/surgery_results", headers=auth_headers(annotator_token), json=payload)
     assert r.status_code in {400, 422}
+
+
+def test_ST_SURG_06_export_robot_path(client: httpx.Client):
+    result_id = getattr(test_ST_SURG_01_save_roi_with_organ, "result_id", None)
+    if not result_id:
+        pytest.skip("No surgery result_id from ST-SURG-01")
+    r = client.get(f"/api/surgery_results/{result_id}/robot_path")
+    assert r.status_code == 200, r.text
+    plan = r.json()
+    assert plan.get("unit") == "mm"
+    assert plan.get("schema_version")
+    assert plan.get("coordinate_frames", {}).get("primary") == "patient_lps"
+    assert "lps_to_ras" in (plan.get("coordinate_frames") or {})
+    paths = plan.get("tool_paths") or []
+    assert len(paths) >= 1
+    entry = (paths[0].get("entry") or {}).get("position_lps_mm")
+    assert isinstance(entry, list) and len(entry) == 3
+    # Points should be finite numbers in mm
+    assert all(isinstance(v, (int, float)) for v in entry)
+
+
+def test_ST_SURG_07_robot_plan_incomplete_without_crash(
+    client: httpx.Client,
+    annotator_token: str,
+    sample_case_id: str,
+    sample_image_id: str,
+):
+    """Even if client sends empty volume_meta, save must not 500."""
+    payload = {
+        "case_id": sample_case_id,
+        "image_id": sample_image_id,
+        "label_id": 2,
+        "cuboid_min": [0.1, 0.1, 0.1],
+        "cuboid_max": [0.2, 0.2, 0.2],
+        "cut_planes": [],
+        "volume_meta": {},
+        "note": "[SYSTEM_TEST] robot plan resilience",
+    }
+    r = client.post("/api/surgery_results", headers=auth_headers(annotator_token), json=payload)
+    assert r.status_code == 200, r.text
+    plan = (r.json().get("robot_plan") or {})
+    assert plan.get("status") in {"ok", "incomplete"}
+    assert isinstance(plan.get("tool_paths"), list)
 
 
 # ---------------------------------------------------------------------------

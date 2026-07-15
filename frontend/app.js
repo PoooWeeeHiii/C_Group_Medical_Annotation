@@ -437,6 +437,18 @@ async function apiGet(path) {
   return data;
 }
 
+function downloadJsonFile(filename, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename || "robot_path.json";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 async function apiPost(path, payload, options = {}) {
   const controller = new AbortController();
   const timeoutMs = Number(options.timeoutMs || 0);
@@ -6052,7 +6064,7 @@ async function startVolumeViewer(image) {
   container.dataset.ready = "loading";
 
   try {
-    const module = await import(`/frontend/volume_viewer.js?v=surgery-confirm-roi-20260713`);
+    const module = await import(`/frontend/volume_viewer.js?v=surgery-compact-20260715`);
     if (maskId) {
       loadMaskQuality(maskId)
         .then(() => updateMaskQualitySummary(maskId))
@@ -6108,6 +6120,23 @@ async function startVolumeViewer(image) {
       }
       try {
         const organ = snap.organ || {};
+        let volumeMeta = snap.volumeMeta || null;
+        try {
+          const cached = state.volumeMeta[image.image_id] || (await loadVolumeMeta(image.image_id));
+          if (cached) {
+            volumeMeta = {
+              width: cached.width,
+              height: cached.height,
+              slice_count: cached.slice_count,
+              spacing: cached.spacing,
+              origin: cached.origin,
+              direction: cached.direction,
+              ...(volumeMeta || {}),
+            };
+          }
+        } catch {
+          // keep viewer volumeMeta if API meta fails
+        }
         const data = await apiPost("/api/surgery_results", {
           case_id: item.case_id,
           image_id: image.image_id,
@@ -6127,14 +6156,37 @@ async function startVolumeViewer(image) {
           cuboid_min: snap.cuboid.min,
           cuboid_max: snap.cuboid.max,
           cut_planes: Array.isArray(snap.cutPlanes) ? snap.cutPlanes : [],
+          cut_timestamps: Array.isArray(snap.cut_timestamps) ? snap.cut_timestamps : [],
+          volume_meta: volumeMeta,
           carved_voxels: Number(snap.carvedVoxels || 0),
           note: `模拟手术ROI · 器官=${snap.organ_display_name || snap.labelId} · 刀痕${Array.isArray(snap.cutPlanes) ? snap.cutPlanes.length : 0}面`,
         });
+        container.__volumeViewerApi?.setLastSavedSurgeryResultId?.(data.result_id);
         showToast(data.message || `手术 ROI 已入库：${data.result_id}（${snap.organ_display_name || ""}）`);
         const status = document.querySelector("[data-gesture-status]");
         if (status) status.textContent = `已保存 ${data.result_id}`;
+        if (data.robot_plan) {
+          downloadJsonFile(`${data.result_id}_robot_path.json`, data.robot_plan);
+        }
       } catch (error) {
         showToast(error.message || "保存手术 ROI 失败");
+      }
+    });
+    container.addEventListener("surgery-robot-path-export", async (event) => {
+      const snap = event.detail || {};
+      const resultId = snap.result_id || null;
+      try {
+        if (resultId) {
+          const plan = await apiGet(`/api/surgery_results/${encodeURIComponent(resultId)}/robot_path`);
+          downloadJsonFile(`${resultId}_robot_path.json`, plan);
+          showToast(`已导出机器臂路径：${resultId}`);
+          return;
+        }
+        // No saved result yet — save first to generate plan, then download from response.
+        showToast("尚未保存，将先保存再导出路径…");
+        container.dispatchEvent(new CustomEvent("surgery-result-save", { detail: snap }));
+      } catch (error) {
+        showToast(error.message || "导出机器臂路径失败");
       }
     });
     // If hero flow already marked organs ready before viewer remount, re-apply.

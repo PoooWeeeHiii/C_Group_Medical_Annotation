@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -7,6 +9,8 @@ class CutPlaneModel(BaseModel):
     keepSign: int | None = 1
     keep_sign: int | None = None
     polygon: list[list[float]] = Field(default_factory=list)
+    started_at: str | None = None
+    ended_at: str | None = None
 
 
 class OrganInfoModel(BaseModel):
@@ -14,6 +18,19 @@ class OrganInfoModel(BaseModel):
     name: str | None = None
     display_name: str | None = None
     color: str | None = None
+
+
+class RobotPlanOverrides(BaseModel):
+    """Optional manual fields merged into auto-built robot_plan."""
+
+    tool_model: str | None = None
+    blade_type: str | None = None
+    thickness_mm: float | None = None
+    approach_offset_mm: float | None = None
+    v_max_mm_s: float | None = None
+    a_max_mm_s2: float | None = None
+    force_limit_n: float | None = None
+    keep_out_min_distance_mm: float | None = None
 
 
 class SaveSurgeryResultRequest(BaseModel):
@@ -32,6 +49,9 @@ class SaveSurgeryResultRequest(BaseModel):
     cut_planes: list[CutPlaneModel | dict] = Field(default_factory=list)
     carved_voxels: int = 0
     note: str | None = None
+    volume_meta: dict[str, Any] | None = None
+    cut_timestamps: list[dict[str, Any]] | None = None
+    robot_plan_overrides: RobotPlanOverrides | dict | None = None
 
 
 class SurgeryResultRecord(BaseModel):
@@ -55,6 +75,7 @@ class SurgeryResultRecord(BaseModel):
     note: str | None = None
     create_time: str
     update_time: str | None = None
+    robot_plan: dict[str, Any] | None = None
 
 
 class SaveSurgeryResultResponse(BaseModel):
@@ -62,6 +83,7 @@ class SaveSurgeryResultResponse(BaseModel):
     result_id: str
     item: SurgeryResultRecord
     message: str | None = None
+    robot_plan: dict[str, Any] | None = None
 
 
 class SurgeryResultListResponse(BaseModel):
