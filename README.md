@@ -66,9 +66,56 @@ label_platform/
 
 ---
 
-## 快速开始（最小可运行）
+## 快速开始（推荐：一键全功能启动）
 
-在项目根目录执行：
+在项目根目录执行（首次需先装依赖，见下方「首次准备」）：
+
+```bash
+bash scripts/start_all.sh
+```
+
+会一次性拉起：
+
+| 服务 | 地址 | 作用 |
+|------|------|------|
+| DeepEdit | `http://127.0.0.1:8010` | 交互式精修（无权重可降级） |
+| 主后端 + Legacy 前端 | `http://127.0.0.1:8000/` | 标注 / 3D / 手势 / 手术 / 审核 / 导出 / AI 代理 |
+
+停止：
+
+```bash
+bash scripts/stop_all.sh
+```
+
+可选参数：
+
+```bash
+bash scripts/start_all.sh --no-deepedit   # 不启 DeepEdit
+START_REACT=1 bash scripts/start_all.sh  # 额外启 React :5173
+# 或
+bash scripts/start_all.sh --react
+```
+
+日志在 `.run/logs/`（`backend.log` / `deepedit.log`）。
+
+> TotalSeg / nnU-Net **不需要**额外进程：在 `.env` 配好 `TOTALSEG_PYTHON` 或 `ORGANS_NNUNET_*` 后，由主后端按需调用即可。
+
+### Case0003 手势/手术加速（复用预测 + 网格缓存）
+
+首次跑完 TotalSeg 后，平台会：
+
+1. **自动复用**已有 `v2_ai`「全部标注」/肿瘤 Mask（不再每次重跑 TotalSeg）  
+2. **磁盘缓存** CT / Mask 的 `surface-mesh`（目录 `dataset/cache/meshes/`）
+
+演示前可预热网格（后端需已启动）：
+
+```bash
+python scripts/preload_case_gesture.py --case Case0003
+```
+
+之后打开 Case0003 点「开始手势控制」应明显更快。若要强制重新预测：按住 **Alt** 再点该按钮。
+
+### 首次准备
 
 ```bash
 # 1. 创建虚拟环境（推荐）
@@ -85,8 +132,8 @@ cp .env.example .env
 # 4. （可选）初始化 SQLite；后端启动时也会自动 ensure schema
 python scripts/init_sqlite.py
 
-# 5. 启动主后端（同时托管 frontend/）
-uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
+# 5. 一键启动
+bash scripts/start_all.sh
 ```
 
 浏览器打开：
