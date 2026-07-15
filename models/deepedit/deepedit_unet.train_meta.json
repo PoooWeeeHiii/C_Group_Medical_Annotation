@@ -1,0 +1,560 @@
+{
+  "experiment": "DeepEdit_multi_organ",
+  "data_root": "E:\\lxy\\hm_2_deepedit\\dataset",
+  "out": "E:\\lxy\\C_Group_Medical_Annotation\\models\\deepedit\\deepedit_unet.pth",
+  "best_dice": 0.5257,
+  "epochs": 50,
+  "n_train": 42,
+  "n_val": 14,
+  "spatial_size": [
+    64,
+    128,
+    128
+  ],
+  "history": [
+    {
+      "epoch": 16,
+      "train_loss": 0.0589,
+      "train_dice": 0.2592,
+      "epoch_sec": 22.2,
+      "val_dice": 0.3109,
+      "val_dice_by_organ": {
+        "heart": 0.306,
+        "left_kidney": 0.1785,
+        "left_lung": 0.7045,
+        "liver": 0.2957,
+        "right_kidney": 0.0573,
+        "right_lung": 0.4796,
+        "spleen": 0.1546
+      }
+    },
+    {
+      "epoch": 17,
+      "train_loss": 0.0535,
+      "train_dice": 0.2636,
+      "epoch_sec": 21.09,
+      "val_dice": 0.3886,
+      "val_dice_by_organ": {
+        "heart": 0.6631,
+        "left_kidney": 0.2613,
+        "left_lung": 0.1925,
+        "liver": 0.4963,
+        "right_kidney": 0.1085,
+        "right_lung": 0.8008,
+        "spleen": 0.198
+      }
+    },
+    {
+      "epoch": 18,
+      "train_loss": 0.0562,
+      "train_dice": 0.2655,
+      "epoch_sec": 20.18,
+      "val_dice": 0.3223,
+      "val_dice_by_organ": {
+        "heart": 0.3521,
+        "left_kidney": 0.0995,
+        "left_lung": 0.5221,
+        "liver": 0.4157,
+        "right_kidney": 0.0363,
+        "right_lung": 0.7841,
+        "spleen": 0.0463
+      }
+    },
+    {
+      "epoch": 19,
+      "train_loss": 0.0556,
+      "train_dice": 0.2584,
+      "epoch_sec": 20.51,
+      "val_dice": 0.2952,
+      "val_dice_by_organ": {
+        "heart": 0.3912,
+        "left_kidney": 0.1009,
+        "left_lung": 0.2143,
+        "liver": 0.4631,
+        "right_kidney": 0.2364,
+        "right_lung": 0.4025,
+        "spleen": 0.2578
+      }
+    },
+    {
+      "epoch": 20,
+      "train_loss": 0.0205,
+      "train_dice": 0.412,
+      "epoch_sec": 21.18,
+      "val_dice": 0.3318,
+      "val_dice_by_organ": {
+        "heart": 0.0993,
+        "left_kidney": 0.3418,
+        "left_lung": 0.562,
+        "liver": 0.4845,
+        "right_kidney": 0.2878,
+        "right_lung": 0.4215,
+        "spleen": 0.1254
+      }
+    },
+    {
+      "epoch": 21,
+      "train_loss": 0.0383,
+      "train_dice": 0.3599,
+      "epoch_sec": 21.19,
+      "val_dice": 0.3744,
+      "val_dice_by_organ": {
+        "heart": 0.7487,
+        "left_kidney": 0.1423,
+        "left_lung": 0.4437,
+        "liver": 0.5086,
+        "right_kidney": 0.0577,
+        "right_lung": 0.4904,
+        "spleen": 0.2294
+      }
+    },
+    {
+      "epoch": 22,
+      "train_loss": 0.0402,
+      "train_dice": 0.3749,
+      "epoch_sec": 21.57,
+      "val_dice": 0.401,
+      "val_dice_by_organ": {
+        "heart": 0.4773,
+        "left_kidney": 0.271,
+        "left_lung": 0.8315,
+        "liver": 0.513,
+        "right_kidney": 0.2574,
+        "right_lung": 0.2132,
+        "spleen": 0.2434
+      }
+    },
+    {
+      "epoch": 23,
+      "train_loss": 0.0578,
+      "train_dice": 0.3048,
+      "epoch_sec": 21.69,
+      "val_dice": 0.4038,
+      "val_dice_by_organ": {
+        "heart": 0.6723,
+        "left_kidney": 0.0366,
+        "left_lung": 0.5166,
+        "liver": 0.6863,
+        "right_kidney": 0.0271,
+        "right_lung": 0.7953,
+        "spleen": 0.0923
+      }
+    },
+    {
+      "epoch": 24,
+      "train_loss": 0.0546,
+      "train_dice": 0.2944,
+      "epoch_sec": 20.48,
+      "val_dice": 0.3745,
+      "val_dice_by_organ": {
+        "heart": 0.6509,
+        "left_kidney": 0.3115,
+        "left_lung": 0.2576,
+        "liver": 0.4896,
+        "right_kidney": 0.0845,
+        "right_lung": 0.5949,
+        "spleen": 0.2328
+      }
+    },
+    {
+      "epoch": 25,
+      "train_loss": 0.0377,
+      "train_dice": 0.3631,
+      "epoch_sec": 21.2,
+      "val_dice": 0.4374,
+      "val_dice_by_organ": {
+        "heart": 0.4184,
+        "left_kidney": 0.2783,
+        "left_lung": 0.7613,
+        "liver": 0.7275,
+        "right_kidney": 0.0628,
+        "right_lung": 0.5713,
+        "spleen": 0.2422
+      }
+    },
+    {
+      "epoch": 26,
+      "train_loss": 0.034,
+      "train_dice": 0.3554,
+      "epoch_sec": 21.37,
+      "val_dice": 0.3723,
+      "val_dice_by_organ": {
+        "heart": 0.132,
+        "left_kidney": 0.2949,
+        "left_lung": 0.7606,
+        "liver": 0.4226,
+        "right_kidney": 0.2746,
+        "right_lung": 0.4626,
+        "spleen": 0.2585
+      }
+    },
+    {
+      "epoch": 27,
+      "train_loss": 0.0344,
+      "train_dice": 0.3761,
+      "epoch_sec": 21.3,
+      "val_dice": 0.4278,
+      "val_dice_by_organ": {
+        "heart": 0.73,
+        "left_kidney": 0.2095,
+        "left_lung": 0.7398,
+        "liver": 0.158,
+        "right_kidney": 0.0854,
+        "right_lung": 0.8195,
+        "spleen": 0.252
+      }
+    },
+    {
+      "epoch": 28,
+      "train_loss": 0.027,
+      "train_dice": 0.3934,
+      "epoch_sec": 20.85,
+      "val_dice": 0.4693,
+      "val_dice_by_organ": {
+        "heart": 0.5072,
+        "left_kidney": 0.3501,
+        "left_lung": 0.5505,
+        "liver": 0.7331,
+        "right_kidney": 0.0995,
+        "right_lung": 0.7754,
+        "spleen": 0.2694
+      }
+    },
+    {
+      "epoch": 29,
+      "train_loss": 0.0538,
+      "train_dice": 0.3674,
+      "epoch_sec": 20.65,
+      "val_dice": 0.3941,
+      "val_dice_by_organ": {
+        "heart": 0.7466,
+        "left_kidney": 0.4346,
+        "left_lung": 0.4333,
+        "liver": 0.4089,
+        "right_kidney": 0.0478,
+        "right_lung": 0.4743,
+        "spleen": 0.213
+      }
+    },
+    {
+      "epoch": 30,
+      "train_loss": 0.037,
+      "train_dice": 0.3772,
+      "epoch_sec": 21.56,
+      "val_dice": 0.3796,
+      "val_dice_by_organ": {
+        "heart": 0.5111,
+        "left_kidney": 0.3139,
+        "left_lung": 0.6243,
+        "liver": 0.7801,
+        "right_kidney": 0.0819,
+        "right_lung": 0.2956,
+        "spleen": 0.0506
+      }
+    },
+    {
+      "epoch": 31,
+      "train_loss": 0.0377,
+      "train_dice": 0.4111,
+      "epoch_sec": 21.8,
+      "val_dice": 0.4926,
+      "val_dice_by_organ": {
+        "heart": 0.7137,
+        "left_kidney": 0.3115,
+        "left_lung": 0.7598,
+        "liver": 0.5211,
+        "right_kidney": 0.3256,
+        "right_lung": 0.559,
+        "spleen": 0.2576
+      }
+    },
+    {
+      "epoch": 32,
+      "train_loss": 0.033,
+      "train_dice": 0.3938,
+      "epoch_sec": 23.77,
+      "val_dice": 0.3302,
+      "val_dice_by_organ": {
+        "heart": 0.4196,
+        "left_kidney": 0.3354,
+        "left_lung": 0.1527,
+        "liver": 0.3608,
+        "right_kidney": 0.2665,
+        "right_lung": 0.526,
+        "spleen": 0.2507
+      }
+    },
+    {
+      "epoch": 33,
+      "train_loss": 0.0496,
+      "train_dice": 0.3216,
+      "epoch_sec": 20.66,
+      "val_dice": 0.3558,
+      "val_dice_by_organ": {
+        "heart": 0.4751,
+        "left_kidney": 0.121,
+        "left_lung": 0.7783,
+        "liver": 0.1632,
+        "right_kidney": 0.284,
+        "right_lung": 0.5979,
+        "spleen": 0.0711
+      }
+    },
+    {
+      "epoch": 34,
+      "train_loss": 0.0348,
+      "train_dice": 0.3498,
+      "epoch_sec": 21.41,
+      "val_dice": 0.3041,
+      "val_dice_by_organ": {
+        "heart": 0.1981,
+        "left_kidney": 0.347,
+        "left_lung": 0.5082,
+        "liver": 0.1479,
+        "right_kidney": 0.2589,
+        "right_lung": 0.5607,
+        "spleen": 0.1076
+      }
+    },
+    {
+      "epoch": 35,
+      "train_loss": 0.0349,
+      "train_dice": 0.3938,
+      "epoch_sec": 21.34,
+      "val_dice": 0.447,
+      "val_dice_by_organ": {
+        "heart": 0.7839,
+        "left_kidney": 0.096,
+        "left_lung": 0.7912,
+        "liver": 0.5117,
+        "right_kidney": 0.3071,
+        "right_lung": 0.5651,
+        "spleen": 0.0743
+      }
+    },
+    {
+      "epoch": 36,
+      "train_loss": 0.0395,
+      "train_dice": 0.3328,
+      "epoch_sec": 20.92,
+      "val_dice": 0.436,
+      "val_dice_by_organ": {
+        "heart": 0.7039,
+        "left_kidney": 0.3219,
+        "left_lung": 0.4932,
+        "liver": 0.4523,
+        "right_kidney": 0.2975,
+        "right_lung": 0.4804,
+        "spleen": 0.3027
+      }
+    },
+    {
+      "epoch": 37,
+      "train_loss": 0.0448,
+      "train_dice": 0.3619,
+      "epoch_sec": 21.02,
+      "val_dice": 0.4029,
+      "val_dice_by_organ": {
+        "heart": 0.7911,
+        "left_kidney": 0.1678,
+        "left_lung": 0.3329,
+        "liver": 0.3917,
+        "right_kidney": 0.0644,
+        "right_lung": 0.7735,
+        "spleen": 0.2987
+      }
+    },
+    {
+      "epoch": 38,
+      "train_loss": 0.0185,
+      "train_dice": 0.425,
+      "epoch_sec": 21.04,
+      "val_dice": 0.3006,
+      "val_dice_by_organ": {
+        "heart": 0.46,
+        "left_kidney": 0.276,
+        "left_lung": 0.4655,
+        "liver": 0.1188,
+        "right_kidney": 0.1516,
+        "right_lung": 0.4107,
+        "spleen": 0.2217
+      }
+    },
+    {
+      "epoch": 39,
+      "train_loss": 0.0251,
+      "train_dice": 0.4659,
+      "epoch_sec": 21.18,
+      "val_dice": 0.4114,
+      "val_dice_by_organ": {
+        "heart": 0.716,
+        "left_kidney": 0.113,
+        "left_lung": 0.4747,
+        "liver": 0.5281,
+        "right_kidney": 0.105,
+        "right_lung": 0.8417,
+        "spleen": 0.1011
+      }
+    },
+    {
+      "epoch": 40,
+      "train_loss": 0.0374,
+      "train_dice": 0.3879,
+      "epoch_sec": 20.92,
+      "val_dice": 0.4314,
+      "val_dice_by_organ": {
+        "heart": 0.5833,
+        "left_kidney": 0.3543,
+        "left_lung": 0.625,
+        "liver": 0.1837,
+        "right_kidney": 0.3412,
+        "right_lung": 0.588,
+        "spleen": 0.3439
+      }
+    },
+    {
+      "epoch": 41,
+      "train_loss": 0.0486,
+      "train_dice": 0.3105,
+      "epoch_sec": 18.89,
+      "val_dice": 0.3094,
+      "val_dice_by_organ": {
+        "heart": 0.7903,
+        "left_kidney": 0.3623,
+        "left_lung": 0.1256,
+        "liver": 0.5193,
+        "right_kidney": 0.0618,
+        "right_lung": 0.1772,
+        "spleen": 0.129
+      }
+    },
+    {
+      "epoch": 42,
+      "train_loss": 0.0358,
+      "train_dice": 0.3997,
+      "epoch_sec": 17.25,
+      "val_dice": 0.4087,
+      "val_dice_by_organ": {
+        "heart": 0.4423,
+        "left_kidney": 0.4109,
+        "left_lung": 0.7548,
+        "liver": 0.7152,
+        "right_kidney": 0.0588,
+        "right_lung": 0.4279,
+        "spleen": 0.0511
+      }
+    },
+    {
+      "epoch": 43,
+      "train_loss": 0.0268,
+      "train_dice": 0.3998,
+      "epoch_sec": 17.35,
+      "val_dice": 0.2448,
+      "val_dice_by_organ": {
+        "heart": 0.4413,
+        "left_kidney": 0.1941,
+        "left_lung": 0.2767,
+        "liver": 0.171,
+        "right_kidney": 0.0658,
+        "right_lung": 0.4999,
+        "spleen": 0.0648
+      }
+    },
+    {
+      "epoch": 44,
+      "train_loss": 0.0284,
+      "train_dice": 0.3927,
+      "epoch_sec": 17.28,
+      "val_dice": 0.5257,
+      "val_dice_by_organ": {
+        "heart": 0.5129,
+        "left_kidney": 0.4954,
+        "left_lung": 0.6131,
+        "liver": 0.7253,
+        "right_kidney": 0.3608,
+        "right_lung": 0.6256,
+        "spleen": 0.3471
+      }
+    },
+    {
+      "epoch": 45,
+      "train_loss": 0.0353,
+      "train_dice": 0.3511,
+      "epoch_sec": 17.85,
+      "val_dice": 0.4657,
+      "val_dice_by_organ": {
+        "heart": 0.5219,
+        "left_kidney": 0.3469,
+        "left_lung": 0.6407,
+        "liver": 0.7687,
+        "right_kidney": 0.3479,
+        "right_lung": 0.3668,
+        "spleen": 0.267
+      }
+    },
+    {
+      "epoch": 46,
+      "train_loss": 0.0427,
+      "train_dice": 0.3818,
+      "epoch_sec": 17.11,
+      "val_dice": 0.4487,
+      "val_dice_by_organ": {
+        "heart": 0.1276,
+        "left_kidney": 0.4095,
+        "left_lung": 0.8407,
+        "liver": 0.7788,
+        "right_kidney": 0.0701,
+        "right_lung": 0.8418,
+        "spleen": 0.0724
+      }
+    },
+    {
+      "epoch": 47,
+      "train_loss": 0.0222,
+      "train_dice": 0.4096,
+      "epoch_sec": 17.21,
+      "val_dice": 0.3435,
+      "val_dice_by_organ": {
+        "heart": 0.1102,
+        "left_kidney": 0.4817,
+        "left_lung": 0.6384,
+        "liver": 0.0791,
+        "right_kidney": 0.134,
+        "right_lung": 0.7927,
+        "spleen": 0.1683
+      }
+    },
+    {
+      "epoch": 48,
+      "train_loss": 0.0419,
+      "train_dice": 0.4149,
+      "epoch_sec": 17.22,
+      "val_dice": 0.3817,
+      "val_dice_by_organ": {
+        "heart": 0.3977,
+        "left_kidney": 0.0085,
+        "left_lung": 0.8696,
+        "liver": 0.0396,
+        "right_kidney": 0.1965,
+        "right_lung": 0.8624,
+        "spleen": 0.2974
+      }
+    },
+    {
+      "epoch": 49,
+      "train_loss": 0.0529,
+      "train_dice": 0.3517,
+      "epoch_sec": 17.16,
+      "val_dice": 0.4552,
+      "val_dice_by_organ": {
+        "heart": 0.7208,
+        "left_kidney": 0.1608,
+        "left_lung": 0.5365,
+        "liver": 0.762,
+        "right_kidney": 0.2958,
+        "right_lung": 0.595,
+        "spleen": 0.1158
+      }
+    }
+  ]
+}

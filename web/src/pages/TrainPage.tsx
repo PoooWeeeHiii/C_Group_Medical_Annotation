@@ -24,8 +24,13 @@ export function TrainPage({ refreshKey }: { refreshKey: number }) {
       const list = await apiGet<{ items?: TrainJob[] }>("/api/train");
       const items = list.items || [];
       setJobs(items);
-      setActiveJob(items[0] || null);
-      return items[0] || null;
+      // Prefer Person B completed jobs with Val Dice for the summary panel.
+      const preferred =
+        items.find((item) => item.status === "completed" && item.metrics?.best_val_dice != null) ||
+        items[0] ||
+        null;
+      setActiveJob(preferred);
+      return preferred;
     }
     const data = await apiGet<{ job: TrainJob }>(`/api/train/${jobId}`);
     setActiveJob(data.job);
@@ -125,8 +130,8 @@ export function TrainPage({ refreshKey }: { refreshKey: number }) {
         <section className="panel">
           <h2>训练配置</h2>
           <p className="panel-lead">
-            基于导出的 nnUNet 目录训练平台 <strong>2.5D U-Net</strong>
-            （邻层上下文 + 按类采样 + 推理 3D 后处理）。
+            下方列表已包含 Person B 完成的 <strong>脾 nnUNet / Plan A 四器官 / DeepEdit</strong> 任务。
+            也可基于导出 Dataset 启动平台 <strong>2.5D U-Net</strong> 新训练。
           </p>
           <form className="toolbar-row inference-toolbar" style={{ marginTop: 14, flexWrap: "wrap", gap: 10 }} onSubmit={onStart}>
             <label className="field">
@@ -232,13 +237,16 @@ export function TrainPage({ refreshKey }: { refreshKey: number }) {
 
       <section className="panel" style={{ marginTop: 18 }}>
         <h2>训练任务列表</h2>
+        <p className="panel-lead">含平台 U-Net 任务与 Person B 本地已训完模型（只读摘要）。</p>
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>Job</th>
+                <th>来源</th>
                 <th>Dataset</th>
                 <th>Model</th>
+                <th>Val Dice</th>
                 <th>状态</th>
                 <th>Epoch</th>
                 <th>操作</th>
@@ -246,13 +254,23 @@ export function TrainPage({ refreshKey }: { refreshKey: number }) {
             </thead>
             <tbody>
               {jobs.length ? (
-                jobs.map((item) => (
+                jobs.map((item) => {
+                  const source = String(item.metrics?.source || (item.job_id.startsWith("TrainJob_PersonB") ? "person_b" : "platform"));
+                  const dice =
+                    item.val_dice ??
+                    item.metrics?.best_val_dice ??
+                    null;
+                  return (
                   <tr key={item.job_id}>
                     <td>
                       <strong>{item.job_id}</strong>
                     </td>
+                    <td>
+                      <span className="status-badge">{source}</span>
+                    </td>
                     <td>{item.dataset_id || "-"}</td>
                     <td>{item.registered_model_id || item.model_id || "-"}</td>
+                    <td>{dice != null ? Number(dice).toFixed(4) : "-"}</td>
                     <td>
                       <span className="status-badge">{item.status}</span>
                     </td>
@@ -276,10 +294,11 @@ export function TrainPage({ refreshKey }: { refreshKey: number }) {
                       </button>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               ) : (
                 <tr>
-                  <td colSpan={6}>
+                  <td colSpan={8}>
                     <div className="placeholder">暂无训练任务。</div>
                   </td>
                 </tr>

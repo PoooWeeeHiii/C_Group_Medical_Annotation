@@ -1,0 +1,30 @@
+{
+  "format": "monai_unet_checkpoint",
+  "path": "models/deepedit/deepedit_unet.pth",
+  "in_channels": 4,
+  "out_channels": 2,
+  "channels": [
+    16,
+    32,
+    64,
+    128,
+    256
+  ],
+  "strides": [
+    2,
+    2,
+    2,
+    2
+  ],
+  "num_res_units": 2,
+  "strict": true,
+  "organs": [
+    "heart",
+    "liver",
+    "spleen",
+    "left_lung",
+    "right_lung",
+    "left_kidney",
+    "right_kidney"
+  ]
+}

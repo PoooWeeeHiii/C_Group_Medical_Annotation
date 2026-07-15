@@ -4548,6 +4548,7 @@ async function hydrateVersions() {
 
 function renderTrain() {
   const job = state.trainJob;
+  const jobs = state.trainJobs || [];
   const exportId = state.datasetExportResult?.dataset_id || "";
   const history = Array.isArray(job?.metrics?.history) ? job.metrics.history : [];
   const chart = history.length
@@ -4558,11 +4559,27 @@ function renderTrain() {
     : `<div class="placeholder compact">训练开始后显示 Val Dice</div>`;
   const logs = (job?.logs || []).slice(-40).join("\n") || "等待开始训练…\n先在 Dataset 导出页 materialize，再填写 dataset_id。";
   const status = job?.status || "idle";
+  const jobRows = jobs.length
+    ? jobs.map((item) => {
+        const source = item.metrics?.source || (String(item.job_id || "").startsWith("TrainJob_PersonB") ? "person_b" : "platform");
+        const dice = item.val_dice ?? item.metrics?.best_val_dice;
+        return `<tr>
+          <td><strong>${escapeHtml(item.job_id)}</strong></td>
+          <td><span class="status-badge">${escapeHtml(source)}</span></td>
+          <td>${escapeHtml(item.dataset_id || "-")}</td>
+          <td>${escapeHtml(item.registered_model_id || item.model_id || "-")}</td>
+          <td>${dice != null ? Number(dice).toFixed(4) : "-"}</td>
+          <td><span class="status-badge">${escapeHtml(item.status || "-")}</span></td>
+          <td>${item.current_epoch ?? "-"} / ${item.epochs ?? "-"}</td>
+          <td><button class="ghost-button" data-select-train="${escapeHtml(item.job_id)}">查看</button></td>
+        </tr>`;
+      }).join("")
+    : `<tr><td colspan="8"><div class="placeholder">暂无训练任务。</div></td></tr>`;
   return `
     <div class="grid cols-2">
       <section class="panel">
         <h2>训练配置</h2>
-        <p class="panel-lead">基于导出的 nnUNet 目录训练平台 <strong>2.5D U-Net</strong>（邻层上下文 + 按类采样 + 推理 3D 后处理）。正式高精度分割请优先用 TotalSeg / nnUNet。</p>
+        <p class="panel-lead">下方列表已包含 Person B 完成的 <strong>脾 nnUNet / Plan A 四器官 / DeepEdit</strong>。也可启动平台 <strong>2.5D U-Net</strong> 新训练。</p>
         <div class="toolbar-row inference-toolbar" style="margin-top:14px; flex-wrap:wrap; gap:10px">
           <div class="field"><label>Dataset ID</label><input id="trainDatasetId" value="${escapeHtml(exportId)}" placeholder="Dataset0001" /></div>
           <div class="field"><label>Model ID</label><input id="trainModelId" value="${escapeHtml(job?.model_id || "")}" placeholder="自动生成" /></div>
@@ -4587,9 +4604,21 @@ function renderTrain() {
           <div class="meta-line"><span>epoch</span><strong>${job?.current_epoch ?? "-"}</strong></div>
           <div class="meta-line"><span>train_loss</span><strong>${job?.train_loss != null ? Number(job.train_loss).toFixed(4) : "-"}</strong></div>
           <div class="meta-line"><span>val_dice</span><strong>${job?.val_dice != null ? Number(job.val_dice).toFixed(4) : "-"}</strong></div>
+          <div class="meta-line"><span>best_val_dice</span><strong>${job?.metrics?.best_val_dice != null ? Number(job.metrics.best_val_dice).toFixed(4) : "-"}</strong></div>
         </div>
       </section>
     </div>
+    <section class="panel" style="margin-top:18px">
+      <h2>训练任务列表</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Job</th><th>来源</th><th>Dataset</th><th>Model</th><th>Val Dice</th><th>状态</th><th>Epoch</th><th>操作</th></tr>
+          </thead>
+          <tbody>${jobRows}</tbody>
+        </table>
+      </div>
+    </section>
     <section class="panel" style="margin-top:18px">
       <h2>训练日志</h2>
       <div class="log-box" id="trainLogBox">${escapeHtml(logs)}</div>
@@ -4632,11 +4661,16 @@ async function refreshTrainJob(jobId) {
   if (!id) {
     const list = await apiGet("/api/train");
     state.trainJobs = list.items || [];
-    if (state.trainJobs[0]) state.trainJob = state.trainJobs[0];
+    const preferred =
+      state.trainJobs.find((item) => item.status === "completed" && item.metrics?.best_val_dice != null) ||
+      state.trainJobs[0];
+    if (preferred) state.trainJob = preferred;
     return state.trainJob;
   }
   const data = await apiGet(`/api/train/${id}`);
   state.trainJob = data.job;
+  const others = (state.trainJobs || []).filter((item) => item.job_id !== data.job.job_id);
+  state.trainJobs = [data.job, ...others];
   return data.job;
 }
 
@@ -5648,6 +5682,18 @@ function render() {
       }
     });
   }
+  document.querySelectorAll("[data-select-train]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const jobId = button.getAttribute("data-select-train");
+      if (!jobId) return;
+      try {
+        await refreshTrainJob(jobId);
+        render();
+      } catch (error) {
+        showToast(error.message || "加载训练任务失败");
+      }
+    });
+  });
   const renderAnnotation3DButton = $("[data-render-annotation-3d]");
   if (renderAnnotation3DButton) {
     renderAnnotation3DButton.addEventListener("click", renderAnnotationMaskIn3D);

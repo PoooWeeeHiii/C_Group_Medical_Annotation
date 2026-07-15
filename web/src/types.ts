@@ -117,11 +117,14 @@ export interface TrainJob {
   checkpoint?: string | null;
   error?: string | null;
   message?: string;
-  metrics?: {
-    best_val_dice?: number;
-    model_id?: string;
-    history?: Array<{ epoch: number; val_dice?: number; train_loss?: number }>;
-  };
+    metrics?: {
+      best_val_dice?: number;
+      model_id?: string;
+      source?: string;
+      organ?: string;
+      label_type?: string;
+      history?: Array<{ epoch: number; val_dice?: number; train_loss?: number }>;
+    };
   log_tail?: string[];
 }
 

@@ -55,13 +55,23 @@ models/**
 !models/README.md
 !models/*.md
 !models/.gitkeep
+# Explicitly track Person B shipped weights (user requested)
+!models/deepedit/
+!models/deepedit/deepedit_unet.pth
+!models/deepedit/config.json
+!models/deepedit/deepedit_unet.train_meta.json
+!models/deepedit/README.md
 *.pt
 *.pth
 *.ckpt
 *.onnx
 *.h5
+!ai/checkpoints/ModelUNet_PersonB_Demo.pt
+!deliverables/deepedit_for_person_a/deepedit_unet.pth
 checkpoints/
 ai/checkpoints/
+!ai/checkpoints/
+!ai/checkpoints/ModelUNet_PersonB_Demo.pt
 ai/runs/
 wandb/
 
