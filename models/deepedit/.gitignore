@@ -1,0 +1,6 @@
+# Keep DeepEdit runtime files trackable when users force-sync weights.
+!.gitignore
+!README.md
+!config.json
+!deepedit_unet.pth
+!deepedit_unet.train_meta.json
